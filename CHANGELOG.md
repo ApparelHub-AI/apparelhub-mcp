@@ -27,6 +27,9 @@ this package implements tool surface **v1**.
   7-phase pipeline: correct create field names, two-phase mockup poll, variants-before-sync,
   fulfillment-before-ecommerce, draft-not-live default, pricing-floor enforcement, and the
   AQUA-vs-Navy variant guard.
+- Systems of action: `analyze_what_works`, `auto_optimize_listings`, `cascade_price_change`,
+  `recover_from_outage`. Own-account analytics, dry-run-by-default mutations that only take safe
+  actions (archive not delete, keep listing state, respect floors), and failed-sync recovery.
 - CI (build + lint + test on Node 20/22) and a stubbed npm-publish workflow.
 
 ## [0.1.0] - unreleased
