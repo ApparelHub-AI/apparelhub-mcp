@@ -16,6 +16,8 @@ this package implements tool surface **v1**.
   local-image bridge scaffold.
 - Read tools: `list_my_stores`, `list_my_designs`, `list_my_products`, `list_my_orders`,
   `get_order_details`.
+- Catalog tools: `browse_catalog`, `get_garment_details`, `recommend_garment`, with embedded
+  garment knowledge (pricing floors, quality tiers, the BC 3001 AQUA-vs-Navy variant trap).
 - CI (build + lint + test on Node 20/22) and a stubbed npm-publish workflow.
 
 ## [0.1.0] - unreleased

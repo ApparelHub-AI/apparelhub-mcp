@@ -54,3 +54,17 @@ export function apiRecording(raw: unknown): { api: ApiClient; calls: RecordedCal
   });
   return { api, calls };
 }
+
+/** An ApiClient that resolves a SEQUENCE of JSON bodies (status 200), one per request, and
+ *  records the calls — for tools that make several API calls (resolve provider, then fetch). */
+export function apiSequence(bodies: unknown[]): { api: ApiClient; calls: RecordedCall[] } {
+  const { fetchImpl, calls } = queueFetch(bodies.map((b) => jsonResponse(200, b)));
+  const api = new ApiClient({
+    apiKey: 'k',
+    baseUrl: 'https://api.example.test/agents/v1',
+    userAgent: 't',
+    fetchImpl,
+    sleepImpl: noSleep,
+  });
+  return { api, calls };
+}
