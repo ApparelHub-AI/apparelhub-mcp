@@ -14,7 +14,18 @@ import { AhError } from '../errors.js';
 const MAKE_TRANSPARENT = fileURLToPath(
   new URL('../../python/make_transparent.py', import.meta.url),
 );
+const IMAGE_STATS = fileURLToPath(new URL('../../python/image_stats.py', import.meta.url));
 const PYTHON = process.env.APPARELHUB_MCP_PYTHON || 'python3';
+
+export interface ImageStats {
+  width: number;
+  height: number;
+  mode: string;
+  has_alpha: boolean;
+  transparent_ratio: number;
+  corner_alpha: number[];
+  premultiplied_white: boolean;
+}
 
 export interface TransparencyResult {
   outputPath: string;
@@ -29,6 +40,8 @@ export interface Imaging {
   makeTransparent(inputPath: string): Promise<TransparencyResult>;
   readBytes(path: string): Promise<Uint8Array>;
   imageSize(path: string): Promise<{ width: number; height: number } | undefined>;
+  /** Full quality stats (alpha, transparency, premultiply). Undefined if Python/Pillow missing. */
+  imageStats(path: string): Promise<ImageStats | undefined>;
   ocr(imagePath: string): Promise<{ available: boolean; text: string }>;
   cleanup(paths: string[]): Promise<void>;
 }
@@ -129,6 +142,21 @@ export class LocalImaging implements Imaging {
       return undefined;
     }
     return undefined;
+  }
+
+  async imageStats(path: string): Promise<ImageStats | undefined> {
+    let r: RunResult;
+    try {
+      r = await run(PYTHON, [IMAGE_STATS, path]);
+    } catch {
+      return undefined;
+    }
+    if (r.code !== 0) return undefined;
+    try {
+      return JSON.parse(r.stdout.trim()) as ImageStats;
+    } catch {
+      return undefined;
+    }
   }
 
   async ocr(imagePath: string): Promise<{ available: boolean; text: string }> {
