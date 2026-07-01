@@ -1,5 +1,5 @@
 import { vi } from 'vitest';
-import type { FetchLike } from '../../src/http/client.js';
+import { ApiClient, type FetchLike } from '../../src/http/client.js';
 
 export function jsonResponse(
   status: number,
@@ -29,3 +29,28 @@ export function queueFetch(queue: Response[]): { fetchImpl: FetchLike; calls: Re
 }
 
 export const noSleep = async (_ms: number): Promise<void> => {};
+
+/** An ApiClient whose next request resolves to `raw` (status 200). */
+export function apiReturning(raw: unknown): ApiClient {
+  const { fetchImpl } = queueFetch([jsonResponse(200, raw)]);
+  return new ApiClient({
+    apiKey: 'k',
+    baseUrl: 'https://api.example.test/agents/v1',
+    userAgent: 't',
+    fetchImpl,
+    sleepImpl: noSleep,
+  });
+}
+
+/** An ApiClient that resolves to `raw` and records the calls it received (for URL asserts). */
+export function apiRecording(raw: unknown): { api: ApiClient; calls: RecordedCall[] } {
+  const { fetchImpl, calls } = queueFetch([jsonResponse(200, raw)]);
+  const api = new ApiClient({
+    apiKey: 'k',
+    baseUrl: 'https://api.example.test/agents/v1',
+    userAgent: 't',
+    fetchImpl,
+    sleepImpl: noSleep,
+  });
+  return { api, calls };
+}
