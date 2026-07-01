@@ -6,9 +6,20 @@ import { SERVER_VERSION, TOOL_SURFACE_VERSION } from './version.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const { server } = createServer(config);
+  const { server, telemetry } = createServer(config);
   const transport = new StdioServerTransport();
   await server.connect(transport);
+
+  // Best-effort flush of the buffered telemetry signal on shutdown (fire-and-forget).
+  process.on('beforeExit', () => {
+    void telemetry.flush();
+  });
+  for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+    process.on(sig, () => {
+      void telemetry.flush();
+      process.exit(0);
+    });
+  }
 
   // stdout is the MCP protocol channel — all logging goes to stderr.
   const keyNote = config.apiKey

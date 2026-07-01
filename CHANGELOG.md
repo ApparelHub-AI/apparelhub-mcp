@@ -33,6 +33,9 @@ this package implements tool surface **v1**.
 - Safety tools: `verify_design_quality` (local QC gate: alpha/corners/premultiply, resolution,
   detected text; bundled `image_stats.py`) and `check_design_compliance` (advisory trademark /
   prohibited-content text heuristic with a clear disclaimer).
+- Telemetry: a minimal, privacy-bounded per-tool-call signal (tool, outcome, error code, latency,
+  and a strict allowlist of coarse features), buffered + fire-and-forget, off via
+  `APPARELHUB_MCP_TELEMETRY=off`. The ingest endpoint is a pending backend workstream.
 - CI (build + lint + test on Node 20/22) and a stubbed npm-publish workflow.
 
 ## [0.1.0] - unreleased
