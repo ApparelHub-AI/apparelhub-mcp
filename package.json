@@ -1,0 +1,68 @@
+{
+  "name": "@apparelhub/mcp-server",
+  "version": "0.1.0",
+  "description": "ApparelHub MCP server: workflow-level tools that let an AI agent design apparel, build products, and sync them to sales channels through the ApparelHub platform.",
+  "type": "module",
+  "bin": {
+    "apparelhub-mcp": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "python",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/postbuild.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "start": "node dist/index.js",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "apparelhub",
+    "print-on-demand",
+    "ecommerce",
+    "ai-agents",
+    "agentic-commerce"
+  ],
+  "license": "MIT",
+  "author": "ApparelHub",
+  "homepage": "https://apparelhub.ai/agents",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ApparelHub-AI/apparelhub-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ApparelHub-AI/apparelhub-mcp/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.1.0",
+    "@vitest/coverage-v8": "^4.1.9",
+    "eslint": "^10.6.0",
+    "prettier": "^3.9.4",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.62.1",
+    "vitest": "^4.1.9"
+  }
+}

@@ -1,0 +1,22 @@
+# Changelog
+
+All notable changes to `@apparelhub/mcp-server` are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to follow
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+The agent-facing **tool-surface** contract is versioned separately from the package (spec §10):
+this package implements tool surface **v1**.
+
+## [Unreleased]
+
+### Added
+
+- Foundation: MCP server over stdio, connection-level API-key auth, retry-aware REST client,
+  structured error contract, progress-notification helper, telemetry opt-out shell, and the
+  local-image bridge scaffold.
+- First read tool: `list_my_stores`.
+- CI (build + lint + test on Node 20/22) and a stubbed npm-publish workflow.
+
+## [0.1.0] - unreleased
+
+Initial scaffold.

@@ -1,0 +1,40 @@
+name: Publish to npm
+
+# Publishes @apparelhub/mcp-server when a GitHub Release is published, or on manual dispatch.
+#
+# STUBBED until credentials are configured: without an `NPM_TOKEN` repo secret this runs
+# `npm publish --dry-run` (proves the tarball packs correctly) and does NOT publish. Add the
+# NPM_TOKEN secret later to switch on real publishing — no other change required.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # npm provenance (OIDC), used once NPM_TOKEN is set
+
+jobs:
+  publish:
+    name: Build, test, publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - name: Publish (or dry-run if NPM_TOKEN is not configured)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN}" ]; then
+            echo "::warning title=npm publish stubbed::NPM_TOKEN secret is not set. Running 'npm publish --dry-run' only. Add the NPM_TOKEN repo secret to enable real publishing."
+            npm publish --dry-run --access public
+          else
+            npm publish --provenance --access public
+          fi
