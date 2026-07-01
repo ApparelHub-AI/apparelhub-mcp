@@ -30,6 +30,9 @@ this package implements tool surface **v1**.
 - Systems of action: `analyze_what_works`, `auto_optimize_listings`, `cascade_price_change`,
   `recover_from_outage`. Own-account analytics, dry-run-by-default mutations that only take safe
   actions (archive not delete, keep listing state, respect floors), and failed-sync recovery.
+- Safety tools: `verify_design_quality` (local QC gate: alpha/corners/premultiply, resolution,
+  detected text; bundled `image_stats.py`) and `check_design_compliance` (advisory trademark /
+  prohibited-content text heuristic with a clear disclaimer).
 - CI (build + lint + test on Node 20/22) and a stubbed npm-publish workflow.
 
 ## [0.1.0] - unreleased

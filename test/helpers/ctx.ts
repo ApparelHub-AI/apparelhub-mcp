@@ -17,6 +17,7 @@ const throwingImaging: Imaging = {
     throw new Error('imaging not provided to this test');
   },
   imageSize: async () => undefined,
+  imageStats: async () => undefined,
   ocr: async () => ({ available: false, text: '' }),
   cleanup: async () => {},
 };
