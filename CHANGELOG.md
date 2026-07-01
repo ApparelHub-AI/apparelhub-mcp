@@ -14,7 +14,8 @@ this package implements tool surface **v1**.
 - Foundation: MCP server over stdio, connection-level API-key auth, retry-aware REST client,
   structured error contract, progress-notification helper, telemetry opt-out shell, and the
   local-image bridge scaffold.
-- First read tool: `list_my_stores`.
+- Read tools: `list_my_stores`, `list_my_designs`, `list_my_products`, `list_my_orders`,
+  `get_order_details`.
 - CI (build + lint + test on Node 20/22) and a stubbed npm-publish workflow.
 
 ## [0.1.0] - unreleased
