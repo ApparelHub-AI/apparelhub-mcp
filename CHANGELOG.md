@@ -18,6 +18,10 @@ this package implements tool surface **v1**.
   `get_order_details`.
 - Catalog tools: `browse_catalog`, `get_garment_details`, `recommend_garment`, with embedded
   garment knowledge (pricing floors, quality tiers, the BC 3001 AQUA-vs-Navy variant trap).
+- Design tools: `design_apparel` + `iterate_design` and the split primitives `generate_image`,
+  `process_transparency`, `verify_design_text`. Async-generation polling, local transparency
+  keying (bundled `make_transparent.py`) with a dependency-named degrade notice, local OCR text
+  detection, and the placement-dimensions helper.
 - CI (build + lint + test on Node 20/22) and a stubbed npm-publish workflow.
 
 ## [0.1.0] - unreleased

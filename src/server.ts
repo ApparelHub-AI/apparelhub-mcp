@@ -8,6 +8,7 @@ import type { Config } from './config.js';
 import { ApiClient, type FetchLike } from './http/client.js';
 import { ProgressReporter, type SendNotification } from './progress.js';
 import { Telemetry } from './telemetry.js';
+import { LocalImaging, type Imaging } from './image/imaging.js';
 import { ToolRegistry } from './tools/registry.js';
 import { allTools } from './tools/index.js';
 import { toErrorPayload } from './errors.js';
@@ -22,6 +23,7 @@ export interface CreatedServer {
 export interface ServerDeps {
   fetchImpl?: FetchLike;
   sleepImpl?: (ms: number) => Promise<void>;
+  imaging?: Imaging;
 }
 
 export function createServer(config: Config, deps: ServerDeps = {}): CreatedServer {
@@ -33,6 +35,7 @@ export function createServer(config: Config, deps: ServerDeps = {}): CreatedServ
     sleepImpl: deps.sleepImpl,
   });
   const telemetry = new Telemetry(config.telemetryEnabled);
+  const imaging = deps.imaging ?? new LocalImaging();
   const registry = new ToolRegistry();
   registry.registerAll(allTools());
 
@@ -51,7 +54,7 @@ export function createServer(config: Config, deps: ServerDeps = {}): CreatedServ
       extra.sendNotification as unknown as SendNotification,
       token,
     );
-    const ctx: ToolContext = { api, progress, telemetry, config, signal: extra.signal };
+    const ctx: ToolContext = { api, progress, telemetry, config, imaging, signal: extra.signal };
 
     const started = Date.now();
     try {
