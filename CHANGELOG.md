@@ -36,6 +36,9 @@ this package implements tool surface **v1**.
 - Telemetry: a minimal, privacy-bounded per-tool-call signal (tool, outcome, error code, latency,
   and a strict allowlist of coarse features), buffered + fire-and-forget, off via
   `APPARELHUB_MCP_TELEMETRY=off`. The ingest endpoint is a pending backend workstream.
+- Docs: full README (install + MCP config snippets for Claude Code / Cursor / Aider / claude.ai,
+  env vars, privacy, skill-vs-MCP), a tool reference (`docs/TOOLS.md`), and a release runbook
+  (`docs/RELEASING.md`). CI actions bumped to v5.
 - CI (build + lint + test on Node 20/22) and a stubbed npm-publish workflow.
 
 ## [0.1.0] - unreleased
