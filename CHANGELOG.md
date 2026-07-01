@@ -22,6 +22,11 @@ this package implements tool surface **v1**.
   `process_transparency`, `verify_design_text`. Async-generation polling, local transparency
   keying (bundled `make_transparent.py`) with a dependency-named degrade notice, local OCR text
   detection, and the placement-dimensions helper.
+- Product tools: `ship_product` + `update_product` / `delete_product` and split primitives
+  `create_product`, `add_variants`, `sync_to_fulfillment`, `sync_to_channel`. Encodes the
+  7-phase pipeline: correct create field names, two-phase mockup poll, variants-before-sync,
+  fulfillment-before-ecommerce, draft-not-live default, pricing-floor enforcement, and the
+  AQUA-vs-Navy variant guard.
 - CI (build + lint + test on Node 20/22) and a stubbed npm-publish workflow.
 
 ## [0.1.0] - unreleased

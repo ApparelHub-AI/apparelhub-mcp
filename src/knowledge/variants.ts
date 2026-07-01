@@ -1,0 +1,85 @@
+// Variant resolution: map requested (color, size) pairs to provider_variant_ids from a
+// garment's variant matrix, and guard the BC 3001 AQUA-vs-Navy trap (Lesson 7).
+
+export interface MatrixVariant {
+  provider_variant_id: number;
+  color?: string;
+  size?: string;
+  cost?: number;
+}
+
+export interface RequestedVariant {
+  color: string;
+  sizes: string[];
+  price?: number;
+  /** Explicit ids (zipped with sizes) — overrides name resolution. */
+  provider_variant_ids?: number[];
+}
+
+export interface ResolvedVariant {
+  name: string;
+  color: string;
+  size: string;
+  provider_variant_id: number;
+  price?: number;
+}
+
+export interface ResolveResult {
+  resolved: ResolvedVariant[];
+  warnings: string[];
+  unresolved: { color: string; size: string }[];
+}
+
+// BC 3001 (product_ref_id "71") variant ids 4021-4025 render AQUA — a classic mislabel-as-Navy trap.
+const BC3001_AQUA_IDS = new Set([4021, 4022, 4023, 4024, 4025]);
+
+function norm(s?: string): string {
+  return (s ?? '').toLowerCase().trim();
+}
+
+function sameColor(matrix?: string, requested?: string): boolean {
+  const a = norm(matrix);
+  const b = norm(requested);
+  return !!a && !!b && (a === b || a.includes(b) || b.includes(a));
+}
+
+function sameSize(matrix?: string, requested?: string): boolean {
+  return norm(matrix) === norm(requested);
+}
+
+export function resolveVariants(
+  matrix: MatrixVariant[],
+  requested: RequestedVariant[],
+  productRefId?: string,
+  defaultPrice?: number,
+): ResolveResult {
+  const resolved: ResolvedVariant[] = [];
+  const warnings: string[] = [];
+  const unresolved: { color: string; size: string }[] = [];
+
+  for (const req of requested) {
+    const price = req.price ?? defaultPrice;
+    req.sizes.forEach((size, i) => {
+      let vid: number | undefined;
+      if (req.provider_variant_ids && req.provider_variant_ids[i] !== undefined) {
+        vid = req.provider_variant_ids[i];
+      } else {
+        const match = matrix.find((m) => sameColor(m.color, req.color) && sameSize(m.size, size));
+        vid = match?.provider_variant_id;
+      }
+      if (vid === undefined) {
+        unresolved.push({ color: req.color, size });
+        return;
+      }
+      if (productRefId === '71' && BC3001_AQUA_IDS.has(vid) && /navy/i.test(req.color)) {
+        warnings.push(
+          `Requested "${req.color}" ${size} resolved to variant ${vid}, which is AQUA on BC 3001, not Navy. ` +
+            `Use Heather Midnight Navy (8495-8499) instead.`,
+        );
+      }
+      resolved.push({ name: req.color, color: req.color, size, provider_variant_id: vid, price });
+    });
+  }
+
+  return { resolved, warnings, unresolved };
+}
