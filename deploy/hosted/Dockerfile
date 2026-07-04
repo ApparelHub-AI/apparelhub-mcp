@@ -10,8 +10,9 @@
 # hosted OCR proves worth the image weight.
 FROM public.ecr.aws/lambda/nodejs:22
 
-RUN dnf install -y python3 python3-pip \
-    && pip3 install --no-cache-dir Pillow \
+# Pillow comes from the distro repo, NOT pip: the Lambda base image's python3 ships without
+# a working ssl module, so pip cannot reach PyPI inside the build (observed in CI run 28713648215).
+RUN dnf install -y python3 python3-pillow \
     && dnf clean all
 
 # The bundled handler sits two directories deep so the imaging module's relative
