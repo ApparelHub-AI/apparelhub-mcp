@@ -192,7 +192,13 @@ async function handleInner(
   deps: ServerDeps,
   env: NodeJS.ProcessEnv,
 ): Promise<FunctionUrlResult> {
-  const host = event.headers?.host ?? 'lambda';
+  // Behind CloudFront (mcp.apparelhub.ai) the Lambda Function URL requires its
+  // own Host header, so CloudFront rewrites Host to the *.lambda-url origin and
+  // forwards the branded hostname as X-Forwarded-Host. Prefer that so the OAuth
+  // protected-resource metadata + WWW-Authenticate challenge advertise the
+  // public domain, not the raw Function URL. Direct Function-URL hits (no
+  // CloudFront, no X-Forwarded-Host) fall back to Host unchanged.
+  const host = event.headers?.['x-forwarded-host'] ?? event.headers?.host ?? 'lambda';
 
   // Unauthenticated liveness probe. Reveals nothing beyond liveness.
   if (method === 'GET' && rawPath === '/healthz') {
