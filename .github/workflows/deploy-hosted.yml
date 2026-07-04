@@ -1,0 +1,106 @@
+name: "Deploy hosted MCP server"
+
+# Manual-dispatch deploy of the hosted remote MCP server (Phase 1, #33 / epic #31).
+# Container-image SAM stack: builds the esbuild bundle, docker-builds the image via
+# `sam build`, and deploys with secrets from the GitHub environment.
+#
+# AWS auth mirrors the org's SAM pipeline pattern:
+# OIDC -> Hub IaCProvisioningRole -> role-chain into the target account's IaCProvisioningRole.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        type: choice
+        required: true
+        options:
+          - dev
+          - production
+
+permissions:
+  id-token: write # OIDC
+  contents: read
+
+env:
+  HUB_ROLE_ARN: arn:aws:iam::413277327426:role/IaCProvisioningRole
+
+jobs:
+  deploy:
+    name: "Deploy to ${{ inputs.environment }}"
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Build handler bundle
+        run: |
+          npm ci
+          deploy/hosted/build.sh
+
+      - name: Resolve target AWS account
+        id: acct
+        run: |
+          if [ "${{ inputs.environment }}" = "production" ]; then
+            echo "account=488590374995" >> "$GITHUB_OUTPUT"
+          else
+            echo "account=602216272608" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure AWS credentials (OIDC -> Hub IaCProvisioningRole)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: us-east-1
+          role-to-assume: ${{ env.HUB_ROLE_ARN }}
+          role-duration-seconds: 3600
+          role-skip-session-tagging: true
+          unset-current-credentials: true
+
+      - name: Assume target-account IaCProvisioningRole (role chaining)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: us-east-1
+          role-to-assume: "arn:aws:iam::${{ steps.acct.outputs.account }}:role/IaCProvisioningRole"
+          role-chaining: true
+          role-skip-session-tagging: true
+          role-duration-seconds: 3600
+
+      - name: Setup SAM CLI
+        uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      - name: SAM build (docker image)
+        working-directory: deploy/hosted
+        run: sam build
+
+      - name: SAM deploy
+        working-directory: deploy/hosted
+        run: |
+          sam deploy \
+            --config-env "${{ inputs.environment }}" \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              "ApparelhubApiKey=${{ secrets.APPARELHUB_AGENT_API_KEY }}" \
+              "McpBearer=${{ secrets.MCP_BEARER }}"
+
+      - name: Smoke the deployed endpoint
+        run: |
+          URL=$(aws cloudformation describe-stacks --stack-name apparelhub-mcp-hosted --region us-east-1 \
+            --query "Stacks[0].Outputs[?OutputKey=='FunctionUrl'].OutputValue" --output text)
+          echo "Function URL: $URL"
+          for i in 1 2 3; do
+            BODY=$(curl -s --max-time 30 "${URL}healthz" || true)
+            if [ "$BODY" = '{"ok":true}' ]; then echo "healthz ok"; exit 0; fi
+            sleep 5
+          done
+          echo "healthz smoke FAILED: $BODY"
+          exit 1

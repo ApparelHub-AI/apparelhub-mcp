@@ -1,0 +1,52 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  ApparelHub hosted remote MCP server (Phase 1 of epic #31, ticket #33).
+  Container-image Lambda behind a Function URL serving the tool surface over
+  MCP streamable HTTP (stateless, JSON responses). Static-bearer auth until
+  the Phase 2 OAuth authorization server replaces it.
+
+Parameters:
+  ApparelhubApiKey:
+    Type: String
+    NoEcho: true
+    Description: Platform Agent API key the hosted tools call the platform API with.
+  McpBearer:
+    Type: String
+    NoEcho: true
+    MinLength: 32
+    Description: >-
+      Static bearer secret (Phase 1 interim auth). Accepted as
+      "Authorization: Bearer <secret>" or as a /<secret>/mcp path prefix.
+
+Resources:
+  HostedFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: apparelhub-mcp-hosted
+      Description: Hosted remote MCP server (streamable HTTP, container image with imaging toolchain)
+      PackageType: Image
+      MemorySize: 2048
+      Timeout: 300
+      Environment:
+        Variables:
+          APPARELHUB_API_KEY: !Ref ApparelhubApiKey
+          MCP_BEARER: !Ref McpBearer
+          APPARELHUB_MCP_TELEMETRY: 'off'
+      FunctionUrlConfig:
+        AuthType: NONE
+      Tags:
+        Managed-by: SAM
+        Project: apparelhub-mcp
+        Lifecycle: hosted
+    Metadata:
+      Dockerfile: deploy/hosted/Dockerfile
+      DockerContext: ../..
+      DockerTag: hosted
+
+Outputs:
+  FunctionUrl:
+    Description: Base URL (append /<secret>/mcp for the connector endpoint).
+    Value: !GetAtt HostedFunctionUrl.FunctionUrl
+  FunctionName:
+    Value: !Ref HostedFunction

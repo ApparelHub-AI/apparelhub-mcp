@@ -1,0 +1,5 @@
+# Docker context allowlist for deploy/hosted/Dockerfile (context = repo root).
+# Only the prebuilt bundle and the python helpers enter the image.
+*
+!python/
+!deploy/hosted/build/handler.mjs

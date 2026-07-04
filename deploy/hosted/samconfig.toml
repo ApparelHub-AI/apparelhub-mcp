@@ -1,0 +1,21 @@
+version = 0.1
+
+# Per-environment deploy config for the hosted remote MCP server (#33).
+# Secrets (ApparelhubApiKey, McpBearer) are passed as --parameter-overrides by the
+# deploy workflow from GitHub environment secrets — never from this file.
+
+[dev.deploy.parameters]
+stack_name = "apparelhub-mcp-hosted"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+resolve_s3 = true
+resolve_image_repos = true
+tags = "Managed-by=\"SAM\" Project=\"apparelhub-mcp\" Lifecycle=\"hosted\""
+
+[production.deploy.parameters]
+stack_name = "apparelhub-mcp-hosted"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+resolve_s3 = true
+resolve_image_repos = true
+tags = "Managed-by=\"SAM\" Project=\"apparelhub-mcp\" Lifecycle=\"hosted\""
