@@ -16,8 +16,24 @@ Parameters:
     NoEcho: true
     MinLength: 32
     Description: >-
-      Static bearer secret (Phase 1 interim auth). Accepted as
-      "Authorization: Bearer <secret>" or as a /<secret>/mcp path prefix.
+      Static bearer secret (smoke-test path). Only honored when
+      McpStaticBearerEnabled is 'true'.
+  McpStaticBearerEnabled:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Keep the Phase 0.5 static bearer alive alongside OAuth (dies in Phase 3).
+  McpOauthIssuer:
+    Type: String
+    Default: ''
+    Description: >-
+      OAuth authorization-server issuer (e.g. the platform API origin). Empty
+      disables OAuth mode and the protected-resource metadata.
+  McpServiceKey:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: SERVICE credential for the platform token-resolve endpoint.
 
 Resources:
   HostedFunction:
@@ -32,6 +48,9 @@ Resources:
         Variables:
           APPARELHUB_API_KEY: !Ref ApparelhubApiKey
           MCP_BEARER: !Ref McpBearer
+          MCP_STATIC_BEARER_ENABLED: !Ref McpStaticBearerEnabled
+          MCP_OAUTH_ISSUER: !Ref McpOauthIssuer
+          MCP_SERVICE_KEY: !Ref McpServiceKey
           APPARELHUB_MCP_TELEMETRY: 'off'
       FunctionUrlConfig:
         AuthType: NONE

@@ -90,7 +90,10 @@ jobs:
             --no-fail-on-empty-changeset \
             --parameter-overrides \
               "ApparelhubApiKey=${{ secrets.APPARELHUB_AGENT_API_KEY }}" \
-              "McpBearer=${{ secrets.MCP_BEARER }}"
+              "McpBearer=${{ secrets.MCP_BEARER }}" \
+              "McpStaticBearerEnabled=true" \
+              "McpOauthIssuer=${{ secrets.MCP_OAUTH_ISSUER }}" \
+              "McpServiceKey=${{ secrets.MCP_SERVICE_KEY }}"
 
       - name: Smoke the deployed endpoint
         run: |

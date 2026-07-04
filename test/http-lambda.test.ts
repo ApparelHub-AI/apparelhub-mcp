@@ -1,5 +1,9 @@
-import { describe, it, expect } from 'vitest';
-import { makeHandler, type FunctionUrlEvent } from '../src/http/lambda.js';
+import { beforeEach, describe, it, expect } from 'vitest';
+import {
+  _clearResolveCacheForTests,
+  makeHandler,
+  type FunctionUrlEvent,
+} from '../src/http/lambda.js';
 import { jsonResponse, queueFetch } from './helpers/fakeFetch.js';
 
 // Generic placeholders only (public repo — Rule: no real account data in tests).
@@ -7,6 +11,14 @@ const SECRET = 'a'.repeat(64);
 const ENV = {
   APPARELHUB_API_KEY: 'test-key',
   MCP_BEARER: SECRET,
+  MCP_STATIC_BEARER_ENABLED: 'true',
+  APPARELHUB_MCP_TELEMETRY: 'off',
+} as NodeJS.ProcessEnv;
+
+const OAUTH_ENV = {
+  APPARELHUB_API_KEY: 'deploy-key-must-not-be-used',
+  MCP_OAUTH_ISSUER: 'https://auth.example.test',
+  MCP_SERVICE_KEY: 'svc-key-1',
   APPARELHUB_MCP_TELEMETRY: 'off',
 } as NodeJS.ProcessEnv;
 
@@ -115,5 +127,104 @@ describe('lambda handler MCP flow (stateless, JSON responses)', () => {
     expect(payload.total).toBe(0);
     expect(calls.length).toBeGreaterThan(0);
     expect(calls[0].url).toContain('/product');
+  });
+});
+
+describe('lambda handler OAuth bearer resolution (#41)', () => {
+  beforeEach(() => _clearResolveCacheForTests());
+
+  function toolCall(bearer?: string): FunctionUrlEvent {
+    return postEvent(
+      {
+        jsonrpc: '2.0',
+        id: 7,
+        method: 'tools/call',
+        params: { name: 'list_my_products', arguments: {} },
+      },
+      { bearer },
+    );
+  }
+
+  function resolveOk(): Response {
+    return jsonResponse(200, {
+      api_key: 'user-key-123',
+      user_public_id: 'u-1',
+      scopes: 'mcp',
+      expires_at: '2099-01-01T00:00:00Z',
+    });
+  }
+
+  it('serves protected-resource metadata when OAuth is configured', async () => {
+    const handle = makeHandler({}, OAUTH_ENV);
+    const res = await handle({
+      rawPath: '/.well-known/oauth-protected-resource',
+      headers: { host: 'mcp.example.test' },
+      requestContext: { http: { method: 'GET' } },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.authorization_servers).toEqual(['https://auth.example.test']);
+    expect(body.resource).toBe('https://mcp.example.test');
+  });
+
+  it('404s the metadata when OAuth is not configured', async () => {
+    const handle = makeHandler({}, ENV);
+    const res = await handle({
+      rawPath: '/.well-known/oauth-protected-resource',
+      requestContext: { http: { method: 'GET' } },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('resolves a bearer, uses the RESOLVED key downstream, and caches', async () => {
+    const { fetchImpl, calls } = queueFetch([
+      resolveOk(),
+      jsonResponse(200, []),
+      jsonResponse(200, []),
+    ]);
+    const handle = makeHandler({ fetchImpl }, OAUTH_ENV);
+
+    const res1 = await handle(toolCall('opaque-token-1'));
+    expect(res1.statusCode).toBe(200);
+    expect(calls[0].url).toContain('/service/connector/resolve-token');
+    expect(JSON.stringify(calls[0].init?.headers)).toContain('svc-key-1');
+    // Downstream platform call carries the user connector key, not the deploy key.
+    expect(JSON.stringify(calls[1])).toContain('user-key-123');
+    expect(JSON.stringify(calls[1])).not.toContain('deploy-key-must-not-be-used');
+
+    // Second request with the same token: cache hit — no second resolve call.
+    const res2 = await handle(toolCall('opaque-token-1'));
+    expect(res2.statusCode).toBe(200);
+    const resolveCalls = calls.filter((c) => c.url.includes('resolve-token'));
+    expect(resolveCalls.length).toBe(1);
+  });
+
+  it('maps a resolve rejection to 401 with the discovery challenge', async () => {
+    const { fetchImpl } = queueFetch([jsonResponse(401, { error: 'expired_token' })]);
+    const handle = makeHandler({ fetchImpl }, OAUTH_ENV);
+    const res = await handle(toolCall('opaque-token-expired'));
+    expect(res.statusCode).toBe(401);
+    expect(JSON.parse(res.body).error).toBe('expired_token');
+    expect(res.headers['www-authenticate']).toContain('/.well-known/oauth-protected-resource');
+  });
+
+  it('401s with the discovery challenge when no bearer is presented', async () => {
+    const handle = makeHandler({}, OAUTH_ENV);
+    const res = await handle(toolCall(undefined));
+    expect(res.statusCode).toBe(401);
+    expect(res.headers['www-authenticate']).toContain('resource_metadata');
+  });
+
+  it('fails closed (503) when OAuth is advertised but the resolver credential is missing', async () => {
+    const env = { ...OAUTH_ENV, MCP_SERVICE_KEY: '' } as NodeJS.ProcessEnv;
+    const handle = makeHandler({}, env);
+    const res = await handle(toolCall('some-token'));
+    expect(res.statusCode).toBe(503);
+  });
+
+  it('rejects the static path secret when the static flag is off', async () => {
+    const handle = makeHandler({}, OAUTH_ENV);
+    const res = await handle(postEvent(toolsListReq, { path: `/${SECRET}/mcp` }));
+    expect(res.statusCode).toBe(401);
   });
 });
