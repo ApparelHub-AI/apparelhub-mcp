@@ -1,0 +1,52 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  ApparelHub remote MCP, Phase 0.5 throwaway prototype (epic #31, ticket #38).
+  Stateless streamable-HTTP MCP server on a Lambda Function URL with a static
+  bearer secret. Everything here is disposable; the real service (OAuth, custom
+  domain, container image) is Phase 1+.
+
+Parameters:
+  ApparelhubApiKey:
+    Type: String
+    NoEcho: true
+    Description: >-
+      Platform Agent API key the hosted tools call the platform API with
+      (a single test account for the prototype).
+  McpBearer:
+    Type: String
+    NoEcho: true
+    MinLength: 32
+    Description: >-
+      Static bearer secret. Accepted as "Authorization: Bearer <secret>" or as
+      a /<secret>/mcp path prefix for connector UIs that only take a URL.
+
+Resources:
+  PrototypeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: apparelhub-mcp-prototype
+      Description: Phase 0.5 remote MCP prototype (throwaway; static bearer; test account only)
+      Runtime: nodejs22.x
+      Handler: handler.handler
+      CodeUri: build/
+      MemorySize: 1024
+      Timeout: 300
+      Environment:
+        Variables:
+          APPARELHUB_API_KEY: !Ref ApparelhubApiKey
+          MCP_BEARER: !Ref McpBearer
+          APPARELHUB_MCP_TELEMETRY: 'off'
+      FunctionUrlConfig:
+        AuthType: NONE
+      Tags:
+        Managed-by: SAM
+        Project: apparelhub-mcp
+        Lifecycle: prototype
+
+Outputs:
+  FunctionUrl:
+    Description: Base URL of the prototype (append /<secret>/mcp for the connector endpoint).
+    Value: !GetAtt PrototypeFunctionUrl.FunctionUrl
+  FunctionName:
+    Value: !Ref PrototypeFunction

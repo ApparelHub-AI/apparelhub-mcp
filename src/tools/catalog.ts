@@ -21,7 +21,7 @@ async function resolveProviderUuid(
   providerName: string,
   workspace?: string,
 ): Promise<string> {
-  const raw = await ctx.api.get('merchandise', { workspace, signal: ctx.signal });
+  const raw = await ctx.api.get('merchandise/providers', { workspace, signal: ctx.signal });
   const providers = asArray(raw, 'providers', 'merchandise_providers');
   const target = providerName.toLowerCase();
   for (const p of providers) {
@@ -42,7 +42,7 @@ async function resolveProviderUuid(
 function mapGarment(raw: unknown): Record<string, unknown> {
   const variants = asArray(isRecord(raw) ? raw.variants : undefined);
   return {
-    provider_ref_id: str(raw, 'ref_id', 'product_ref_id', 'id'),
+    provider_ref_id: str(raw, 'provider_ref_id', 'ref_id', 'product_ref_id', 'id'),
     name: str(raw, 'name', 'title'),
     brand: str(raw, 'brand', 'brand_name'),
     category: str(raw, 'category', 'type', 'department'),
@@ -86,7 +86,7 @@ export const browseCatalog = defineTool({
 
 function mapVariant(raw: unknown): Record<string, unknown> {
   return {
-    provider_variant_id: num(raw, 'id', 'variant_id', 'provider_variant_id'),
+    provider_variant_id: num(raw, 'id', 'variant_id', 'provider_variant_id', 'provider_ref_id'),
     color: str(raw, 'color', 'color_name'),
     color_hex: str(raw, 'color_hex', 'hex', 'color_code'),
     size: str(raw, 'size'),
@@ -96,7 +96,7 @@ function mapVariant(raw: unknown): Record<string, unknown> {
 
 function mapTemplate(raw: unknown): Record<string, unknown> {
   return {
-    placement: str(raw, 'placement', 'provider_ref_id', 'type'),
+    placement: str(raw, 'placement', 'provider_location_ref_id', 'provider_ref_id', 'type'),
     area_width: num(raw, 'area_width', 'print_area_width'),
     area_height: num(raw, 'area_height', 'print_area_height'),
     recommended_image_size: {
@@ -127,9 +127,14 @@ export const getGarmentDetails = defineTool({
     const brand = str(g, 'brand', 'brand_name');
     const name = str(g, 'name', 'title');
     const variantsRaw = isRecord(g) ? g.variants : undefined;
-    const templatesRaw = isRecord(g)
-      ? (g.templates ?? g.print_templates ?? g.print_areas)
+    let templatesRaw = isRecord(g)
+      ? (g.templates ?? g.template_details ?? g.print_templates ?? g.print_areas)
       : undefined;
+    if (!asArray(templatesRaw).length) {
+      // Printful details often carry templates per-variant rather than at the top level.
+      const firstVariant = asArray(variantsRaw)[0];
+      if (isRecord(firstVariant)) templatesRaw = firstVariant.templates;
+    }
 
     return {
       garment: {
