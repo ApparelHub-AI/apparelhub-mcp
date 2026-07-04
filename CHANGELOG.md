@@ -9,6 +9,30 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-04
+
+### Fixed
+
+- Catalog provider discovery called `GET /merchandise`, a route that does not exist on the
+  platform (404 -> every `browse_catalog` / `get_garment_details` call failed with `not_found`).
+  The correct route is `GET /merchandise/providers`. Caught by the first real-surface field test
+  of the hosted prototype (#38).
+- Catalog mappers now read the live platform field names: listings carry the garment id as a
+  numeric `provider_ref_id`, detail variants carry their id as `provider_ref_id` with string
+  prices, Printful returns print templates per-variant (top-level `template_details` can be
+  empty), and placement lives under `provider_location_ref_id`. Regression tests mirror the live
+  response shapes.
+
+### Added
+
+- AWS Lambda Function URL entry point (`src/http/lambda.ts`): serves the tool surface over MCP
+  streamable HTTP in stateless mode with JSON responses, static-bearer auth (header or
+  path-embedded), fail-closed configuration, and an unauthenticated liveness probe. Plus a
+  disposable SAM deployment under `deploy/prototype/` (hosted Phase 0.5, #38; the production
+  hosted service with OAuth is the remote-MCP epic #31).
+
+## [0.1.0] - 2026-07-02
+
 ### Added
 
 - Foundation: MCP server over stdio, connection-level API-key auth, retry-aware REST client,
@@ -41,6 +65,3 @@ this package implements tool surface **v1**.
   (`docs/RELEASING.md`). CI actions bumped to v5.
 - CI (build + lint + test on Node 20/22) and a stubbed npm-publish workflow.
 
-## [0.1.0] - unreleased
-
-Initial scaffold.
