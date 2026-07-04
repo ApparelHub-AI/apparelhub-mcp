@@ -40,6 +40,18 @@ function secretsEqual(a: string, b: string): boolean {
   return timingSafeEqual(ha, hb);
 }
 
+/** Redact any secret-length path segment: log only its length + a hash prefix (never the value). */
+function redactPath(path: string): string {
+  return path
+    .split('/')
+    .map((seg) =>
+      seg.length >= MIN_SECRET_LENGTH
+        ? `<seg${seg.length}:${createHash('sha256').update(seg).digest('hex').slice(0, 8)}>`
+        : seg,
+    )
+    .join('/');
+}
+
 function jsonResult(statusCode: number, payload: unknown): FunctionUrlResult {
   return {
     statusCode,
@@ -80,9 +92,31 @@ export function makeHandler(
   env: NodeJS.ProcessEnv = process.env,
 ): (event: FunctionUrlEvent) => Promise<FunctionUrlResult> {
   return async function handle(event: FunctionUrlEvent): Promise<FunctionUrlResult> {
+    const started = Date.now();
     const method = event.requestContext?.http?.method ?? 'GET';
     const rawPath = event.rawPath || '/';
+    const result = await handleInner(event, method, rawPath, deps, env);
+    // One structured line per request; path secrets are redacted to length + hash prefix.
+    console.log(
+      JSON.stringify({
+        method,
+        path: redactPath(rawPath),
+        status: result.statusCode,
+        ms: Date.now() - started,
+      }),
+    );
+    return result;
+  };
+}
 
+async function handleInner(
+  event: FunctionUrlEvent,
+  method: string,
+  rawPath: string,
+  deps: ServerDeps,
+  env: NodeJS.ProcessEnv,
+): Promise<FunctionUrlResult> {
+  {
     // Unauthenticated liveness probe. Reveals nothing beyond liveness.
     if (method === 'GET' && rawPath === '/healthz') {
       return jsonResult(200, { ok: true });
@@ -135,7 +169,7 @@ export function makeHandler(
     } finally {
       await server.close().catch(() => undefined);
     }
-  };
+  }
 }
 
 export const handler = makeHandler();
