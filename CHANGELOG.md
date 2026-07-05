@@ -9,6 +9,21 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-05
+
+### Fixed
+
+- **Transparency keying no longer dead-ends on a tinted green background.** AI image models routinely
+  render the "solid #00FF00" background as a tinted/muted green (e.g. `#80E77B`, `#A6FB93`), which the
+  box keyer's chroma sanity check refused (to protect warm design elements) — with no way to override.
+  A real unattended run got stuck regenerating a pure-monochrome design over and over. `process_transparency`
+  (and `design_apparel`) now **auto-recover** by re-keying in green-dominance mode, which strips a tinted
+  green screen safely (it only clears pixels where green clearly outweighs red *and* blue, so charcoal /
+  white / warm art is preserved), and reports `keying_mode` + a note. New optional `background_mode`
+  (`auto`/`box`/`dominance`) and `force` params let a caller pin the strategy. The generation prompt also
+  pushes harder toward a flat, fully-saturated pure #00FF00 (no gradient/tint) to avoid the situation in
+  the first place.
+
 ## [0.2.0] - 2026-07-05
 
 ### Added

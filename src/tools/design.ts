@@ -49,6 +49,13 @@ interface TransparencyOutcome {
   has_true_alpha: boolean;
   premultiplied_white: boolean;
   corners_clean: boolean;
+  keying_mode: 'box' | 'dominance';
+  note?: string;
+}
+
+interface TransparencyOptions {
+  mode?: 'box' | 'dominance';
+  force?: boolean;
 }
 
 async function processTransparencyImpl(
@@ -56,12 +63,41 @@ async function processTransparencyImpl(
   imageUuid: string,
   imageUrl: string | undefined,
   workspace: string | undefined,
+  opts: TransparencyOptions = {},
 ): Promise<TransparencyOutcome> {
   const url = imageUrl ?? (await resolveImageUrl(ctx, imageUuid, workspace));
   await ctx.progress.report(25, 'Downloading design...');
   const inPath = await ctx.imaging.downloadToTemp(url);
   await ctx.progress.report(50, 'Keying background to transparency...');
-  const t = await ctx.imaging.makeTransparent(inPath);
+
+  let keyingMode: 'box' | 'dominance' = opts.mode ?? 'box';
+  let note: string | undefined;
+  let t;
+  try {
+    t = await ctx.imaging.makeTransparent(inPath, { mode: keyingMode, force: opts.force });
+  } catch (err) {
+    // Self-heal the single most common failure: the AI produced a tinted / muted green (not pure
+    // #00FF00), so the box keyer's sanity check refused it. Green-DOMINANCE keying strips a tinted
+    // green screen safely — it only clears pixels where green clearly outweighs red AND blue, so
+    // charcoal / white / warm art is preserved. Only auto-fall-back when the caller didn't pin a
+    // mode or force (respect an explicit choice). This keeps an unattended run from dead-ending.
+    if (
+      err instanceof AhError &&
+      err.code === 'chroma_background' &&
+      opts.mode === undefined &&
+      !opts.force
+    ) {
+      keyingMode = 'dominance';
+      note =
+        'The generator produced a tinted/muted green background (not pure #00FF00), so the standard keyer was blocked. Re-keyed in green-dominance mode, which strips a tinted green screen safely. If the design contains intentionally bright-green or lime elements, verify they were not affected (verify_design_quality).';
+      await ctx.progress.report(55, 'Tinted background — re-keying in dominance mode...');
+      t = await ctx.imaging.makeTransparent(inPath, { mode: 'dominance' });
+    } else {
+      await ctx.imaging.cleanup([inPath]);
+      throw err;
+    }
+  }
+
   await ctx.progress.report(80, 'Uploading transparent design...');
   const bytes = await ctx.imaging.readBytes(t.outputPath);
   const form = new FormData();
@@ -80,6 +116,8 @@ async function processTransparencyImpl(
     has_true_alpha: true,
     premultiplied_white: true,
     corners_clean: t.cornersClean,
+    keying_mode: keyingMode,
+    ...(note ? { note } : {}),
   };
 }
 
@@ -171,15 +209,32 @@ export const generateImage = defineTool({
 export const processTransparency = defineTool({
   name: 'process_transparency',
   description:
-    'Key a solid background out of a generated image to true RGBA transparency (flood-fill + enclosed-region sweep + tight crop) and upload the result. Runs locally (needs Python + Pillow). Returns a NEW image_uuid.',
+    'Key a solid background out of a generated image to true RGBA transparency (flood-fill + enclosed-region sweep + tight crop) and upload the result. Runs server-side (Python + Pillow). If the generator produced a tinted/muted green instead of pure #00FF00, it auto-recovers by re-keying in green-dominance mode (safe for art with no bright-green/lime elements). Returns a NEW image_uuid plus keying_mode.',
   inputSchema: z.object({
     image_uuid: z.string().min(1),
     image_url: z.string().url().optional().describe('The image URL, if known (else resolved from the uuid).'),
+    background_mode: z
+      .enum(['auto', 'box', 'dominance'])
+      .optional()
+      .describe(
+        'How to detect the background. auto (default): box-key a pure-green screen, else auto-recover in dominance mode for a tinted/muted green. box: strict pure-#00FF00 keying (best for colorful designs with warm/lime elements). dominance: green-dominance keying, robust to tinted green screens (safe when the design has no bright-green/lime elements).',
+      ),
+    force: z
+      .boolean()
+      .optional()
+      .describe(
+        'Bypass the pure-green safety check and box-key anyway. Use only when you have visually confirmed the palette has no colors near the green background.',
+      ),
     workspace: z.string().optional(),
   }),
   annotations: { openWorldHint: true },
-  handler: async (input, ctx) =>
-    processTransparencyImpl(ctx, input.image_uuid, input.image_url, input.workspace),
+  handler: async (input, ctx) => {
+    const mode = input.background_mode === 'auto' ? undefined : input.background_mode;
+    return processTransparencyImpl(ctx, input.image_uuid, input.image_url, input.workspace, {
+      mode,
+      force: input.force,
+    });
+  },
 });
 
 export const verifyDesignText = defineTool({
@@ -243,6 +298,8 @@ export const designApparel = defineTool({
           design.design_uuid = t.image_uuid;
           design.design_url = t.image_url;
           design.transparency_clean = t.corners_clean;
+          design.keying_mode = t.keying_mode;
+          if (t.note) design.transparency_note = t.note;
         } catch (err) {
           // Degrade (don't fail the whole tool) when the local toolchain is missing — return the
           // raw solid-green design with a clear warning so the agent can finish transparency

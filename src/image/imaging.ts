@@ -35,9 +35,23 @@ export interface TransparencyResult {
   height?: number;
 }
 
+export interface MakeTransparentOptions {
+  /**
+   * How to match the background.
+   *  - 'box' (default): tight color box around the auto-detected corner chroma, guarded by a
+   *    sanity check that refuses a background far from pure #00FF00 (exit 4 -> `chroma_background`).
+   *  - 'dominance': "green dominates" test — robust to the tinted / muted / gradient greens the AI
+   *    models actually produce. Only clears pixels where green clearly outweighs red AND blue, so
+   *    charcoal / white / warm (yellow, gold, orange) art is preserved. No sanity check.
+   */
+  mode?: 'box' | 'dominance';
+  /** Bypass the box-mode chroma sanity check (`--force-chroma`). Ignored in dominance mode. */
+  force?: boolean;
+}
+
 export interface Imaging {
   downloadToTemp(url: string, ext?: string): Promise<string>;
-  makeTransparent(inputPath: string): Promise<TransparencyResult>;
+  makeTransparent(inputPath: string, opts?: MakeTransparentOptions): Promise<TransparencyResult>;
   readBytes(path: string): Promise<Uint8Array>;
   imageSize(path: string): Promise<{ width: number; height: number } | undefined>;
   /** Full quality stats (alpha, transparency, premultiply). Undefined if Python/Pillow missing. */
@@ -103,13 +117,28 @@ export class LocalImaging implements Imaging {
     return p;
   }
 
-  async makeTransparent(inputPath: string): Promise<TransparencyResult> {
+  async makeTransparent(inputPath: string, opts: MakeTransparentOptions = {}): Promise<TransparencyResult> {
     const out = join(await this.dir(), `t-${Date.now()}.png`);
+    const args = [MAKE_TRANSPARENT, inputPath, out];
+    if (opts.mode === 'dominance') args.push('--dominance');
+    if (opts.force) args.push('--force-chroma');
     let r: RunResult;
     try {
-      r = await run(PYTHON, [MAKE_TRANSPARENT, inputPath, out]);
+      r = await run(PYTHON, args);
     } catch {
       throw pythonMissing();
+    }
+    // exit 4 = the auto-detected background isn't close to pure #00FF00, so box-keying it with the
+    // default tolerance risks eating warm design elements. Surface a DISTINCT code so the caller can
+    // retry in green-dominance mode (safe for the tinted / muted greens AI models actually produce)
+    // instead of dead-ending.
+    if (r.code === 4) {
+      throw new AhError({
+        code: 'chroma_background',
+        message:
+          'The generated background is a tinted or muted green, not pure #00FF00, so the standard keyer refused it to avoid eating warm design elements.',
+        suggestion: 'Retry in dominance mode (safe for tinted green screens) or force box-keying.',
+      });
     }
     // exit 0 = clean; exit 3 = written but corners not fully transparent (still usable, warn).
     if (r.code !== 0 && r.code !== 3) {

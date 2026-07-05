@@ -44,9 +44,11 @@ export function pickSource(opts: { style?: DesignStyle; hasText?: boolean } = {}
 }
 
 const GREEN_BG_HINT =
-  'Render the design on a solid bright green background (#00FF00) that fills the entire canvas ' +
-  'behind the subject. Do NOT make the background transparent and do NOT draw a checkerboard ' +
-  'pattern.';
+  'Render the design on a solid, flat, fully-saturated pure chroma-key green background ' +
+  '(exactly RGB 0,255,0 / #00FF00) that fills the entire canvas edge to edge behind the subject. ' +
+  'The green must be one uniform color with NO gradient, NO shading, NO vignette, and NO yellow, ' +
+  'lime, olive, or sage tint. Do NOT make the background transparent and do NOT draw a ' +
+  'checkerboard pattern.';
 
 /** Lesson 9b: never ask a model for a "transparent background" — request a solid green one and
  *  key it out afterward. Idempotent (skips if the prompt already asks for a green background). */

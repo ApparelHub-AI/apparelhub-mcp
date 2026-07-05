@@ -30,7 +30,7 @@ the human-readable summary. Read tools are read-only; mutating tools default to 
 | `design_apparel` | **Atomic.** Generate a design with the rules baked in (solid-green background prompt, transparency keying, optional text check). Streams progress. |
 | `iterate_design` | img2img variation of an existing design (Nano Banana / OpenAI only). |
 | `generate_image` | *(split)* Generate the raw image; handles the async slow-model poll. |
-| `process_transparency` | *(split)* Key the background to true RGBA + upload. Needs local Python/Pillow. |
+| `process_transparency` | *(split)* Key the background to true RGBA + upload (server-side Python/Pillow). Auto-recovers in green-dominance mode when the model produced a tinted/muted green instead of pure #00FF00; `background_mode` (`auto`/`box`/`dominance`) + `force` pin the strategy. |
 | `verify_design_text` | *(split)* Read text via local OCR (tesseract) so the agent can confirm spelling. Advisory. |
 
 ## Product

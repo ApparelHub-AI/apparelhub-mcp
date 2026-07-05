@@ -86,7 +86,7 @@ describe('generate_image', () => {
 });
 
 describe('process_transparency', () => {
-  it('keys the background locally and uploads a new image', async () => {
+  it('keys the background server-side and uploads a new image', async () => {
     const { api } = apiFrom([jsonResponse(200, { image_uuid: 't1', url: 'https://cdn.example/t.png' })]);
     const res = (await processTransparency.handler(
       { image_uuid: 'g1', image_url: 'https://cdn.example/x.png' },
@@ -97,7 +97,46 @@ describe('process_transparency', () => {
       image_url: 'https://cdn.example/t.png',
       has_true_alpha: true,
       corners_clean: true,
+      keying_mode: 'box',
     });
+    expect(res.note).toBeUndefined();
+  });
+
+  it('auto-recovers in dominance mode when the AI produced a tinted green background', async () => {
+    const { api } = apiFrom([jsonResponse(200, { image_uuid: 't2', url: 'https://cdn.example/t2.png' })]);
+    const calls: Array<string | undefined> = [];
+    // box mode -> chroma_background (tinted green); dominance mode -> succeeds.
+    const imaging = fakeImaging({
+      makeTransparent: async (_in: string, opts?: { mode?: 'box' | 'dominance' }) => {
+        calls.push(opts?.mode);
+        if (opts?.mode !== 'dominance') {
+          throw new AhError({ code: 'chroma_background', message: 'tinted green', suggestion: 'retry dominance' });
+        }
+        return { outputPath: '/tmp/dom.png', cornersClean: true, width: 800, height: 600 };
+      },
+    });
+    const res = (await processTransparency.handler(
+      { image_uuid: 'g1', image_url: 'https://cdn.example/x.png' },
+      fakeContext(api, imaging),
+    )) as any;
+    expect(calls).toEqual(['box', 'dominance']); // tried box (default), then fell back
+    expect(res).toMatchObject({ image_uuid: 't2', keying_mode: 'dominance' });
+    expect(res.note).toContain('dominance');
+  });
+
+  it('does NOT auto-fall-back when a mode is pinned explicitly (surfaces the error)', async () => {
+    const { api } = apiFrom([]); // no upload expected
+    const imaging = fakeImaging({
+      makeTransparent: async () => {
+        throw new AhError({ code: 'chroma_background', message: 'tinted green' });
+      },
+    });
+    await expect(
+      processTransparency.handler(
+        { image_uuid: 'g1', image_url: 'https://cdn.example/x.png', background_mode: 'box' },
+        fakeContext(api, imaging),
+      ),
+    ).rejects.toMatchObject({ code: 'chroma_background' });
   });
 });
 
