@@ -9,6 +9,33 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-05
+
+### Added
+
+- **48 capability tools** (surface grows 26 → 74) closing the read/act parity gaps a tool-vs-API
+  audit found — the connector could read/create/sync but couldn't *manage* what exists — plus a
+  generic escape hatch so a missing tool never blocks a user:
+  - **Workspaces**: `list_my_workspaces` (resolve a workspace/client name to its uuid; the
+    read/write tools already accept `workspace=<uuid>`).
+  - **Orders**: lifecycle (`approve_order`, `unapprove_order`, `hold_order`, `cancel_order`,
+    `confirm_order`, `submit_order_to_fulfillment`, `check_order_status`, `reconcile_order`) and
+    design-approval holds (`list_order_holds`, `approve_order_hold`, `request_hold_changes`).
+  - **Analytics**: `analytics_summary`, `analytics_timeseries`, `analytics_breakdown`,
+    `analytics_ops`, `analytics_portfolio`.
+  - **Collections**: full CRUD + `add_products_to_collection` / `remove_product_from_collection` /
+    `sync_collection`.
+  - **Cross-workspace transfer**: copy/move products + designs, each with a move-eligibility dry run.
+  - **Store & order management**: store settings/lifecycle, order payment/ops, product
+    archive/restore.
+  - **Escape hatch**: `get_api_reference` (self-discover the agent API from the live OpenAPI spec)
+    and `api_request` (call any `/agents/v1` endpoint; path-guarded against host escape + `..`).
+
+### Changed
+
+- The public-repo hygiene CI guard now keeps its forbidden-term list in a repo secret (it had
+  hardcoded the very terms it forbids) and runs quiet, so no term/UUID/host reaches build logs.
+
 ## [0.1.1] - 2026-07-04
 
 ### Fixed
