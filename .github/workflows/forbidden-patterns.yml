@@ -21,8 +21,10 @@ jobs:
         run: |
           set -uo pipefail
           # Only scan git-tracked text files (build/ + node_modules are gitignored).
+          # Exclude lockfiles and THIS workflow (its grep patterns list the very
+          # names we forbid, which would otherwise self-match).
           mapfile -t FILES < <(git ls-files '*.ts' '*.js' '*.mjs' '*.cjs' '*.md' '*.json' '*.yml' '*.yaml' \
-            | grep -vE '(^|/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$' || true)
+            | grep -vE '(^|/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$|(^|/)forbidden-patterns\.yml$' || true)
           if [ "${#FILES[@]}" -eq 0 ]; then echo "no files to scan"; exit 0; fi
           fail=0
 
