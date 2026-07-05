@@ -91,19 +91,36 @@ Any MCP-capable client uses the same shape: run `npx -y @apparelhub/mcp-server` 
 
 ## Tools
 
-26 tools across six groups. See [`docs/TOOLS.md`](./docs/TOOLS.md) for the full reference; call
-`tools/list` from your agent for the live schemas.
+74 tools. See [`docs/TOOLS.md`](./docs/TOOLS.md) for the full reference; call `tools/list` from
+your agent for the live schemas.
 
-- **Read** — `list_my_stores`, `list_my_designs`, `list_my_products`, `list_my_orders`,
-  `get_order_details`.
+- **Read** — `list_my_workspaces`, `list_my_stores`, `list_my_designs`, `list_my_products`,
+  `list_my_orders`, `get_order_details`.
 - **Catalog** — `browse_catalog`, `get_garment_details`, `recommend_garment`.
 - **Design** — `design_apparel`, `iterate_design`, and split primitives `generate_image`,
   `process_transparency`, `verify_design_text`.
 - **Product** — `ship_product`, `update_product`, `delete_product`, and split primitives
   `create_product`, `add_variants`, `sync_to_fulfillment`, `sync_to_channel`.
+- **Orders** — lifecycle (`approve_order`, `unapprove_order`, `hold_order`, `cancel_order`,
+  `confirm_order`, `submit_order_to_fulfillment`, `check_order_status`, `reconcile_order`) and
+  design-approval holds (`list_order_holds`, `approve_order_hold`, `request_hold_changes`).
+- **Analytics** — `analytics_summary`, `analytics_timeseries`, `analytics_breakdown`,
+  `analytics_ops`, `analytics_portfolio`.
+- **Collections** — `list_collections`, `get_collection`, `create_collection`, `update_collection`,
+  `delete_collection`, `add_products_to_collection`, `remove_product_from_collection`,
+  `sync_collection`.
+- **Cross-workspace transfer** — `copy_product_to_workspace`, `move_product_to_workspace`,
+  `check_product_move`, and the design equivalents.
+- **Store & order management** — store settings/lifecycle (`get_store_settings`,
+  `update_store_settings`, `create_store`, `archive_store`, `unarchive_store`, `activate_store`),
+  order payment/ops (`record_order_payment`, `mark_order_no_payment`, `set_order_payment_method`,
+  `sync_orders`, `estimate_order_costs`, `get_orders_summary`, `list_pending_fulfillments`), and
+  `archive_product` / `restore_product`.
 - **Systems of action** — `analyze_what_works`, `auto_optimize_listings`, `cascade_price_change`,
   `recover_from_outage`.
 - **Safety** — `verify_design_quality`, `check_design_compliance`.
+- **API escape hatch** — `get_api_reference` (discover the full agent API from the live OpenAPI
+  spec) and `api_request` (call any `/agents/v1` endpoint when no dedicated tool fits).
 
 Read tools are read-only. Product and design tools default to **draft, never live**, enforce
 pricing floors, and guard known variant traps. Systems-of-action mutations default to a **dry run**
