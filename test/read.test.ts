@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { listMyStores } from '../src/tools/read.js';
+import { listMyStores, listMyWorkspaces } from '../src/tools/read.js';
 import { ApiClient } from '../src/http/client.js';
 import { fakeContext } from './helpers/ctx.js';
 import { jsonResponse, queueFetch, noSleep } from './helpers/fakeFetch.js';
@@ -78,5 +78,31 @@ describe('list_my_stores', () => {
     });
     await listMyStores.handler({ workspace: 'ws-9' }, fakeContext(api));
     expect(calls[0]?.url).toContain('workspace=ws-9');
+  });
+});
+
+describe('list_my_workspaces', () => {
+  it('projects workspaces to uuid + name so a name can be resolved to a uuid', async () => {
+    // Generic placeholders only (public repo — Rule 13): no real account data.
+    const raw = [
+      { uuid: 'w-default', name: 'Default', role: null, agency_enabled: null },
+      { uuid: 'w-acme', name: 'Acme Co', role: 'director', agency_enabled: true },
+    ];
+    const res = (await listMyWorkspaces.handler({}, fakeContext(apiReturning(raw)))) as any;
+    expect(res.total).toBe(2);
+    expect(res.workspaces[0]).toMatchObject({ workspace_uuid: 'w-default', name: 'Default' });
+    expect(res.workspaces).toContainEqual({
+      workspace_uuid: 'w-acme',
+      name: 'Acme Co',
+      role: 'director',
+      agency_enabled: true,
+    });
+  });
+
+  it('handles a {workspaces:[...]} envelope', async () => {
+    const raw = { workspaces: [{ uuid: 'w1', name: 'Default' }] };
+    const res = (await listMyWorkspaces.handler({}, fakeContext(apiReturning(raw)))) as any;
+    expect(res.total).toBe(1);
+    expect(res.workspaces[0]).toEqual({ workspace_uuid: 'w1', name: 'Default' });
   });
 });

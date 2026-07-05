@@ -111,7 +111,7 @@ export function mapHttpError(
       httpStatus: status,
       code: 'workspace_forbidden',
       message: 'This key or account cannot act in the requested workspace.',
-      suggestion: 'Target a workspace this key is scoped to (see list_my_stores).',
+      suggestion: 'Target a workspace this account can act in (see list_my_workspaces).',
     });
   }
   if (status === 403 && (errorCode === 'forbidden' || capability)) {
@@ -137,7 +137,7 @@ export function mapHttpError(
       httpStatus: status,
       code: 'workspace_not_found',
       message: 'The requested workspace does not exist.',
-      suggestion: 'Resolve the workspace uuid from list_my_stores before scoping with workspace=.',
+      suggestion: 'Resolve the workspace uuid from list_my_workspaces before scoping with workspace=.',
     });
   }
   if (status === 404) {

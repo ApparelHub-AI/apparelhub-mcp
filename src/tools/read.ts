@@ -295,7 +295,39 @@ export const getOrderDetails = defineTool({
   },
 });
 
+// ---------------------------------------------------------------------------
+// Workspaces
+// ---------------------------------------------------------------------------
+
+export const listMyWorkspaces = defineTool({
+  name: 'list_my_workspaces',
+  description:
+    "List the workspaces this account can act in, each with its uuid. Agency / multi-brand " +
+    'accounts have more than one (e.g. a workspace per client); a single account just has ' +
+    'Default. The store / product / order / design tools operate on the Default workspace ' +
+    'unless you pass workspace=<uuid>. Use this FIRST to resolve a workspace by name (e.g. a ' +
+    'client name like "Crystal Riley") to the uuid those tools need. Read-only.',
+  inputSchema: z.object({}),
+  annotations: { readOnlyHint: true, openWorldHint: true },
+  handler: async (_input, ctx) => {
+    const raw = await ctx.api.get('workspaces', { signal: ctx.signal });
+    const workspaces = asArray(raw, 'workspaces').map((w) => {
+      const out: Record<string, unknown> = {
+        workspace_uuid: str(w, 'uuid', 'workspace_uuid', 'id'),
+        name: str(w, 'name'),
+      };
+      const role = str(w, 'role');
+      if (role) out.role = role;
+      const agency = bool(w, 'agency_enabled');
+      if (agency !== undefined) out.agency_enabled = agency;
+      return out;
+    });
+    return { workspaces, total: total(raw, workspaces.length) };
+  },
+});
+
 export const readTools: ToolDef[] = [
+  listMyWorkspaces,
   listMyStores,
   listMyDesigns,
   listMyProducts,
