@@ -1,0 +1,50 @@
+name: Forbidden patterns (public-repo hygiene)
+
+# This is a PUBLIC repo. Guard against committing anything account-specific or
+# sensitive (ApparelHub Rule 13): real names / account references, real store
+# hostnames, or full account UUIDs. Use generic placeholders instead
+# (e.g. "Acme Co", "your-store.myshopify.com", short ids like w1/s1/p1).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  scan:
+    name: No sensitive / account data
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan tracked source + docs
+        run: |
+          set -uo pipefail
+          # Only scan git-tracked text files (build/ + node_modules are gitignored).
+          # Exclude lockfiles and THIS workflow (its grep patterns list the very
+          # names we forbid, which would otherwise self-match).
+          mapfile -t FILES < <(git ls-files '*.ts' '*.js' '*.mjs' '*.cjs' '*.md' '*.json' '*.yml' '*.yaml' \
+            | grep -vE '(^|/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$|(^|/)forbidden-patterns\.yml$' || true)
+          if [ "${#FILES[@]}" -eq 0 ]; then echo "no files to scan"; exit 0; fi
+          fail=0
+
+          # 1) Real names / account references.
+          if grep -rInE 'crystal|riley|nyholm|mercado|merctech|antonio|\btony\b' "${FILES[@]}"; then
+            echo "::error::Real name / account reference found (Rule 13). Use a generic placeholder such as 'Acme Co'."
+            fail=1
+          fi
+
+          # 2) Real Shopify store hosts (allow only the generic example).
+          if grep -rInE '[a-z0-9-]+\.myshopify\.com' "${FILES[@]}" | grep -viE 'your-store\.myshopify\.com'; then
+            echo "::error::Real *.myshopify.com host found (Rule 13). Use your-store.myshopify.com."
+            fail=1
+          fi
+
+          # 3) Full UUIDs — a real one is almost certainly an account/store/workspace id.
+          if grep -rInoE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "${FILES[@]}"; then
+            echo "::error::A full UUID appears in tracked source/docs (Rule 13). Use a short placeholder like w1/s1/p1."
+            fail=1
+          fi
+
+          if [ "$fail" -ne 0 ]; then exit 1; fi
+          echo "Rule 13 hygiene: clean."
