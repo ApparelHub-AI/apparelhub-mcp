@@ -306,7 +306,7 @@ export const listMyWorkspaces = defineTool({
     'accounts have more than one (e.g. a workspace per client); a single account just has ' +
     'Default. The store / product / order / design tools operate on the Default workspace ' +
     'unless you pass workspace=<uuid>. Use this FIRST to resolve a workspace by name (e.g. a ' +
-    'client name like "Crystal Riley") to the uuid those tools need. Read-only.',
+    "client's name) to the uuid those tools need. Read-only.",
   inputSchema: z.object({}),
   annotations: { readOnlyHint: true, openWorldHint: true },
   handler: async (_input, ctx) => {
