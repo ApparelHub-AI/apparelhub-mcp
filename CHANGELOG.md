@@ -9,6 +9,15 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+### Changed
+
+- **Hosted deploy: the platform base URL is now env-configurable (`APPARELHUB_API_BASE_URL`)** so the
+  dev-account hosted server can integrate with the dev platform (`api.dev.apparelhub.ai`) instead of
+  being a second door to prod (#35 dev domain). It flows through both tool calls and OAuth token
+  resolution. The **stdio** server is unchanged — its base stays hardcoded and NOT overridable
+  (a user must not be able to redirect their own key); the override is honored only in the hosted
+  Lambda, whose environment is set solely by our IaC.
+
 ## [0.2.1] - 2026-07-05
 
 ### Fixed

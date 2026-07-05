@@ -90,9 +90,21 @@ function tokenCacheKey(raw: string): string {
   return createHash('sha256').update(raw).digest('hex');
 }
 
+/**
+ * The platform base URL this HOSTED server talks to. Unlike the stdio server (whose base is
+ * hardcoded and NOT env-overridable — a user must not be able to redirect their own key, see
+ * config.ts), the hosted Lambda's environment is set only by us via IaC (SAM parameter ->
+ * `APPARELHUB_API_BASE_URL`). That lets the dev-account deploy integrate with the dev platform
+ * (api.dev.apparelhub.ai) while prod stays on api.apparelhub.ai. Falls back to the prod default.
+ */
+function hostedApiBaseUrl(env: NodeJS.ProcessEnv): string {
+  return (env.APPARELHUB_API_BASE_URL ?? '').trim() || API_BASE_URL;
+}
+
 async function resolveBearer(
   raw: string,
   serviceKey: string,
+  baseUrl: string,
   fetchImpl: typeof fetch,
 ): Promise<{ ok: true; resolved: ResolvedToken } | { ok: false; error: string }> {
   const key = tokenCacheKey(raw);
@@ -104,7 +116,7 @@ async function resolveBearer(
 
   let response: Response;
   try {
-    response = await fetchImpl(`${API_BASE_URL}/service/connector/resolve-token`, {
+    response = await fetchImpl(`${baseUrl}/service/connector/resolve-token`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-api-key': serviceKey },
       body: JSON.stringify({ token: raw }),
@@ -207,6 +219,7 @@ async function handleInner(
 
   const issuer = (env.MCP_OAUTH_ISSUER ?? '').trim();
   const serviceKey = (env.MCP_SERVICE_KEY ?? '').trim();
+  const apiBaseUrl = hostedApiBaseUrl(env);
   const oauthEnabled = issuer.length > 0;
   const staticSecret = (env.MCP_BEARER ?? '').trim();
   const staticEnabled =
@@ -256,7 +269,7 @@ async function handleInner(
       return jsonResult(503, { error: 'server_not_configured' });
     }
     const fetchImpl = (deps.fetchImpl ?? fetch) as typeof fetch;
-    const result = await resolveBearer(bearerMatch[1], serviceKey, fetchImpl);
+    const result = await resolveBearer(bearerMatch[1], serviceKey, apiBaseUrl, fetchImpl);
     if (!result.ok) {
       const status = result.error === 'resolve_unavailable' ? 503 : 401;
       return jsonResult(status, { error: result.error }, status === 401 ? challengeHeaders : {});
@@ -288,6 +301,10 @@ async function handleInner(
   // Stateless mode: a fresh server + transport per request (the SDK requires this when
   // sessionIdGenerator is undefined). Construction is cheap — the registry is in-memory.
   const config = loadConfig(env);
+  // loadConfig hardcodes the prod base (stdio security posture); the hosted deploy may point at
+  // the dev platform via APPARELHUB_API_BASE_URL. Override here so tool calls + resolve-token
+  // both hit the same environment.
+  config.baseUrl = apiBaseUrl;
   if (apiKeyOverride) config.apiKey = apiKeyOverride;
   const { server } = createServer(config, deps);
   const transport = new WebStandardStreamableHTTPServerTransport({
