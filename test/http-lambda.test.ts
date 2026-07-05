@@ -199,6 +199,21 @@ describe('lambda handler OAuth bearer resolution (#41)', () => {
     expect(resolveCalls.length).toBe(1);
   });
 
+  it('APPARELHUB_API_BASE_URL redirects both resolve-token and the downstream call (dev/prod split)', async () => {
+    const devEnv = {
+      ...OAUTH_ENV,
+      APPARELHUB_API_BASE_URL: 'https://api.dev.example.test/agents/v1',
+    } as NodeJS.ProcessEnv;
+    const { fetchImpl, calls } = queueFetch([resolveOk(), jsonResponse(200, [])]);
+    const handle = makeHandler({ fetchImpl }, devEnv);
+    const res = await handle(toolCall('opaque-token-dev'));
+    expect(res.statusCode).toBe(200);
+    // resolve-token goes to the dev host, not the hardcoded prod default.
+    expect(calls[0].url).toBe('https://api.dev.example.test/agents/v1/service/connector/resolve-token');
+    // the downstream platform call (tool) also hits the dev host.
+    expect(calls[1].url.startsWith('https://api.dev.example.test/agents/v1/')).toBe(true);
+  });
+
   it('maps a resolve rejection to 401 with the discovery challenge', async () => {
     const { fetchImpl } = queueFetch([jsonResponse(401, { error: 'expired_token' })]);
     const handle = makeHandler({ fetchImpl }, OAUTH_ENV);

@@ -34,6 +34,13 @@ Parameters:
     NoEcho: true
     Default: ''
     Description: SERVICE credential for the platform token-resolve endpoint.
+  ApparelhubApiBaseUrl:
+    Type: String
+    Default: 'https://api.apparelhub.ai/agents/v1'
+    Description: >-
+      Platform agents API base URL this deploy integrates with (tool calls +
+      token resolve). Prod default; the dev-account deploy sets the dev origin
+      so the dev domain is a true dev environment, not a second door to prod.
 
 Resources:
   HostedFunction:
@@ -51,6 +58,7 @@ Resources:
           MCP_STATIC_BEARER_ENABLED: !Ref McpStaticBearerEnabled
           MCP_OAUTH_ISSUER: !Ref McpOauthIssuer
           MCP_SERVICE_KEY: !Ref McpServiceKey
+          APPARELHUB_API_BASE_URL: !Ref ApparelhubApiBaseUrl
           APPARELHUB_MCP_TELEMETRY: 'off'
       FunctionUrlConfig:
         AuthType: NONE
