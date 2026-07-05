@@ -301,12 +301,21 @@ export const designApparel = defineTool({
           design.keying_mode = t.keying_mode;
           if (t.note) design.transparency_note = t.note;
         } catch (err) {
-          // Degrade (don't fail the whole tool) when the local toolchain is missing — return the
-          // raw solid-green design with a clear warning so the agent can finish transparency
-          // another way.
-          if (err instanceof AhError && err.code === 'local_tool_unavailable') {
+          // Never abort an otherwise-good design over the keying step in an unattended run.
+          // process_transparency already auto-recovers a tinted-green background (dominance mode),
+          // so reaching here means the keyer genuinely couldn't finish (missing toolchain, or a
+          // hard keyer failure) — keep the raw design + a clear flag so the pipeline continues and
+          // the agent can decide. Transient / auth errors (rate_limited, upstream_unavailable,
+          // auth_required, download_failed, ...) still surface so a scheduled run RETRIES rather
+          // than silently shipping an unkeyed design.
+          const degradable =
+            err instanceof AhError &&
+            (err.code === 'local_tool_unavailable' || err.code === 'transparency_failed');
+          if (degradable) {
+            const e = err as AhError;
             design.transparency_clean = false;
-            design.warning = `${err.message} ${err.suggestion ?? ''}`.trim();
+            design.keying_mode = 'box';
+            design.warning = `Transparency not applied (${e.code}): ${e.message} ${e.suggestion ?? ''}`.trim();
           } else {
             throw err;
           }
