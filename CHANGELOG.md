@@ -9,6 +9,17 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-07-05
+
+### Fixed
+
+- **`design_apparel` no longer aborts an otherwise-good design when the keying step hard-fails.**
+  Belt-and-suspenders for unattended runs: `process_transparency` already auto-recovers a tinted-green
+  background in dominance mode (0.2.1), so if keying still can't finish (missing toolchain / a hard
+  keyer failure) the design is kept with `transparency_clean: false` + a clear warning instead of
+  crashing the run. Transient / auth errors (rate limit, upstream 503, auth) still surface so a
+  scheduled run retries rather than silently shipping an unkeyed design.
+
 ### Changed
 
 - **Hosted deploy: the platform base URL is now env-configurable (`APPARELHUB_API_BASE_URL`)** so the

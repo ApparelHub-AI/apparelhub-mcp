@@ -198,6 +198,33 @@ describe('design_apparel', () => {
     expect(res.designs[0]).toMatchObject({ design_uuid: 'g1', transparency_clean: false });
     expect(res.designs[0].warning).toContain('Pillow');
   });
+
+  it('keeps the design (does not abort the run) when keying hard-fails', async () => {
+    const { api } = apiFrom([jsonResponse(200, { image_uuid: 'g1', url: 'https://cdn.example/x.png' })]);
+    const imaging = fakeImaging({
+      makeTransparent: async () => {
+        throw new AhError({ code: 'transparency_failed', message: 'keyer exit 2' });
+      },
+    });
+    const res = (await designApparel.handler(
+      { prompt: 'x', source: 'OpenAI', verify_text: false },
+      fakeContext(api, imaging),
+    )) as any;
+    expect(res.designs[0]).toMatchObject({ design_uuid: 'g1', transparency_clean: false });
+    expect(res.designs[0].warning).toContain('transparency_failed');
+  });
+
+  it('surfaces a transient error (does NOT silently ship an unkeyed design)', async () => {
+    const { api } = apiFrom([jsonResponse(200, { image_uuid: 'g1', url: 'https://cdn.example/x.png' })]);
+    const imaging = fakeImaging({
+      makeTransparent: async () => {
+        throw new AhError({ code: 'upstream_unavailable', message: 'platform 503' });
+      },
+    });
+    await expect(
+      designApparel.handler({ prompt: 'x', source: 'OpenAI', verify_text: false }, fakeContext(api, imaging)),
+    ).rejects.toMatchObject({ code: 'upstream_unavailable' });
+  });
 });
 
 describe('iterate_design', () => {
