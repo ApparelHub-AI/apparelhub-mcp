@@ -71,6 +71,16 @@ Resources:
       DockerContext: ../..
       DockerTag: hosted
 
+  # Connector-traffic observability (epic #36). Reads the EMF metrics the hosted
+  # Lambda emits per request (namespace ApparelHub/MCP, dims Outcome + ToolName).
+  # One dashboard per account (dev stack -> dev account, prod stack -> prod account).
+  ConnectorDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub '${AWS::StackName}-connector'
+      DashboardBody: !Sub |
+        {"widgets":[{"type":"text","x":0,"y":0,"width":24,"height":1,"properties":{"markdown":"# Remote MCP Connector (${AWS::StackName}) - traffic + health. Provisioned by SAM (epic #31 / #36)."}},{"type":"metric","x":0,"y":1,"width":12,"height":6,"properties":{"title":"Requests by outcome","region":"${AWS::Region}","view":"timeSeries","stacked":false,"period":300,"metrics":[[{"expression":"SEARCH('{ApparelHub/MCP,Outcome} MetricName=\"Requests\"', 'Sum', 300)","label":"","id":"reqOut"}]]}},{"type":"metric","x":12,"y":1,"width":12,"height":6,"properties":{"title":"Tool calls by tool","region":"${AWS::Region}","view":"timeSeries","stacked":true,"period":300,"metrics":[[{"expression":"SEARCH('{ApparelHub/MCP,ToolName} MetricName=\"Requests\"', 'Sum', 300)","label":"","id":"reqTool"}]]}},{"type":"metric","x":0,"y":7,"width":12,"height":6,"properties":{"title":"Latency by outcome (ms)","region":"${AWS::Region}","view":"timeSeries","period":300,"metrics":[[{"expression":"SEARCH('{ApparelHub/MCP,Outcome} MetricName=\"LatencyMs\"', 'p99', 300)","label":"p99","id":"lat99"}],[{"expression":"SEARCH('{ApparelHub/MCP,Outcome} MetricName=\"LatencyMs\"', 'p50', 300)","label":"p50","id":"lat50"}]]}},{"type":"metric","x":12,"y":7,"width":12,"height":6,"properties":{"title":"Hosted Lambda health","region":"${AWS::Region}","view":"timeSeries","period":300,"stat":"Sum","metrics":[["AWS/Lambda","Invocations","FunctionName","apparelhub-mcp-hosted"],[".","Errors",".","."],[".","Throttles",".","."],[".","Duration",".",".",{"stat":"p99","label":"Duration p99 (ms)"}]]}}]}
+
 Outputs:
   FunctionUrl:
     Description: Base URL (append /<secret>/mcp for the connector endpoint).

@@ -2,6 +2,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { API_BASE_URL, loadConfig } from '../config.js';
 import { createServer, type ServerDeps } from '../server.js';
+import { emitConnectorMetric, outcomeForStatus, parseRpc } from './metrics.js';
 
 // AWS Lambda Function URL entry point (epic #31).
 //
@@ -184,15 +185,25 @@ export function makeHandler(
     const method = event.requestContext?.http?.method ?? 'GET';
     const rawPath = event.rawPath || '/';
     const result = await handleInner(event, method, rawPath, deps, env);
+    const latencyMs = Date.now() - started;
+    const { rpcMethod, toolName } =
+      method === 'POST' ? parseRpc(event.body, event.isBase64Encoded === true) : {};
     // One structured line per request; path secrets are redacted to length + hash prefix.
     console.log(
       JSON.stringify({
         method,
         path: redactPath(rawPath),
         status: result.statusCode,
-        ms: Date.now() - started,
+        ms: latencyMs,
+        rpc: rpcMethod,
+        tool: toolName,
       }),
     );
+    // Connector-traffic metrics (#36). Skip the unauthenticated liveness probe so health
+    // checks don't drown the real traffic signal.
+    if (rawPath !== '/healthz') {
+      emitConnectorMetric({ outcome: outcomeForStatus(result.statusCode), latencyMs, toolName });
+    }
     return result;
   };
 }

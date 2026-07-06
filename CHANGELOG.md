@@ -9,6 +9,19 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-07-06
+
+### Added
+
+- **Connector-traffic observability (epic #36).** The hosted Lambda now emits one CloudWatch EMF
+  metric per request (namespace `ApparelHub/MCP`): `Requests` + `LatencyMs`, dimensioned by
+  `Outcome` and (for tool calls) `ToolName` — no per-identity dimension (low cardinality, no user
+  data). A `${stack}-connector` dashboard (one per account) shows requests by outcome, tool-call
+  volume by tool, latency p50/p99, and Lambda health. Rate limiting (per-connector AWS usage plan)
+  and the paid-op spend cap (per-account image-generation limit) are inherited from the platform;
+  see `docs/connector-controls.md`.
+
+
 ## [0.2.3] - 2026-07-06
 
 ### Fixed
