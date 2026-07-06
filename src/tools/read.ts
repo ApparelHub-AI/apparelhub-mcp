@@ -32,11 +32,15 @@ function mapIntegration(raw: unknown): Record<string, unknown> {
 
 function mapStore(raw: unknown): Record<string, unknown> {
   const uuid = str(raw, 'uuid', 'store_uuid') ?? '';
+  // The platform store payload carries the fulfillment provider(s) under `providers`
+  // (Printful/Printify) and connected sales channels under `active_integrations`. Older
+  // names kept as fallbacks. A store always has a fulfillment provider by design, so an
+  // empty `fulfillment_providers` here means we read the wrong key (regression guard).
   const providersRaw = isRecord(raw)
-    ? (raw.merchandise_providers ?? raw.fulfillment_providers)
+    ? (raw.providers ?? raw.merchandise_providers ?? raw.fulfillment_providers)
     : undefined;
   const integrationsRaw = isRecord(raw)
-    ? (raw.ecommerce_integrations ?? raw.integrations)
+    ? (raw.active_integrations ?? raw.ecommerce_integrations ?? raw.integrations)
     : undefined;
   const workspaceUuid = str(raw, 'workspace_uuid');
 
