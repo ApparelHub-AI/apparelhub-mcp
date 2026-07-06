@@ -22,12 +22,13 @@ describe('list_my_stores', () => {
       {
         uuid: 's1',
         name: 'Acme Apparel',
-        merchandise_providers: [{ uuid: 'p1', name: 'Printful' }],
-        ecommerce_integrations: [
+        // Real platform field names: `providers` (fulfillment) + `active_integrations` (channels).
+        providers: [{ uuid: 'p1', name: 'Printful', external_id: 123, expires_at: 1780000000 }],
+        active_integrations: [
           {
             uuid: 'i1',
             provider_name: 'Shopify',
-            shop_identifier: 'your-store.myshopify.com',
+            shop_url: 'your-store.myshopify.com',
             is_active: true,
             is_locked: false,
           },
@@ -56,6 +57,23 @@ describe('list_my_stores', () => {
       is_locked: false,
     });
     expect(res.stores[0].workspace).toEqual({ uuid: 'w1', name: 'Acme Co', is_default: false });
+  });
+
+  it('surfaces the fulfillment provider from the live `providers` field (regression: was reading merchandise_providers)', async () => {
+    // Exact live prod shape: the platform returns the fulfillment provider under `providers`.
+    // A store always has one by design, so it must never come back "None connected".
+    const raw = [
+      {
+        uuid: 's1',
+        name: 'Acme Apparel',
+        providers: [
+          { expires_at: 1782836254, external_id: 17599142, name: 'Printful', uuid: 'c8-fake-uuid' },
+        ],
+      },
+    ];
+    const res = (await listMyStores.handler({}, fakeContext(apiReturning(raw)))) as any;
+    expect(res.stores[0].fulfillment_providers).toHaveLength(1);
+    expect(res.stores[0].fulfillment_providers[0]).toEqual({ provider_uuid: 'c8-fake-uuid', name: 'Printful' });
   });
 
   it('handles a {stores:[...]} envelope and the store_uuid alt field', async () => {

@@ -9,6 +9,18 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-07-06
+
+### Fixed
+
+- **`list_my_stores` now shows the fulfillment provider (and sales channels).** The store mapper
+  read the wrong field names — `merchandise_providers`/`fulfillment_providers` and
+  `ecommerce_integrations`/`integrations` — but the platform returns fulfillment under `providers`
+  and channels under `active_integrations`. So every store came back "no fulfillment provider
+  connected", which is impossible by design (a store always has one). Now reads the correct fields
+  (old names kept as fallbacks). Sales channels also require the platform's store-list serializer to
+  include `active_integrations` (apparelhub-ai#502).
+
 ## [0.2.2] - 2026-07-05
 
 ### Fixed
