@@ -4,13 +4,29 @@ import { AhError, toErrorPayload, mapHttpError, parseRetryAfter } from '../src/e
 describe('AhError.toPayload', () => {
   it('includes retry_after + suggestion when present', () => {
     const e = new AhError({
-      code: 'rate_limited',
+      code: 'platform_rate_limited',
       message: 'slow down',
       retryAfter: 5,
       suggestion: 'wait',
     });
     expect(e.toPayload()).toEqual({
-      error: { code: 'rate_limited', message: 'slow down', retry_after: 5, suggestion: 'wait' },
+      error: {
+        code: 'platform_rate_limited',
+        message: 'slow down',
+        retry_after: 5,
+        suggestion: 'wait',
+      },
+    });
+  });
+
+  it('includes source when present (model rate limits)', () => {
+    const e = new AhError({
+      code: 'model_rate_limited',
+      message: 'throttled',
+      source: 'Nano Banana',
+    });
+    expect(e.toPayload()).toEqual({
+      error: { code: 'model_rate_limited', message: 'throttled', source: 'Nano Banana' },
     });
   });
 
@@ -64,10 +80,32 @@ describe('mapHttpError', () => {
       'unprocessable',
     );
   });
-  it('429 -> rate_limited with retry_after from header', () => {
+  it('429 with a model_rate_limited body -> model_rate_limited carrying source + retry_after', () => {
+    const e = mapHttpError(429, {
+      error: 'model_rate_limited',
+      source: 'Nano Banana',
+      retry_after: 25,
+      message: 'Nano Banana throttled by provider',
+    });
+    expect(e.code).toBe('model_rate_limited');
+    expect(e.source).toBe('Nano Banana');
+    expect(e.retryAfter).toBe(25);
+    expect(e.message).toContain('Nano Banana');
+    expect(e.suggestion).toMatch(/different source/i);
+  });
+
+  it('429 model_rate_limited falls back to the Retry-After header when the body has no retry_after', () => {
+    const e = mapHttpError(429, { error: 'model_rate_limited', source: 'Flux 2 Pro' }, '9');
+    expect(e.code).toBe('model_rate_limited');
+    expect(e.retryAfter).toBe(9);
+  });
+
+  it('plain 429 -> platform_rate_limited: back off, switching models will not help', () => {
     const e = mapHttpError(429, {}, '3');
-    expect(e.code).toBe('rate_limited');
+    expect(e.code).toBe('platform_rate_limited');
     expect(e.retryAfter).toBe(3);
+    expect(e.suggestion).toMatch(/back off/i);
+    expect(e.suggestion).toMatch(/switching models will not help/i);
   });
   it('500 -> upstream_unavailable', () => {
     expect(mapHttpError(503, {}).code).toBe('upstream_unavailable');

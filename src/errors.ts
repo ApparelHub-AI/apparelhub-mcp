@@ -8,6 +8,8 @@ export interface ToolErrorShape {
   message: string;
   retry_after?: number;
   suggestion?: string;
+  /** For model_rate_limited: the MODEL whose provider throttled (e.g. "Nano Banana"). */
+  source?: string;
 }
 
 export interface AhErrorInit {
@@ -16,6 +18,8 @@ export interface AhErrorInit {
   retryAfter?: number;
   suggestion?: string;
   httpStatus?: number;
+  /** For model_rate_limited: the model name whose provider is throttling. */
+  source?: string;
 }
 
 export class AhError extends Error {
@@ -23,6 +27,7 @@ export class AhError extends Error {
   readonly retryAfter?: number;
   readonly suggestion?: string;
   readonly httpStatus?: number;
+  readonly source?: string;
 
   constructor(init: AhErrorInit) {
     super(init.message);
@@ -31,12 +36,14 @@ export class AhError extends Error {
     this.retryAfter = init.retryAfter;
     this.suggestion = init.suggestion;
     this.httpStatus = init.httpStatus;
+    this.source = init.source;
   }
 
   toPayload(): { error: ToolErrorShape } {
     const error: ToolErrorShape = { code: this.code, message: this.message };
     if (this.retryAfter !== undefined) error.retry_after = this.retryAfter;
     if (this.suggestion) error.suggestion = this.suggestion;
+    if (this.source) error.source = this.source;
     return { error };
   }
 }
@@ -55,6 +62,13 @@ function extractField(body: unknown, key: string): string | undefined {
   if (isRecord(body) && typeof body[key] === 'string') {
     const s = (body[key] as string).trim();
     return s || undefined;
+  }
+  return undefined;
+}
+
+function extractNumber(body: unknown, key: string): number | undefined {
+  if (isRecord(body) && typeof body[key] === 'number' && Number.isFinite(body[key])) {
+    return body[key] as number;
   }
   return undefined;
 }
@@ -163,12 +177,33 @@ export function mapHttpError(
     });
   }
   if (status === 429) {
+    // Honest attribution (epic #66 phase 2): a 429 is one of TWO different things, and an agent
+    // must be able to tell them apart.
+    if (errorCode === 'model_rate_limited') {
+      // A specific MODEL's upstream provider throttled the generation (platform contract:
+      // {"error": "model_rate_limited", "source": "<model name>", "retry_after": <seconds>}).
+      // ApparelHub itself accepted the request fine.
+      const source = extractField(body, 'source');
+      return new AhError({
+        httpStatus: status,
+        code: 'model_rate_limited',
+        source,
+        message: source
+          ? `The "${source}" model's provider is rate limiting generations right now.`
+          : (message ?? 'A model provider is rate limiting generations right now.'),
+        retryAfter: extractNumber(body, 'retry_after') ?? parseRetryAfter(retryAfterHeader),
+        suggestion:
+          'Retry with a DIFFERENT source — the built-in fallback ladder does this automatically. This is the model provider throttling, not ApparelHub\'s request throttle.',
+      });
+    }
+    // ApparelHub's own per-key request throttle (the API Gateway usage plan on this key).
     return new AhError({
       httpStatus: status,
-      code: 'rate_limited',
-      message: 'Rate limited by the ApparelHub API.',
+      code: 'platform_rate_limited',
+      message: message ?? 'This API key hit ApparelHub\'s request-rate limit.',
       retryAfter: parseRetryAfter(retryAfterHeader) ?? 1,
-      suggestion: 'Back off and retry.',
+      suggestion:
+        'Back off and retry after the retry_after window. Switching models will NOT help: every model call rides the same key and endpoint. Do not keep hammering.',
     });
   }
   if (status >= 500) {

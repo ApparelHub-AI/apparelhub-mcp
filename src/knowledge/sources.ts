@@ -75,24 +75,32 @@ export function fallbackLadder(
 }
 
 // Error codes that mean "this MODEL/provider was throttled or transiently failed" — safe to retry
-// with a DIFFERENT model. Kept in ONE place so Phase 3 (which adds the `model_rate_limited` code)
-// can extend it. NOTE: the ApiClient already retries transient 429/502/503/504 up to ~5x per model
-// before it throws, so by the time one of these codes reaches the fallback layer the per-model
-// transient retries are exhausted → that is exactly the moment to fall back to the next model.
+// with a DIFFERENT model. Kept in ONE place. NOTE: the ApiClient already retries transient
+// 429/502/503/504 up to ~5x per model before it throws, so by the time one of these codes reaches
+// the fallback layer the per-model transient retries are exhausted → that is exactly the moment to
+// fall back to the next model.
+//
+// The 429 split (epic #66 phase 2) matters here: `model_rate_limited` (a specific model's upstream
+// provider throttled) IS fallbackable — a different model rides a different provider. But
+// `platform_rate_limited` (ApparelHub's own per-key request throttle) is deliberately ABSENT:
+// that throttle is endpoint-wide on the key itself, so cycling models cannot help — it must
+// surface immediately with its back-off guidance instead of burning more throttled requests.
 const FALLBACKABLE_CODES = new Set<string>([
-  'rate_limited', // 429 from the platform (mapHttpError)
-  'model_rate_limited', // Phase 3: the platform will signal a per-MODEL rate limit distinctly
+  'model_rate_limited', // a per-MODEL provider rate limit (sync 429 body or parsed async failure)
   'upstream_unavailable', // 5xx from the platform (mapHttpError)
-  'network_error', // transient connectivity failure after the client exhausted its own retries
+  'request_not_sent', // transport failure — no response received; a different attempt may connect
+  'network_error', // legacy alias of request_not_sent (belt-and-braces; no longer emitted)
   'generation_timeout', // async poll never completed — try a (faster) different model
 ]);
 // Rate-limit-shaped text, used to decide whether an ambiguous `generation_failed` is fallbackable.
 const RATE_LIMIT_MESSAGE_RE = /rate.?limit|quota|429|resource.?exhausted|too many/i;
 
-/** TRUE for rate-limit / transient failures that warrant trying a different model. Validation
- *  (bad_request/unprocessable), auth (auth_required), forbidden/membership-quota (forbidden), and
- *  not_found MUST return FALSE so they surface immediately. A `generation_failed` is fallbackable
- *  ONLY when it is rate-limit-shaped (code === 'model_rate_limited' or a rate-limit message). */
+/** TRUE for per-model / transient failures that warrant trying a different model. Validation
+ *  (bad_request/unprocessable), auth (auth_required), forbidden/membership-quota (forbidden),
+ *  not_found, AND `platform_rate_limited` (ApparelHub's own per-key throttle — model-independent)
+ *  MUST return FALSE so they surface immediately. A `generation_failed` is fallbackable ONLY when
+ *  its message is rate-limit-shaped (legacy heuristic; structured async failures now arrive as
+ *  the precise `model_rate_limited` code instead). */
 export function isFallbackableError(err: unknown): boolean {
   if (!(err instanceof AhError)) return false;
   if (FALLBACKABLE_CODES.has(err.code)) return true;

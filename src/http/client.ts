@@ -139,10 +139,15 @@ export class ApiClient {
           await this.backoff(attempt++);
           continue;
         }
+        // The fetch itself rejected (DNS / connection refused / reset) even after retries: no
+        // HTTP response ever arrived, so NOTHING here can be attributed to ApparelHub — it is a
+        // transport failure at or near the caller. Named request_not_sent so an agent can never
+        // mistake it for an ApparelHub rate limit or outage (epic #66 phase 2).
         throw new AhError({
-          code: 'network_error',
-          message: `Network error contacting the ApparelHub API: ${errMessage(err)}`,
-          suggestion: 'Check connectivity and retry.',
+          code: 'request_not_sent',
+          message: `No response was received from ApparelHub — the request did not complete (${errMessage(err)}).`,
+          suggestion:
+            'This is a connectivity or transport failure at or near the caller, not an ApparelHub error or rate limit. Never report ApparelHub as rate-limited or down from this alone. Retry; if several unrelated tools are failing at the same moment, the calling agent\'s own runtime or network is the likely constraint.',
         });
       }
 

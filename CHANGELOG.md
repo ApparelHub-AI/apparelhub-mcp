@@ -9,6 +9,26 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+### Changed
+
+- **Honest structured error attribution (epic #66 phase 2).** Every failure now carries a cause an
+  agent can attribute truthfully — an agent can no longer "diagnose" an ApparelHub rate limit that
+  never happened (the motivating incident: a harness-side 429 got reported as "the ApparelHub
+  image endpoint is rate-limited" while ApparelHub had received no request at all). The generic
+  `rate_limited` code is split in two: **`model_rate_limited`** (a specific model's upstream
+  provider throttled — carries `source` + `retry_after`; the fallback ladder handles it by
+  switching models) vs **`platform_rate_limited`** (ApparelHub's own per-key request throttle —
+  back off; switching models will not help, so it is deliberately NOT fallbackable and surfaces
+  immediately). A fetch that never got a response is now **`request_not_sent`** (replacing
+  `network_error`): a transport failure at or near the caller that must never be attributed to
+  ApparelHub. The async poll path parses the platform's structured failure string
+  (`model_rate_limited: {source} throttled by provider (retry_after={n}s)`) into the same precise
+  code, so async models (Nano Banana — the default) trigger the ladder on the code instead of a
+  message heuristic. `fallback_trail` entries now include the structured `code` per abandoned
+  model, and when EVERY rung fails with `model_rate_limited` the final error keeps that code with
+  back-off guidance. Server instructions + `generate_image`/`design_apparel` descriptions state
+  the attribution rule; see the new `docs/error-attribution.md`.
+
 ## [0.2.5] - 2026-07-07
 
 ### Added

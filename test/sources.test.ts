@@ -83,12 +83,16 @@ describe('fallbackLadder', () => {
 
 describe('isFallbackableError', () => {
   const yes = (code: string, message = 'x') => new AhError({ code, message });
-  it('is true for rate-limit / transient classes', () => {
-    expect(isFallbackableError(yes('rate_limited'))).toBe(true);
+  it('is true for per-model rate-limit / transient classes', () => {
+    expect(isFallbackableError(yes('model_rate_limited'))).toBe(true);
     expect(isFallbackableError(yes('upstream_unavailable'))).toBe(true);
-    expect(isFallbackableError(yes('network_error'))).toBe(true);
+    expect(isFallbackableError(yes('request_not_sent'))).toBe(true);
+    expect(isFallbackableError(yes('network_error'))).toBe(true); // legacy alias, no longer emitted
     expect(isFallbackableError(yes('generation_timeout'))).toBe(true);
-    expect(isFallbackableError(yes('model_rate_limited'))).toBe(true); // Phase 3 forward-compat
+  });
+
+  it('is FALSE for platform_rate_limited — the per-key throttle is endpoint-wide, so cycling models cannot help', () => {
+    expect(isFallbackableError(yes('platform_rate_limited'))).toBe(false);
   });
 
   it('is false for validation / auth / forbidden / not_found', () => {
