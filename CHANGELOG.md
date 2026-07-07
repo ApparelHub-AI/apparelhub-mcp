@@ -9,6 +9,8 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-07-07
+
 ### Changed
 
 - **Honest structured error attribution (epic #66 phase 2).** Every failure now carries a cause an
