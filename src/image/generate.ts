@@ -72,9 +72,17 @@ export async function runGeneration(
     signal: deps.signal,
   });
 
-  const uuid = str(res, 'image_uuid', 'uuid') ?? '';
-  const directUrl = str(res, 'url', 'image_url', 'full_url');
-  const status = str(res, 'processing_status', 'status');
+  // A SYNCHRONOUS success (a model that isn't on the platform's async slow-list, e.g. OpenAI /
+  // Grok Imagine, or a slow model that slipped to the sync path) returns 200 with the image nested
+  // under `generated_image`, NOT top-level like the async 202 does. Read both shapes so a synchronous
+  // success isn't misreported as generation_failed even though it saved (ApparelHub-AI/apparelhub-mcp#70).
+  const gi = isRecord(res) && isRecord(res.generated_image) ? res.generated_image : undefined;
+  const uuid =
+    str(res, 'image_uuid', 'uuid') ?? str(gi, 'uuid', 'image_uuid') ?? '';
+  const directUrl =
+    str(res, 'url', 'image_url', 'full_url') ?? str(gi, 'url', 'image_url', 'full_url');
+  const status =
+    str(res, 'processing_status', 'status') ?? str(gi, 'processing_status', 'status');
 
   // Fast path: the image came back inline.
   if (directUrl && status !== 'pending' && status !== 'processing') {

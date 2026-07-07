@@ -18,21 +18,33 @@ export const VALID_SOURCES = [
 
 export type DesignStyle = 'photoreal' | 'vector' | 'abstract' | 'auto';
 
-// Slow models run through the async pipeline: POST returns 202 + image_uuid, and the caller
-// polls /images/upload/{uuid}/status. Fast models return the image inline. (Nano Banana — the
-// platform default — is async.)
-export const ASYNC_SOURCES = new Set<string>([
-  'Nano Banana',
-  'Seedream 4.0',
-  'Seedream 4.5',
-  'Flux 2 Pro',
-  'Google Imagen 4',
-  'Wan 2.7',
-  'GPT Image 2',
-]);
+/** Find the closest VALID_SOURCES entry to a near-miss name (case-insensitive prefix overlap),
+ *  used only to build a "did you mean …" hint — e.g. "Flux 1.1" -> "Flux 1.1 Pro". */
+function nearestSource(source: string): string | undefined {
+  const w = source.trim().toLowerCase();
+  if (!w) return undefined;
+  return VALID_SOURCES.find((s) => {
+    const c = s.toLowerCase();
+    return c.startsWith(w) || w.startsWith(c);
+  });
+}
 
-export function isAsyncSource(source: string): boolean {
-  return ASYNC_SOURCES.has(source);
+/** Normalize a caller-supplied `source` to its canonical VALID_SOURCES spelling, case-insensitively.
+ *  The platform's source-name match is case-insensitive too, but its slow-model async routing is
+ *  case-SENSITIVE — so a near-miss like "SeeDream 4.5" would run synchronously and a wrong name like
+ *  "Flux 1.1" would 500 there. Normalizing here forwards the exact canonical name, or throws a clear
+ *  bad_request (non-fallbackable) listing the valid sources, instead of a confusing downstream
+ *  failure (ApparelHub-AI/apparelhub-mcp#70). */
+export function normalizeSource(source: string): string {
+  const wanted = source.trim().toLowerCase();
+  const match = VALID_SOURCES.find((s) => s.toLowerCase() === wanted);
+  if (match) return match;
+  const suggestion = nearestSource(source);
+  throw new AhError({
+    code: 'bad_request',
+    message: `Unknown image source "${source}".`,
+    suggestion: `${suggestion ? `Did you mean "${suggestion}"? ` : ''}Valid sources: ${VALID_SOURCES.join(', ')}.`,
+  });
 }
 
 // Only Nano Banana and OpenAI support the img2img edit endpoint; Replicate-backed sources 422.
