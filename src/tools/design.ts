@@ -2,12 +2,12 @@ import { z } from 'zod';
 import { defineTool, type ToolDef } from './registry.js';
 import { AhError } from '../errors.js';
 import { asArray, str } from '../util/shape.js';
-import { runGeneration } from '../image/generate.js';
+import { runGenerationWithFallback } from '../image/generate.js';
 import {
   augmentPromptForTransparency,
   buildIterationPrompt,
   EDIT_CAPABLE_SOURCES,
-  pickSource,
+  fallbackLadder,
 } from '../knowledge/sources.js';
 import type { ToolContext } from './context.js';
 
@@ -184,23 +184,30 @@ export const generateImage = defineTool({
       .boolean()
       .optional()
       .describe('Add the solid-green-background hint so the background can be keyed out (default true).'),
+    no_fallback: z
+      .boolean()
+      .optional()
+      .describe(
+        'Disable the model-fallback ladder. By default a rate-limited/transient model transparently retries with a different model (see fallback_trail); set true to fail on the chosen source alone.',
+      ),
     workspace: z.string().optional(),
   }),
   annotations: { openWorldHint: true },
   handler: async (input, ctx) => {
-    const source = input.source ?? pickSource({ style: input.style });
     const augment = input.augment_prompt_for_transparency ?? true;
     const prompt = augment ? augmentPromptForTransparency(input.prompt) : input.prompt;
+    const sources = fallbackLadder({ style: input.style, source: input.source });
     const started = Date.now();
-    const g = await runGeneration(
+    const g = await runGenerationWithFallback(
       ctx.api,
-      { prompt, source, size: input.size, workspace: input.workspace },
+      { prompt, source: sources[0]!, sources, size: input.size, workspace: input.workspace, noFallback: input.no_fallback },
       { progress: ctx.progress, signal: ctx.signal },
     );
     return {
       image_uuid: g.image_uuid,
       image_url: g.image_url,
       source_used: g.source_used,
+      fallback_trail: g.fallback_trail,
       generation_latency_ms: Date.now() - started,
     };
   },
@@ -266,6 +273,12 @@ export const designApparel = defineTool({
     needs_transparency: z.boolean().optional(),
     verify_text: z.boolean().optional(),
     source: z.string().optional(),
+    no_fallback: z
+      .boolean()
+      .optional()
+      .describe(
+        'Disable the model-fallback ladder. By default a rate-limited/transient model transparently retries with a different model (per-design fallback_trail); set true to fail on the chosen source alone.',
+      ),
     workspace: z.string().optional(),
   }),
   annotations: { openWorldHint: true },
@@ -273,15 +286,15 @@ export const designApparel = defineTool({
     const count = input.count ?? 1;
     const needsTransparency = input.needs_transparency ?? true;
     const verifyText = input.verify_text ?? true;
-    const source = input.source ?? pickSource({ style: input.style });
+    const sources = fallbackLadder({ style: input.style, source: input.source });
     const designs: Record<string, unknown>[] = [];
 
     for (let i = 0; i < count; i += 1) {
       await ctx.progress.report(Math.round((i / count) * 100), `Design ${i + 1} of ${count}...`);
       const prompt = augmentPromptForTransparency(input.prompt);
-      const gen = await runGeneration(
+      const gen = await runGenerationWithFallback(
         ctx.api,
-        { prompt, source, workspace: input.workspace },
+        { prompt, source: sources[0]!, sources, workspace: input.workspace, noFallback: input.no_fallback },
         { progress: ctx.progress, signal: ctx.signal },
       );
 
@@ -289,6 +302,7 @@ export const designApparel = defineTool({
         design_uuid: gen.image_uuid,
         design_url: gen.image_url,
         source_used: gen.source_used,
+        fallback_trail: gen.fallback_trail,
         transparency_clean: false,
       };
 
@@ -354,11 +368,19 @@ export const iterateDesign = defineTool({
     change_description: z.string().min(1),
     preserve: z.array(z.enum(['composition', 'subject', 'style'])).optional(),
     source: z.string().optional().describe('Editing source (default Nano Banana).'),
+    no_fallback: z
+      .boolean()
+      .optional()
+      .describe(
+        'Disable the model-fallback ladder. By default a rate-limited/transient editing model transparently retries with the other edit-capable model (see fallback_trail); set true to fail on the chosen source alone.',
+      ),
     workspace: z.string().optional(),
   }),
   annotations: { openWorldHint: true },
   handler: async (input, ctx) => {
     const source = input.source ?? 'Nano Banana';
+    // Only Nano Banana / OpenAI can edit; a pinned Replicate source is a hard error, not a silent
+    // switch, so the user learns their choice is invalid for editing.
     if (!EDIT_CAPABLE_SOURCES.has(source)) {
       throw new AhError({
         code: 'unprocessable',
@@ -367,12 +389,26 @@ export const iterateDesign = defineTool({
     }
     const preserve = input.preserve ?? ['composition', 'subject'];
     const prompt = buildIterationPrompt(input.change_description, preserve);
-    const g = await runGeneration(
+    // Edit-only ladder: the two edit-capable models, chosen source first.
+    const sources = fallbackLadder({ source, edit: true });
+    const g = await runGenerationWithFallback(
       ctx.api,
-      { prompt, source, sourceImageUuid: input.source_design_uuid, workspace: input.workspace },
+      {
+        prompt,
+        source: sources[0]!,
+        sources,
+        sourceImageUuid: input.source_design_uuid,
+        workspace: input.workspace,
+        noFallback: input.no_fallback,
+      },
       { progress: ctx.progress, signal: ctx.signal },
     );
-    return { design_uuid: g.image_uuid, design_url: g.image_url, source_used: g.source_used };
+    return {
+      design_uuid: g.image_uuid,
+      design_url: g.image_url,
+      source_used: g.source_used,
+      fallback_trail: g.fallback_trail,
+    };
   },
 });
 

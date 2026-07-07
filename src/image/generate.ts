@@ -1,5 +1,6 @@
 import type { ApiClient } from '../http/client.js';
 import { AhError } from '../errors.js';
+import { isFallbackableError } from '../knowledge/sources.js';
 import { isRecord, str } from '../util/shape.js';
 import type { ProgressReporter } from '../progress.js';
 
@@ -20,6 +21,24 @@ export interface GeneratedImage {
   image_uuid: string;
   image_url: string;
   source_used: string;
+}
+
+/** One rung of a fallback attempt: the model that was tried and why it was abandoned. */
+export interface FallbackAttempt {
+  source: string;
+  reason: string;
+}
+
+export interface GenerateWithFallbackOptions extends GenerateOptions {
+  /** The ordered ladder of sources to try (from fallbackLadder). The first is the primary. */
+  sources: string[];
+  /** Disable falling back: try only the first source and rethrow its error. */
+  noFallback?: boolean;
+}
+
+export interface GeneratedImageWithFallback extends GeneratedImage {
+  /** The models that were tried-and-abandoned before the one that succeeded (empty on first try). */
+  fallback_trail: FallbackAttempt[];
 }
 
 export interface GenerateDeps {
@@ -70,6 +89,58 @@ export async function runGeneration(
   }
   const url = await pollGeneration(api, uuid, deps, opts.workspace);
   return { image_uuid: uuid, image_url: url, source_used: opts.source };
+}
+
+/**
+ * Run a generation with a model-fallback ladder (epic #67). Tries each source in `opts.sources`;
+ * on a rate-limit/transient failure (isFallbackableError) it records the attempt and moves to the
+ * next model; a NON-fallbackable error (validation / auth / forbidden / not_found) rethrows
+ * immediately. The per-model transient retries are already exhausted inside the ApiClient before
+ * runGeneration throws, so reaching the fallback here means the model itself is throttled/down.
+ *
+ * The ladder is short (≤3 sync fallbacks), so the wall-clock cost of exhausting it is bounded even
+ * though the first source may be an async-polled model.
+ */
+export async function runGenerationWithFallback(
+  api: ApiClient,
+  opts: GenerateWithFallbackOptions,
+  deps: GenerateDeps = {},
+): Promise<GeneratedImageWithFallback> {
+  const sources = opts.sources.length ? opts.sources : [opts.source];
+  const trail: FallbackAttempt[] = [];
+  let lastError: unknown;
+
+  for (let i = 0; i < sources.length; i += 1) {
+    const source = sources[i]!;
+    try {
+      const g = await runGeneration(api, { ...opts, source }, deps);
+      // g.source_used is the model that actually produced the image (== source here).
+      return { ...g, fallback_trail: trail };
+    } catch (err) {
+      lastError = err;
+      // noFallback: honor the caller's "this model only" — surface the error as-is.
+      if (opts.noFallback) throw err;
+      // A non-transient failure (validation/auth/forbidden/not_found) must surface immediately;
+      // cycling models would not help and would hide the real cause.
+      if (!isFallbackableError(err)) throw err;
+      const reason = err instanceof AhError ? `${err.code}: ${err.message}` : String(err);
+      trail.push({ source, reason });
+      // Fall through to the next model (if any).
+      await deps.progress?.report(15, `${source} unavailable (${reason}); trying next model...`);
+    }
+  }
+
+  // Every model in the ladder was tried and every one was rate-limited/transiently down.
+  const summary = trail.map((t) => `${t.source} (${t.reason})`).join('; ');
+  const base = lastError instanceof AhError ? lastError : undefined;
+  throw new AhError({
+    code: base?.code ?? 'generation_failed',
+    httpStatus: base?.httpStatus,
+    retryAfter: base?.retryAfter,
+    message: `Image generation failed after trying every fallback model: ${summary}.`,
+    suggestion:
+      'Every model on the fallback ladder was rate-limited or transiently unavailable. Back off and retry later.',
+  });
 }
 
 async function pollGeneration(
