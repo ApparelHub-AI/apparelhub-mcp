@@ -9,6 +9,23 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+### Added
+
+- **Model-fallback ladder for image generation (epic #67).** A genuine model/platform rate limit or
+  a transient failure now transparently retries with a *different* model before surfacing an error,
+  so one throttled provider no longer fails the whole run (an unattended agent got stuck because
+  every generation defaulted to the same model). `generate_image`, `design_apparel`, and
+  `iterate_design` walk a short ladder of fast fallbacks on *different* providers — default
+  `Nano Banana → Flux 1.1 Pro → OpenAI` (abstract art leads with OpenAI; edits stay on the two
+  edit-capable models `Nano Banana → OpenAI`) — so a per-provider limit is escaped cheaply. Any
+  substitution is reported in a new `fallback_trail` (empty when the first model worked;
+  per-design for `design_apparel`). Only rate-limit/transient failures fall back
+  (`rate_limited`, `upstream_unavailable`, `network_error`, `generation_timeout`, and a
+  rate-limit-shaped `generation_failed`); validation, auth, forbidden, and not_found surface
+  immediately. An explicit `source` still falls back by default (a produced design beats none, and
+  the switch is visible in `fallback_trail`); the new `no_fallback` input disables it so a pinned
+  source fails on that source alone.
+
 ## [0.2.4] - 2026-07-06
 
 ### Added
