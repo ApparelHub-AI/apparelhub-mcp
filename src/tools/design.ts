@@ -8,6 +8,7 @@ import {
   buildIterationPrompt,
   EDIT_CAPABLE_SOURCES,
   fallbackLadder,
+  normalizeSource,
 } from '../knowledge/sources.js';
 import type { ToolContext } from './context.js';
 
@@ -196,7 +197,9 @@ export const generateImage = defineTool({
   handler: async (input, ctx) => {
     const augment = input.augment_prompt_for_transparency ?? true;
     const prompt = augment ? augmentPromptForTransparency(input.prompt) : input.prompt;
-    const sources = fallbackLadder({ style: input.style, source: input.source });
+    // Normalize a near-miss source (case/spelling) to its canonical name, or reject it clearly (#70).
+    const source = input.source !== undefined ? normalizeSource(input.source) : undefined;
+    const sources = fallbackLadder({ style: input.style, source });
     const started = Date.now();
     const g = await runGenerationWithFallback(
       ctx.api,
@@ -286,7 +289,9 @@ export const designApparel = defineTool({
     const count = input.count ?? 1;
     const needsTransparency = input.needs_transparency ?? true;
     const verifyText = input.verify_text ?? true;
-    const sources = fallbackLadder({ style: input.style, source: input.source });
+    // Normalize a near-miss source (case/spelling) to its canonical name, or reject it clearly (#70).
+    const source = input.source !== undefined ? normalizeSource(input.source) : undefined;
+    const sources = fallbackLadder({ style: input.style, source });
     const designs: Record<string, unknown>[] = [];
 
     for (let i = 0; i < count; i += 1) {
@@ -378,7 +383,8 @@ export const iterateDesign = defineTool({
   }),
   annotations: { openWorldHint: true },
   handler: async (input, ctx) => {
-    const source = input.source ?? 'Nano Banana';
+    // Normalize a near-miss source (case/spelling) to its canonical name, or reject it clearly (#70).
+    const source = normalizeSource(input.source ?? 'Nano Banana');
     // Only Nano Banana / OpenAI can edit; a pinned Replicate source is a hard error, not a silent
     // switch, so the user learns their choice is invalid for editing.
     if (!EDIT_CAPABLE_SOURCES.has(source)) {

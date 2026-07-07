@@ -112,6 +112,24 @@ describe('runGeneration', () => {
     expect(caught).toMatchObject({ code: 'model_rate_limited' });
     expect((caught as AhError).source).toBeUndefined();
   });
+
+  it('parses a SYNCHRONOUS 200 where the image is nested under generated_image (#70)', async () => {
+    // Real platform sync-path shape (OpenAI / Grok Imagine, or a slow model that slipped to sync):
+    // a 200 with the image under generated_image, NOT top-level. Before #70 this threw generation_failed
+    // even though the image was created + saved.
+    const { api } = apiFrom([
+      jsonResponse(200, {
+        generated_image: { uuid: 'sync-1', url: 'https://cdn.example/sync.png', title: 't' },
+        context: { uuid: 'ctx-1' },
+      }),
+    ]);
+    const g = await runGeneration(api, { prompt: 'x', source: 'OpenAI' }, { sleep: noSleep });
+    expect(g).toMatchObject({
+      image_uuid: 'sync-1',
+      image_url: 'https://cdn.example/sync.png',
+      source_used: 'OpenAI',
+    });
+  });
 });
 
 describe('generate_image', () => {
@@ -124,6 +142,28 @@ describe('generate_image', () => {
     expect(res).toMatchObject({ image_uuid: 'g1', image_url: 'https://cdn.example/x.png', source_used: 'OpenAI' });
     const body = JSON.parse(calls[0]?.init?.body as string);
     expect(body.prompt).toContain('#00FF00');
+  });
+
+  it('rejects an unknown source with bad_request and does not call the API (#70)', async () => {
+    const { api, calls } = apiFrom([]); // nothing queued: the API must NOT be hit
+    await expect(
+      generateImage.handler({ prompt: 'x', source: 'Flux 1.1' }, fakeContext(api)),
+    ).rejects.toMatchObject({ code: 'bad_request' });
+    expect(calls.length).toBe(0);
+  });
+
+  it('normalizes a case-variant source to canonical before calling the API (#70)', async () => {
+    const { api, calls } = apiFrom([
+      jsonResponse(202, { image_uuid: 'g6', processing_status: 'pending' }),
+      jsonResponse(200, { processing_status: 'completed', url: 'https://cdn.example/ok.png' }),
+    ]);
+    const res = (await generateImage.handler(
+      { prompt: 'x', source: 'SeeDream 4.5' }, // near-miss casing
+      fakeContext(api),
+    )) as any;
+    expect(res.source_used).toBe('Seedream 4.5'); // canonical
+    const body = JSON.parse(calls[0]?.init?.body as string);
+    expect(body.source).toBe('Seedream 4.5'); // forwarded the canonical name, not the variant
   });
 });
 

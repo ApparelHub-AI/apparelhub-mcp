@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   pickSource,
-  isAsyncSource,
+  normalizeSource,
   augmentPromptForTransparency,
   buildIterationPrompt,
   fallbackLadder,
@@ -17,12 +17,27 @@ describe('pickSource', () => {
   });
 });
 
-describe('isAsyncSource', () => {
-  it('flags the slow (async-pipeline) models', () => {
-    expect(isAsyncSource('Nano Banana')).toBe(true);
-    expect(isAsyncSource('Flux 2 Pro')).toBe(true);
-    expect(isAsyncSource('OpenAI')).toBe(false);
-    expect(isAsyncSource('Flux 1.1 Pro')).toBe(false);
+describe('normalizeSource', () => {
+  it('returns canonical names unchanged', () => {
+    expect(normalizeSource('Nano Banana')).toBe('Nano Banana');
+    expect(normalizeSource('Flux 1.1 Pro')).toBe('Flux 1.1 Pro');
+  });
+  it('normalizes case/whitespace variants to the canonical spelling', () => {
+    expect(normalizeSource('seedream 4.5')).toBe('Seedream 4.5');
+    expect(normalizeSource('SeeDream 4.5')).toBe('Seedream 4.5'); // the reported near-miss
+    expect(normalizeSource('  openai ')).toBe('OpenAI');
+  });
+  it('rejects an unknown source with a bad_request that lists valid sources + a suggestion', () => {
+    let caught: AhError | undefined;
+    try {
+      normalizeSource('Flux 1.1'); // the reported near-miss (missing " Pro")
+    } catch (e) {
+      caught = e as AhError;
+    }
+    expect(caught).toBeInstanceOf(AhError);
+    expect(caught?.code).toBe('bad_request');
+    expect(caught?.suggestion).toContain('Flux 1.1 Pro'); // nearest-match "did you mean"
+    expect(caught?.suggestion).toContain('Nano Banana'); // valid-source list
   });
 });
 
