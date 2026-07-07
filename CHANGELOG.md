@@ -9,6 +9,29 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-07-07
+
+### Fixed
+
+- **Image generation no longer fails for valid models due to a near-miss `source` name or a
+  synchronous response** (#70). Two independent bugs meant an agent that called `generate_image` /
+  `design_apparel` / `iterate_design` with a slightly-off model name — or with any synchronous
+  model — could see a failure even though the platform generated and saved the image:
+  - `source` is now validated + normalized (case-insensitively) to its canonical `VALID_SOURCES`
+    name before the request is sent, so `"seedream 4.5"` / `"SeeDream 4.5"` resolve to
+    `Seedream 4.5`. An unknown name (e.g. `"Flux 1.1"` instead of `Flux 1.1 Pro`) now raises a
+    clear `bad_request` that lists the valid sources with a "did you mean …" hint, instead of a
+    confusing downstream failure.
+  - `runGeneration` now parses the platform's **synchronous** success response (image nested under
+    `generated_image`), not just the async-poll shape. This fixes **OpenAI** and **Grok Imagine**
+    (the synchronous models), which previously reported `generation_failed` on every successful
+    generation.
+
+### Removed
+
+- The unused `ASYNC_SOURCES` / `isAsyncSource` export (dead code — `runGeneration` inspects the
+  actual response — and it had drifted out of sync with the platform's slow-model set).
+
 ## [0.2.6] - 2026-07-07
 
 ### Changed
