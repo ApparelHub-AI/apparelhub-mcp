@@ -9,6 +9,8 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-07-07
+
 ### Added
 
 - **Model-fallback ladder for image generation (epic #67).** A genuine model/platform rate limit or
