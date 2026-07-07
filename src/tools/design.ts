@@ -171,7 +171,7 @@ async function verifyTextImpl(
 export const generateImage = defineTool({
   name: 'generate_image',
   description:
-    'Generate a design image (split primitive of design_apparel). Returns the raw generated image; follow with process_transparency for apparel that needs a transparent background.',
+    'Generate a design image (split primitive of design_apparel). Returns the raw generated image; follow with process_transparency for apparel that needs a transparent background. Rate-limit errors are classified (model_rate_limited = one model\'s provider vs platform_rate_limited = this key\'s ApparelHub throttle vs request_not_sent = the call never reached ApparelHub), and fallback_trail shows any model substitutions.',
   inputSchema: z.object({
     prompt: z.string().min(1),
     source: z
@@ -264,7 +264,7 @@ export const verifyDesignText = defineTool({
 export const designApparel = defineTool({
   name: 'design_apparel',
   description:
-    'End-to-end apparel design with the platform lessons baked in: solid-green-background prompt, transparency keying, and (optionally) a local text check. Returns ready-to-use design(s). Streams progress. Set needs_transparency=false for all-over-print products.',
+    'End-to-end apparel design with the platform lessons baked in: solid-green-background prompt, transparency keying, and (optionally) a local text check. Returns ready-to-use design(s). Streams progress. Set needs_transparency=false for all-over-print products. Rate-limit errors are classified (model_rate_limited = one model\'s provider vs platform_rate_limited = this key\'s ApparelHub throttle vs request_not_sent = the call never reached ApparelHub), and each design\'s fallback_trail shows any model substitutions.',
   inputSchema: z.object({
     prompt: z.string().min(1),
     count: z.number().int().positive().max(4).optional(),
@@ -319,9 +319,9 @@ export const designApparel = defineTool({
           // process_transparency already auto-recovers a tinted-green background (dominance mode),
           // so reaching here means the keyer genuinely couldn't finish (missing toolchain, or a
           // hard keyer failure) — keep the raw design + a clear flag so the pipeline continues and
-          // the agent can decide. Transient / auth errors (rate_limited, upstream_unavailable,
-          // auth_required, download_failed, ...) still surface so a scheduled run RETRIES rather
-          // than silently shipping an unkeyed design.
+          // the agent can decide. Transient / auth errors (platform_rate_limited,
+          // upstream_unavailable, auth_required, download_failed, ...) still surface so a
+          // scheduled run RETRIES rather than silently shipping an unkeyed design.
           const degradable =
             err instanceof AhError &&
             (err.code === 'local_tool_unavailable' || err.code === 'transparency_failed');

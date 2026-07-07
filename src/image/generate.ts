@@ -27,6 +27,8 @@ export interface GeneratedImage {
 export interface FallbackAttempt {
   source: string;
   reason: string;
+  /** The structured error code of the failure (e.g. model_rate_limited), for honest attribution. */
+  code?: string;
 }
 
 export interface GenerateWithFallbackOptions extends GenerateOptions {
@@ -121,10 +123,13 @@ export async function runGenerationWithFallback(
       // noFallback: honor the caller's "this model only" — surface the error as-is.
       if (opts.noFallback) throw err;
       // A non-transient failure (validation/auth/forbidden/not_found) must surface immediately;
-      // cycling models would not help and would hide the real cause.
+      // cycling models would not help and would hide the real cause. A platform_rate_limited
+      // (ApparelHub's own per-key throttle) is deliberately NOT fallbackable either — every model
+      // rides the same key, so it also surfaces here.
       if (!isFallbackableError(err)) throw err;
+      const code = err instanceof AhError ? err.code : undefined;
       const reason = err instanceof AhError ? `${err.code}: ${err.message}` : String(err);
-      trail.push({ source, reason });
+      trail.push({ source, reason, ...(code ? { code } : {}) });
       // Fall through to the next model (if any).
       await deps.progress?.report(15, `${source} unavailable (${reason}); trying next model...`);
     }
@@ -133,6 +138,19 @@ export async function runGenerationWithFallback(
   // Every model in the ladder was tried and every one was rate-limited/transiently down.
   const summary = trail.map((t) => `${t.source} (${t.reason})`).join('; ');
   const base = lastError instanceof AhError ? lastError : undefined;
+  // Honest attribution when the WHOLE ladder was provider-throttled: the final error keeps the
+  // precise model_rate_limited code so an agent reports "the model providers are rate limiting",
+  // never "ApparelHub is rate limiting" (ApparelHub accepted every request).
+  if (trail.length > 0 && trail.every((t) => t.code === 'model_rate_limited')) {
+    throw new AhError({
+      code: 'model_rate_limited',
+      httpStatus: base?.httpStatus,
+      retryAfter: base?.retryAfter,
+      message: `Image generation failed: every fallback model's provider is currently rate limiting (${summary}).`,
+      suggestion:
+        'Every model on the ladder was throttled by its own provider — this is NOT ApparelHub\'s request throttle. Back off and retry later; switching models has already been tried.',
+    });
+  }
   throw new AhError({
     code: base?.code ?? 'generation_failed',
     httpStatus: base?.httpStatus,
@@ -171,6 +189,27 @@ async function pollGeneration(
     const error = str(s, 'error') ?? str(gi, 'error') ?? str(data, 'error');
 
     if (status === 'failed') {
+      // Async models report a provider rate limit as a structured error string (platform
+      // contract, apparelhub-ai#506): "model_rate_limited: {source} throttled by provider
+      // (retry_after={n}s)". Parse it into the precise model_rate_limited code so the fallback
+      // ladder triggers on the code (not a message heuristic) and attribution stays honest.
+      if (error && /^model_rate_limited:/.test(error)) {
+        const m = /^model_rate_limited:\s*(.+?) throttled by provider \(retry_after=(\d+)s\)/.exec(
+          error,
+        );
+        const source = m?.[1];
+        throw new AhError({
+          code: 'model_rate_limited',
+          httpStatus: 429,
+          source,
+          retryAfter: m ? Number(m[2]) : undefined,
+          message: source
+            ? `The "${source}" model's provider rate-limited this generation.`
+            : `A model provider rate limit failed this generation: ${error}`,
+          suggestion:
+            'Retry with a DIFFERENT source — the built-in fallback ladder does this automatically. This is the model provider throttling, not ApparelHub\'s request throttle.',
+        });
+      }
       throw new AhError({
         code: 'generation_failed',
         message: error ? `Generation failed: ${error}` : 'Generation failed.',

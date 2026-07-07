@@ -70,6 +70,48 @@ describe('runGeneration', () => {
       runGeneration(api, { prompt: 'x', source: 'Nano Banana' }, { sleep: noSleep }),
     ).rejects.toMatchObject({ code: 'generation_failed' });
   });
+
+  it('parses the structured async model_rate_limited failure into source + retry_after', async () => {
+    // The exact platform contract string (async path) reported via the poll status endpoint.
+    const { api } = apiFrom([
+      jsonResponse(202, { image_uuid: 'g4', processing_status: 'pending' }),
+      jsonResponse(200, {
+        processing_status: 'failed',
+        error: 'model_rate_limited: Nano Banana throttled by provider (retry_after=25s)',
+      }),
+    ]);
+    let caught: unknown;
+    try {
+      await runGeneration(api, { prompt: 'x', source: 'Nano Banana' }, { sleep: noSleep });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(AhError);
+    expect(caught).toMatchObject({
+      code: 'model_rate_limited',
+      source: 'Nano Banana',
+      retryAfter: 25,
+    });
+    expect((caught as AhError).message).toContain('Nano Banana');
+  });
+
+  it('a model_rate_limited-prefixed failure that does not fully parse still gets the precise code', async () => {
+    const { api } = apiFrom([
+      jsonResponse(202, { image_uuid: 'g5', processing_status: 'pending' }),
+      jsonResponse(200, {
+        processing_status: 'failed',
+        error: 'model_rate_limited: provider says slow down',
+      }),
+    ]);
+    let caught: unknown;
+    try {
+      await runGeneration(api, { prompt: 'x', source: 'Nano Banana' }, { sleep: noSleep });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toMatchObject({ code: 'model_rate_limited' });
+    expect((caught as AhError).source).toBeUndefined();
+  });
 });
 
 describe('generate_image', () => {

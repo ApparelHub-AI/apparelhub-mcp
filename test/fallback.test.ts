@@ -121,6 +121,81 @@ describe('runGenerationWithFallback', () => {
     expect(sources).toEqual(['Nano Banana', 'Flux 1.1 Pro', 'OpenAI']); // exhausted the whole ladder
   });
 
+  it('the async structured model_rate_limited failure triggers the ladder via the precise code', async () => {
+    // The primary (async) model 202s, then its poll fails with the exact platform contract string;
+    // the ladder must classify it as model_rate_limited (code, not message heuristic) and fall back.
+    const sources: string[] = [];
+    const fetchImpl = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/images/upload/')) {
+        return jsonResponse(200, {
+          processing_status: 'failed',
+          error: 'model_rate_limited: Nano Banana throttled by provider (retry_after=25s)',
+        });
+      }
+      const body = init?.body ? (JSON.parse(String(init.body)) as { source?: string }) : {};
+      const source = body.source ?? '';
+      sources.push(source);
+      if (source === 'Nano Banana') {
+        return jsonResponse(202, { image_uuid: 'gA', processing_status: 'pending' });
+      }
+      return jsonResponse(200, { image_uuid: 'gB', url: 'https://cdn.example/b.png' });
+    }) as unknown as FetchLike;
+
+    const res = await runGenerationWithFallback(
+      apiWith(fetchImpl),
+      { prompt: 'x', source: 'Nano Banana', sources: ['Nano Banana', 'Flux 1.1 Pro', 'OpenAI'] },
+      { sleep: noSleep, intervalMs: 0 },
+    );
+    expect(res.source_used).toBe('Flux 1.1 Pro');
+    expect(res.fallback_trail).toHaveLength(1);
+    expect(res.fallback_trail[0]).toMatchObject({
+      source: 'Nano Banana',
+      code: 'model_rate_limited',
+    });
+    expect(sources).toEqual(['Nano Banana', 'Flux 1.1 Pro']);
+  });
+
+  it('platform_rate_limited does NOT fall back — the per-key throttle is model-independent', async () => {
+    const { fetchImpl, sources } = sourceAwareFetch(() =>
+      jsonResponse(429, {}, { 'retry-after': '3' }),
+    );
+    await expect(
+      runGenerationWithFallback(
+        apiWith(fetchImpl),
+        { prompt: 'x', source: 'Nano Banana', sources: ['Nano Banana', 'Flux 1.1 Pro', 'OpenAI'] },
+        { sleep: noSleep },
+      ),
+    ).rejects.toMatchObject({ code: 'platform_rate_limited', retryAfter: 3 });
+    // Only the FIRST source was ever attempted (the client's own transient 429 retries repeat it);
+    // no other model was tried, because switching models cannot escape a per-key throttle.
+    expect(new Set(sources)).toEqual(new Set(['Nano Banana']));
+  });
+
+  it('all models provider-throttled -> final error keeps code model_rate_limited + back-off guidance', async () => {
+    const { fetchImpl, sources } = sourceAwareFetch((source) =>
+      jsonResponse(429, { error: 'model_rate_limited', source, retry_after: 25 }),
+    );
+    let caught: unknown;
+    try {
+      await runGenerationWithFallback(
+        apiWith(fetchImpl),
+        { prompt: 'x', source: 'Nano Banana', sources: ['Nano Banana', 'Flux 1.1 Pro', 'OpenAI'] },
+        { sleep: noSleep },
+      );
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(AhError);
+    const e = caught as AhError;
+    expect(e.code).toBe('model_rate_limited');
+    expect(e.message).toContain("every fallback model's provider is currently rate limiting");
+    expect(e.suggestion).toMatch(/back off/i);
+    // The honest attribution: providers throttled, NOT ApparelHub's own request throttle.
+    expect(e.suggestion).toMatch(/not apparelhub's request throttle/i);
+    expect(new Set(sources)).toEqual(new Set(['Nano Banana', 'Flux 1.1 Pro', 'OpenAI']));
+  });
+
   it('no_fallback: tries only the first source and rethrows its error', async () => {
     const { fetchImpl, sources } = sourceAwareFetch((source) =>
       source === 'Nano Banana'

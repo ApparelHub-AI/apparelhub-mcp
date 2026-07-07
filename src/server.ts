@@ -76,9 +76,17 @@ export function createServer(config: Config, deps: ServerDeps = {}): CreatedServ
   const registry = new ToolRegistry();
   registry.registerAll(allTools());
 
+  // Error-attribution rule for calling agents (epic #66 phase 2): failures carry structured
+  // codes; never blame ApparelHub for a failure the codes attribute elsewhere.
+  const instructions =
+    'Tool failures return structured error codes — attribute failures by CODE, never by guesswork. ' +
+    '`platform_rate_limited` means this key hit ApparelHub\'s request throttle: back off for retry_after seconds (switching models will not help). ' +
+    '`model_rate_limited` means one specific model\'s provider throttled: the built-in fallback ladder already retries other models, so only back off when it too is exhausted. ' +
+    '`request_not_sent` means the call never reached ApparelHub — do not attribute it to ApparelHub at all, and if several unrelated tools fail at the same moment, suspect the calling runtime or its network first.';
+
   const server = new Server(
     { name: SERVER_NAME, version: SERVER_VERSION },
-    { capabilities: { tools: {} } },
+    { capabilities: { tools: {} }, instructions },
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: registry.list() }));

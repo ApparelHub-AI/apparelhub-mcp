@@ -70,4 +70,37 @@ describe('ApiClient', () => {
       code: 'upstream_unavailable',
     });
   });
+
+  it('a fetch rejection after retries -> request_not_sent, never attributed to ApparelHub', async () => {
+    let attempts = 0;
+    const fetchImpl = (async () => {
+      attempts += 1;
+      throw new TypeError('fetch failed: connection refused');
+    }) as unknown as typeof fetch;
+    let caught: unknown;
+    try {
+      await client({ fetchImpl }).get('store');
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toMatchObject({ code: 'request_not_sent' });
+    expect(attempts).toBe(6); // initial try + 5 transient retries
+    const e = caught as { message: string; suggestion?: string };
+    const text = `${e.message} ${e.suggestion ?? ''}`;
+    // The whole point: this error must never read as an ApparelHub-side rate limit or outage.
+    expect(text).not.toMatch(/apparelhub is rate.?limited/i);
+    expect(text).toMatch(/no response was received/i);
+    expect(text).toMatch(/not an ApparelHub error or rate limit/i);
+    expect(text).toMatch(/never report apparelhub as rate-limited/i);
+    expect(text).toMatch(/calling agent's own runtime or network/i);
+  });
+
+  it('an explicit abort still surfaces as cancelled (not request_not_sent)', async () => {
+    const fetchImpl = (async () => {
+      const err = new Error('The operation was aborted');
+      err.name = 'AbortError';
+      throw err;
+    }) as unknown as typeof fetch;
+    await expect(client({ fetchImpl }).get('store')).rejects.toMatchObject({ code: 'cancelled' });
+  });
 });
