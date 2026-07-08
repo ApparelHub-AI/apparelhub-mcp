@@ -1,5 +1,8 @@
 name: CI
 
+# SECURITY (public repo): fork PRs run here with untrusted code. Keep this trigger on
+# `pull_request` (never `pull_request_target`) and never add `id-token: write` or any
+# cloud credentials to this workflow.
 on:
   push:
     branches: [main]

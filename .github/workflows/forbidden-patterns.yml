@@ -10,6 +10,9 @@ name: Forbidden patterns (public-repo hygiene)
 # here. Every check runs with `grep -q` (no output) so a matched value can never
 # be echoed into the public build logs; the error just names the category and
 # tells you to grep locally.
+#
+# SECURITY: keep this on `pull_request` (never `pull_request_target`) and never add
+# `id-token: write` or cloud credentials — fork PRs execute untrusted code here.
 
 on:
   push:
