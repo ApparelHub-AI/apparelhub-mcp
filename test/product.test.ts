@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   shipProduct,
+  createProduct,
   addVariants,
   syncToFulfillment,
   syncToChannel,
@@ -98,6 +99,34 @@ describe('ship_product', () => {
   });
 });
 
+describe('create_product', () => {
+  it('generate_mockup:true renders a mockup by auto-deriving variants from the catalog (no mockup_variant_ids needed)', async () => {
+    const { api, calls } = apiFrom([
+      garmentDetail, // fetchGarment
+      { job_uuid: 'j1' }, // POST mockup preview
+      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/m.png' }] }, // GET job poll
+      { uuid: 'p1' }, // POST product/create
+    ]);
+    const res = (await createProduct.handler(
+      {
+        design_uuid: 'd1',
+        design_url: 'https://cdn.example/d.png',
+        garment: { provider_uuid: 'pf', product_ref_id: '71' },
+        pricing: { price: 27.99 },
+        product_meta: { name: 'Cactus Tee', description: 'nice' },
+        generate_mockup: true,
+      },
+      fakeContext(api),
+    )) as any;
+    expect(res.mockup_status).toBe('generated');
+    expect(res.product_uuid).toBe('p1');
+    // The create body carries the preview_job_uuid so the mockup becomes the display image.
+    const createCall = calls.find((c) => c.url.endsWith('/product/create'));
+    const body = JSON.parse(createCall?.init?.body as string);
+    expect(body.preview_job_uuid).toBe('j1');
+  });
+});
+
 describe('add_variants', () => {
   it('resolves ids from provider options and warns on the AQUA trap', async () => {
     const { api } = apiFrom([
@@ -114,6 +143,26 @@ describe('add_variants', () => {
     )) as any;
     expect(res.variants_added).toBe(1);
     expect(res.warnings[0]).toContain('AQUA');
+  });
+
+  it('throws with the available options when nothing resolves (apparel sizes on a one-size garment)', async () => {
+    // The Cap bug: hardcoded S/M/L/XL/2XL against a one-size garment resolves nothing. Fail loud,
+    // do NOT create a 0-variant product.
+    const { api, calls } = apiFrom([
+      {
+        variants: [
+          { id: 9001, color: 'Black', size: 'One size' },
+          { id: 9002, color: 'White', size: 'One size' },
+        ],
+      }, // provider-options
+    ]);
+    await expect(
+      addVariants.handler(
+        { product_uuid: 'p1', variants: [{ color: 'Black', sizes: ['S', 'M', 'L', 'XL', '2XL'] }] },
+        fakeContext(api),
+      ),
+    ).rejects.toMatchObject({ code: 'bad_request' });
+    expect(calls).toHaveLength(1); // only the provider-options GET; no variant POSTs
   });
 });
 

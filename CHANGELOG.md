@@ -21,6 +21,17 @@ this package implements tool surface **v1**.
   product was left created-but-unsynced. `sync_to_fulfillment` now associates the product with the
   store (idempotently) before the merchandise sync, so it truly is "the required step before
   sync_to_channel."
+- **`create_product` silently ignored `generate_mockup: true`** unless `mockup_variant_ids` was
+  also passed — but in the split-primitive flow variants are added AFTER create, so there were none
+  to name, and the product shipped with the raw design as its display image (no garment mockup).
+  `generate_mockup: true` now auto-derives representative variant ids from the garment catalog
+  (already fetched for pricing), so it renders a real mockup on its own. Falls back to the raw
+  design with an explicit `warnings[]` note only if no catalog variants are available.
+- **`add_variants` silently created 0-variant products.** When no requested color/size combination
+  resolved (the classic cause: assuming apparel sizes S/M/L/XL/2XL for a one-size garment like a
+  cap/beanie/phone case — sizes are matched exactly), it returned `variants_added: 0` with a
+  warning an automated caller would ignore. It now throws an actionable error listing the garment's
+  actual available colors and sizes and pointing at `get_garment_details`.
 
 ### Changed
 
