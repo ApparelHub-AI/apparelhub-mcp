@@ -9,6 +9,33 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-08
+
+### Fixed
+
+- **The split-primitive path could never place a product on a store.** `create_product` makes a
+  STANDALONE product (on no store); the store association is `POST /store/<s>/products`, which
+  only `ship_product` ever did. `sync_to_fulfillment` skipped it, and `sync_to_channel` assumed the
+  product was already associated — so a caller that chained the primitives (notably an automated /
+  scheduled agent) hit **"product not associated with store"** at the channel-sync step and the
+  product was left created-but-unsynced. `sync_to_fulfillment` now associates the product with the
+  store (idempotently) before the merchandise sync, so it truly is "the required step before
+  sync_to_channel."
+
+### Changed
+
+- **`sync_to_channel` now self-heals the missing prerequisite.** If the channel sync fails with a
+  prerequisite-shaped client error (400/404/409/422 — the "not associated / not fulfillment-synced
+  yet" case), the tool associates the product with the store, syncs it to the fulfillment provider,
+  and retries the channel sync once, returning a `warnings[]` note that it did so. The clean,
+  explicit order is still `sync_to_fulfillment` → `sync_to_channel` (which now pays nothing extra on
+  the happy path); non-prerequisite errors (auth, rate limit, transient 5xx) still surface unchanged.
+- **Clarified the ordering in tool descriptions** so an agent (including a fresh, memory-less
+  scheduled run) can't miss it: `create_product` states it produces a standalone product and names
+  the required next steps; `sync_to_channel` states its prerequisite and the auto-heal fallback;
+  `sync_to_fulfillment` states it does the store association too; and `ship_product` recommends
+  itself for automated / scheduled runs since it guarantees the correct order in one call.
+
 ## [0.3.0] - 2026-07-08
 
 ### Added

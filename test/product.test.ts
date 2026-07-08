@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   shipProduct,
   addVariants,
+  syncToFulfillment,
   syncToChannel,
   updateProduct,
   deleteProduct,
@@ -116,6 +117,23 @@ describe('add_variants', () => {
   });
 });
 
+describe('sync_to_fulfillment', () => {
+  it('associates the product with the store BEFORE the merchandise sync', async () => {
+    // A create_product product is standalone; the merchandise sync is addressed under the store's
+    // product list, so the association must happen first (this was previously missing here).
+    const { api, calls } = apiFrom([{}, {}]);
+    const res = (await syncToFulfillment.handler(
+      { product_uuid: 'p1', store_uuid: 's1' },
+      fakeContext(api),
+    )) as any;
+    expect(res.fulfillment_status).toBe('synced');
+    expect(calls).toHaveLength(2);
+    expect(calls[0]?.init?.method).toBe('POST');
+    expect(calls[0]?.url.endsWith('/store/s1/products')).toBe(true); // associate
+    expect(calls[1]?.url).toContain('target=merchandise'); // then fulfillment sync
+  });
+});
+
 describe('sync_to_channel', () => {
   it('defaults to draft', async () => {
     const { api, calls } = apiFrom([{ listing_url: 'https://shop.example/y' }]);
@@ -124,8 +142,61 @@ describe('sync_to_channel', () => {
       fakeContext(api),
     )) as any;
     expect(res.sync_status).toBe('synced_as_draft');
+    expect(res.warnings).toBeUndefined(); // happy path: no heal, no warning
+    expect(calls).toHaveLength(1); // no extra associate/fulfillment work when it succeeds first try
     expect(calls[0]?.url).toContain('listing_state=draft');
     expect(calls[0]?.url).toContain('target=ecommerce');
+  });
+
+  it('self-heals when the product is not yet associated with the store, then retries once', async () => {
+    // 1st ecommerce sync 400s ("product not associated with store"); the tool then associates +
+    // fulfillment-syncs and retries the ecommerce sync, which succeeds.
+    const { fetchImpl, calls } = queueFetch([
+      jsonResponse(400, { error: 'bad_request', message: 'product not associated with store' }),
+      jsonResponse(200, {}), // associate
+      jsonResponse(200, {}), // merchandise (fulfillment) sync
+      jsonResponse(200, { listing_url: 'https://shop.example/z' }), // ecommerce retry
+    ]);
+    const api = new ApiClient({
+      apiKey: 'k',
+      baseUrl: 'https://api.example.test/agents/v1',
+      userAgent: 't',
+      fetchImpl,
+      sleepImpl: noSleep,
+    });
+    const res = (await syncToChannel.handler(
+      { product_uuid: 'p1', store_uuid: 's1', integration_uuid: 'i1' },
+      fakeContext(api),
+    )) as any;
+
+    expect(res.sync_status).toBe('synced_as_draft');
+    expect(res.channel_url).toBe('https://shop.example/z');
+    expect(res.warnings?.[0]).toContain('auto-associated');
+    expect(calls).toHaveLength(4);
+    expect(calls[0]?.url).toContain('target=ecommerce'); // failed first attempt
+    expect(calls[1]?.url.endsWith('/store/s1/products')).toBe(true); // heal: associate
+    expect(calls[2]?.url).toContain('target=merchandise'); // heal: fulfillment sync
+    expect(calls[3]?.url).toContain('target=ecommerce'); // successful retry
+  });
+
+  it('does NOT self-heal a non-prerequisite error (e.g. 403) — it surfaces', async () => {
+    const { fetchImpl, calls } = queueFetch([
+      jsonResponse(403, { error: 'forbidden', message: 'nope' }),
+    ]);
+    const api = new ApiClient({
+      apiKey: 'k',
+      baseUrl: 'https://api.example.test/agents/v1',
+      userAgent: 't',
+      fetchImpl,
+      sleepImpl: noSleep,
+    });
+    await expect(
+      syncToChannel.handler(
+        { product_uuid: 'p1', store_uuid: 's1', integration_uuid: 'i1' },
+        fakeContext(api),
+      ),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    expect(calls).toHaveLength(1); // no heal attempt
   });
 });
 
