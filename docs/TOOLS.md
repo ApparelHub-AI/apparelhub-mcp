@@ -78,6 +78,20 @@ Mutating tools **default to a dry run**; applying only takes safe actions.
 | `approve_order_hold` | Approve one hold. May return `deferred` when the provider can't flip it (with a dashboard link). |
 | `request_hold_changes` | Request changes on a hold (`change_kind` minor/full_replacement + notes). |
 
+## Fulfillment issues
+
+Post-sale problem reports on fulfilled orders. Providers accept problem reports only in their own
+dashboards, within 30 days of delivery (resolved as a free reprint or a wallet refund); these
+tools compute the window, build the report, and track the claim to resolution. Evidence photos
+are attached in the ApparelHub UI (multipart upload).
+
+| Tool | Summary |
+|---|---|
+| `report_fulfillment_issue` | Report a defect on an order (mockup mismatch, print quality, damaged, wrong/missing item, late, lost) with the affected line items and requested resolution. |
+| `list_fulfillment_issues` | One order's issues plus its report-window eligibility, or the workspace-wide inbox with status/store filters and paging. Read-only. |
+| `check_fulfillment_issue` | One issue in full (items, evidence, claim tracking) plus the provider-ready problem report: copyable `summary_text` and the provider dashboard deep-link. Read-only. |
+| `resolve_fulfillment_issue` | Record the provider filing (`submit_upstream`, with the claim reference), close with a `resolution_type` (`resolve`), or build a zero-charge replacement draft order (`create_replacement`). |
+
 ## Analytics
 
 Read-only. Filters: `start`, `end`, `store`, `currency`, `workspace`.

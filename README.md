@@ -91,7 +91,7 @@ Any MCP-capable client uses the same shape: run `npx -y @apparelhub/mcp-server` 
 
 ## Tools
 
-74 tools. See [`docs/TOOLS.md`](./docs/TOOLS.md) for the full reference; call `tools/list` from
+78 tools. See [`docs/TOOLS.md`](./docs/TOOLS.md) for the full reference; call `tools/list` from
 your agent for the live schemas.
 
 - **Read** — `list_my_workspaces`, `list_my_stores`, `list_my_designs`, `list_my_products`,
@@ -104,6 +104,10 @@ your agent for the live schemas.
 - **Orders** — lifecycle (`approve_order`, `unapprove_order`, `hold_order`, `cancel_order`,
   `confirm_order`, `submit_order_to_fulfillment`, `check_order_status`, `reconcile_order`) and
   design-approval holds (`list_order_holds`, `approve_order_hold`, `request_hold_changes`).
+- **Fulfillment issues** — `report_fulfillment_issue` (report a defect on an order),
+  `list_fulfillment_issues` (per-order or workspace-wide inbox), `check_fulfillment_issue` (full
+  issue plus the provider-ready problem report), `resolve_fulfillment_issue` (record the provider
+  filing, close with a resolution, or create a replacement order).
 - **Analytics** — `analytics_summary`, `analytics_timeseries`, `analytics_breakdown`,
   `analytics_ops`, `analytics_portfolio`.
 - **Collections** — `list_collections`, `get_collection`, `create_collection`, `update_collection`,

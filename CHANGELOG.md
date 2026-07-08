@@ -9,6 +9,35 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-08
+
+### Added
+
+- **Fulfillment-issue tools** (platform epic apparelhub-ai#510): a post-sale problem-report group
+  for defects on fulfilled orders — the item doesn't match the approved mockup, print quality,
+  damaged in transit, wrong / missing item, late or lost. Printful/Printify accept problem
+  reports **only in their own dashboards, within 30 days of delivery** (resolved as a free
+  reprint or a wallet refund), so the tools compute the window, build the provider-ready report,
+  and track the claim to resolution instead of pretending to file via API.
+  - `report_fulfillment_issue` — open a tracked issue on an order (category, description,
+    affected line items, requested resolution) with the report deadline + days remaining
+    computed up front and a `next_step` pointing at the report/filing flow.
+  - `list_fulfillment_issues` — one order's issues plus its report-window eligibility, or the
+    workspace-wide issues inbox (`status` filter incl. `open_any` = open + filed upstream,
+    `store` filter, limit/offset paging). Read-only.
+  - `check_fulfillment_issue` — the full issue (items, evidence attachments, provider-claim
+    tracking, resolution) plus, by default, the provider-ready problem report: a copy-paste
+    `summary_text` and the provider dashboard deep-link.
+  - `resolve_fulfillment_issue` — one dispatcher for the rest of the lifecycle:
+    `submit_upstream` (record the provider filing + claim reference; returns the dashboard link),
+    `resolve` (close with a `resolution_type`), and `create_replacement` (one-click zero-charge
+    replacement/reship draft order built from the affected items). The platform's structured
+    replacement refusals (`recipient_unavailable`, `variant_unlinked`, `replacement_exists`)
+    surface honestly with what-to-do-instead guidance (create the order manually / reuse the
+    existing replacement) rather than a generic conflict.
+  - Evidence uploads are multipart and stay in the ApparelHub UI; the tools say so explicitly
+    instead of failing opaquely. Tool surface grows 74 → 78.
+
 ## [0.2.7] - 2026-07-07
 
 ### Fixed
