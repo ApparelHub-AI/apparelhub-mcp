@@ -6,6 +6,7 @@ import { productTools } from './product.js';
 import { systemsTools } from './systems.js';
 import { safetyTools } from './safety.js';
 import { orderTools } from './orders.js';
+import { issueTools } from './issues.js';
 import { analyticsTools } from './analytics.js';
 import { collectionTools } from './collections.js';
 import { transferTools } from './transfer.js';
@@ -24,6 +25,8 @@ export function allTools(): ToolDef[] {
     // Capability-gap tools (epic #47): order management, analytics, collections,
     // cross-workspace transfer, tier-2 management, and the api_request escape hatch.
     ...orderTools,
+    // Post-sale fulfillment-issue reporting + resolution (platform epic #510).
+    ...issueTools,
     ...analyticsTools,
     ...collectionTools,
     ...transferTools,
