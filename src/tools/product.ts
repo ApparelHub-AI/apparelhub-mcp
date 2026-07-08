@@ -95,6 +95,39 @@ function enforcePricingFloor(baseCost: number | undefined, price: number): void 
   }
 }
 
+/**
+ * Idempotently (1) associate a product with a store and (2) sync it to the store's fulfillment
+ * provider (Printful/Printify). This is the HARD prerequisite for any sales-channel sync: a
+ * product created by create_product is standalone (on no store), and the ecommerce listing binds
+ * to the fulfillment SKU. `POST store/<s>/products` is a no-op if the product is already
+ * associated, and the merchandise sync is safe to repeat — so this is safe to call more than once.
+ * Errors propagate: a caller that genuinely cannot associate / fulfillment-sync (e.g. the product
+ * has no variants) must hear the real error, not get a cosmetic listing with no manufacturing path.
+ */
+async function associateAndSyncFulfillment(
+  ctx: ToolContext,
+  storeUuid: string,
+  productUuid: string,
+  workspace?: string,
+): Promise<void> {
+  await ctx.api.post(`store/${enc(storeUuid)}/products`, {
+    body: { product_uuids: [productUuid] },
+    workspace,
+    signal: ctx.signal,
+  });
+  await ctx.api.post(`store/${enc(storeUuid)}/products/${enc(productUuid)}/sync`, {
+    query: { target: 'merchandise' },
+    workspace,
+    signal: ctx.signal,
+  });
+}
+
+// Client-error statuses where a sync_to_channel failure most likely means "the product isn't on
+// the store / isn't fulfillment-synced yet" — worth a one-shot self-heal (associate + fulfillment
+// sync) then retry. Auth (401/403), rate limit (429) and transient 5xx are NOT healable this way
+// (the client already retried the transient ones), so those propagate unchanged.
+const CHANNEL_SYNC_HEALABLE_STATUS = new Set([400, 404, 409, 422]);
+
 const garmentSchema = z.object({
   provider_uuid: z.string().min(1),
   product_ref_id: z.string().min(1),
@@ -109,7 +142,7 @@ const variantSchema = z.object({
 export const shipProduct = defineTool({
   name: 'ship_product',
   description:
-    'End-to-end: take a design, generate + verify a mockup, create the product with the correct field names, add all variants, associate with a store, sync to fulfillment, then (optionally) sync to sales channels as DRAFT. Enforces pricing floors and guards the AQUA-vs-Navy variant trap. Streams progress.',
+    'End-to-end pipeline in ONE call: take a design, generate + verify a mockup, create the product with the correct field names, add all variants, associate with a store, sync to fulfillment, then (optionally) sync to sales channels as DRAFT. Enforces pricing floors and guards the AQUA-vs-Navy variant trap. Streams progress. PREFER this over chaining create_product + add_variants + sync_to_fulfillment + sync_to_channel yourself — especially for AUTOMATED or SCHEDULED runs — because it guarantees the correct order (store association + fulfillment sync BEFORE any channel sync). Use the split primitives only when you deliberately need a partial/interactive flow.',
   inputSchema: z.object({
     design_uuid: z.string().min(1),
     garment: garmentSchema,
@@ -279,7 +312,7 @@ export const shipProduct = defineTool({
 export const createProduct = defineTool({
   name: 'create_product',
   description:
-    'Create a product from a design (split primitive). Applies the correct field names + pricing floor. Pass mockup_variant_ids to also generate a mockup; otherwise the design is used as the display image. Add variants with add_variants next.',
+    'Create a STANDALONE product from a design (split primitive) — it is NOT placed on any store yet. Applies the correct field names + pricing floor. Set generate_mockup: true to render a garment mockup as the display image (it auto-derives representative variants from the catalog, so you do NOT need mockup_variant_ids) — otherwise the raw design is used as the display image. To get it onto a store and listed, the required sequence is: add_variants -> sync_to_fulfillment(product_uuid, store_uuid) [associates it with the store + syncs to Printful/Printify] -> sync_to_channel [sales channel]. To run that whole pipeline in one call instead, use ship_product.',
   inputSchema: z.object({
     design_uuid: z.string().min(1),
     garment: garmentSchema,
@@ -298,9 +331,22 @@ export const createProduct = defineTool({
     const designUrl = input.design_url ?? (await resolveImageUrl(ctx, input.design_uuid, ws));
     const printData = buildPrintData(garment.area, designUrl);
 
+    // Generate a mockup when asked. In the split-primitive flow, add_variants runs AFTER this, so
+    // the product has no variants of its own yet — derive representative variant ids from the
+    // garment catalog (fetched above) so `generate_mockup: true` actually produces a mockup instead
+    // of silently leaving the raw design as the display image.
+    const warnings: string[] = [];
+    const wantMockup = input.generate_mockup ?? Boolean(input.mockup_variant_ids?.length);
+    let mockupVariantIds = input.mockup_variant_ids ?? [];
+    if (wantMockup && mockupVariantIds.length === 0) {
+      mockupVariantIds = garment.matrix
+        .map((m) => m.provider_variant_id)
+        .filter((id) => typeof id === 'number' && id > 0)
+        .slice(0, 5);
+    }
     let previewJobUuid: string | undefined;
     let mockupStatus: 'generated' | 'skipped' = 'skipped';
-    if ((input.generate_mockup ?? Boolean(input.mockup_variant_ids?.length)) && input.mockup_variant_ids?.length) {
+    if (wantMockup && mockupVariantIds.length) {
       const m = await runMockup(
         ctx.api,
         {
@@ -308,12 +354,16 @@ export const createProduct = defineTool({
           generated_image_uuid: input.design_uuid,
           provider_product_ref_id: input.garment.product_ref_id,
           templates: printData,
-          variant_ids: input.mockup_variant_ids.slice(0, 5),
+          variant_ids: mockupVariantIds.slice(0, 5),
         },
         { progress: ctx.progress, signal: ctx.signal, workspace: ws },
       );
       previewJobUuid = m.job_uuid;
       mockupStatus = 'generated';
+    } else if (wantMockup) {
+      warnings.push(
+        'generate_mockup was requested but no representative variant ids could be derived for this garment, so it will use the raw design as its display image. Pass mockup_variant_ids, or use ship_product (it resolves variants then generates the mockup).',
+      );
     }
 
     const created = await ctx.api.post('product/create', {
@@ -335,7 +385,7 @@ export const createProduct = defineTool({
       product_uuid: productUuid,
       product_url: productUuid ? viewUrl.product(productUuid) : undefined,
       mockup_status: mockupStatus,
-      warnings: [],
+      warnings,
     };
   },
 });
@@ -374,6 +424,21 @@ export const addVariants = defineTool({
       })),
       input.product_ref_id,
     );
+    if (resolvedR.resolved.length === 0) {
+      // Fail LOUDLY instead of silently creating a 0-variant product. The usual cause is assuming
+      // apparel sizes (S/M/L/XL/2XL) for a garment that uses different labels — caps/beanies/phone
+      // cases/bottles are often one-size. Sizes are matched exactly, so a mismatch resolves nothing.
+      const colors = [...new Set(matrix.map((m) => m.color).filter((c): c is string => Boolean(c)))];
+      const sizes = [...new Set(matrix.map((m) => m.size).filter((s): s is string => Boolean(s)))];
+      throw new AhError({
+        code: 'bad_request',
+        message:
+          'None of the requested color/size combinations exist for this garment, so no variants were added.',
+        suggestion:
+          `Available colors: [${colors.join(', ') || 'n/a'}]. Available sizes: [${sizes.join(', ') || 'n/a'}]. ` +
+          'Do NOT assume S/M/L/XL/2XL — read the real options from get_garment_details and build the variant list from those (many accessories are one-size).',
+      });
+    }
     let added = 0;
     for (const v of resolvedR.resolved) {
       await ctx.api.post(`product/${enc(input.product_uuid)}/variants`, {
@@ -395,7 +460,8 @@ export const addVariants = defineTool({
 
 export const syncToFulfillment = defineTool({
   name: 'sync_to_fulfillment',
-  description: 'Sync a product to its fulfillment provider (Printful/Printify). Do this before syncing to any sales channel.',
+  description:
+    "Associate a product with a store AND sync it to that store's fulfillment provider (Printful/Printify). This is the REQUIRED step before sync_to_channel: it both puts the product on the store (a product from create_product is standalone) and creates the manufacturing path the sales-channel listing binds to. Run it after the product has variants.",
   inputSchema: z.object({
     product_uuid: z.string().min(1),
     store_uuid: z.string().min(1),
@@ -403,18 +469,18 @@ export const syncToFulfillment = defineTool({
   }),
   annotations: { openWorldHint: true },
   handler: async (input, ctx) => {
-    await ctx.api.post(`store/${enc(input.store_uuid)}/products/${enc(input.product_uuid)}/sync`, {
-      query: { target: 'merchandise' },
-      workspace: input.workspace,
-      signal: ctx.signal,
-    });
-    return { product_uuid: input.product_uuid, fulfillment_status: 'synced' };
+    // Associate with the store (idempotent) THEN sync to the fulfillment provider. The association
+    // was previously missing here, so a product created by create_product (standalone) could not
+    // be fulfillment-synced without a separate association call the split-primitive path never made.
+    await associateAndSyncFulfillment(ctx, input.store_uuid, input.product_uuid, input.workspace);
+    return { product_uuid: input.product_uuid, store_uuid: input.store_uuid, fulfillment_status: 'synced' };
   },
 });
 
 export const syncToChannel = defineTool({
   name: 'sync_to_channel',
-  description: 'Sync a product to one sales channel. Defaults to DRAFT — only push live when the user explicitly asks.',
+  description:
+    'Sync one product to a sales channel (WooCommerce/Shopify/Wix) as a listing. PREREQUISITE: the product must first be associated with the store AND synced to its fulfillment provider — call sync_to_fulfillment(product_uuid, store_uuid) FIRST (it does the store association too). If that prerequisite is missing, this tool now AUTO-HEALS it (associate + fulfillment-sync, then retries once) instead of failing with "product not associated with store" — but the clean, explicit order is sync_to_fulfillment then sync_to_channel, and ship_product does the whole pipeline in one call. Defaults to DRAFT — only push live when the user explicitly asks.',
   inputSchema: z.object({
     product_uuid: z.string().min(1),
     store_uuid: z.string().min(1),
@@ -425,16 +491,45 @@ export const syncToChannel = defineTool({
   annotations: { openWorldHint: true },
   handler: async (input, ctx) => {
     const state = input.state ?? 'draft';
-    const r = await ctx.api.post(`store/${enc(input.store_uuid)}/products/${enc(input.product_uuid)}/sync`, {
-      query: { target: 'ecommerce', integration_uuid: input.integration_uuid, listing_state: state },
-      workspace: input.workspace,
-      signal: ctx.signal,
-    });
+    const ws = input.workspace;
+    const warnings: string[] = [];
+
+    const channelSync = () =>
+      ctx.api.post(`store/${enc(input.store_uuid)}/products/${enc(input.product_uuid)}/sync`, {
+        query: { target: 'ecommerce', integration_uuid: input.integration_uuid, listing_state: state },
+        workspace: ws,
+        signal: ctx.signal,
+      });
+
+    let r: unknown;
+    try {
+      r = await channelSync();
+    } catch (err) {
+      // Self-heal the most common first-attempt failure: the product was never associated with the
+      // store / synced to fulfillment (a caller that jumped straight from create_product to here —
+      // the exact bug this guards). Associate + fulfillment-sync idempotently, then retry ONCE.
+      // Any non-prerequisite error (auth, rate limit, transient 5xx), or a still-failing retry, is
+      // real — let it surface.
+      if (
+        !(err instanceof AhError) ||
+        err.httpStatus === undefined ||
+        !CHANNEL_SYNC_HEALABLE_STATUS.has(err.httpStatus)
+      ) {
+        throw err;
+      }
+      await associateAndSyncFulfillment(ctx, input.store_uuid, input.product_uuid, ws);
+      warnings.push(
+        'Product was not associated with the store / synced to fulfillment yet; auto-associated and synced to the fulfillment provider, then retried the channel sync. Call sync_to_fulfillment(product_uuid, store_uuid) before sync_to_channel to avoid this, or use ship_product for the whole pipeline in one call.',
+      );
+      r = await channelSync();
+    }
+
     return {
       product_uuid: input.product_uuid,
       integration_uuid: input.integration_uuid,
       sync_status: state === 'live' ? 'synced_as_live' : 'synced_as_draft',
       channel_url: str(r, 'listing_url', 'external_url', 'url'),
+      ...(warnings.length ? { warnings } : {}),
     };
   },
 });

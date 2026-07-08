@@ -9,6 +9,44 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-08
+
+### Fixed
+
+- **The split-primitive path could never place a product on a store.** `create_product` makes a
+  STANDALONE product (on no store); the store association is `POST /store/<s>/products`, which
+  only `ship_product` ever did. `sync_to_fulfillment` skipped it, and `sync_to_channel` assumed the
+  product was already associated — so a caller that chained the primitives (notably an automated /
+  scheduled agent) hit **"product not associated with store"** at the channel-sync step and the
+  product was left created-but-unsynced. `sync_to_fulfillment` now associates the product with the
+  store (idempotently) before the merchandise sync, so it truly is "the required step before
+  sync_to_channel."
+- **`create_product` silently ignored `generate_mockup: true`** unless `mockup_variant_ids` was
+  also passed — but in the split-primitive flow variants are added AFTER create, so there were none
+  to name, and the product shipped with the raw design as its display image (no garment mockup).
+  `generate_mockup: true` now auto-derives representative variant ids from the garment catalog
+  (already fetched for pricing), so it renders a real mockup on its own. Falls back to the raw
+  design with an explicit `warnings[]` note only if no catalog variants are available.
+- **`add_variants` silently created 0-variant products.** When no requested color/size combination
+  resolved (the classic cause: assuming apparel sizes S/M/L/XL/2XL for a one-size garment like a
+  cap/beanie/phone case — sizes are matched exactly), it returned `variants_added: 0` with a
+  warning an automated caller would ignore. It now throws an actionable error listing the garment's
+  actual available colors and sizes and pointing at `get_garment_details`.
+
+### Changed
+
+- **`sync_to_channel` now self-heals the missing prerequisite.** If the channel sync fails with a
+  prerequisite-shaped client error (400/404/409/422 — the "not associated / not fulfillment-synced
+  yet" case), the tool associates the product with the store, syncs it to the fulfillment provider,
+  and retries the channel sync once, returning a `warnings[]` note that it did so. The clean,
+  explicit order is still `sync_to_fulfillment` → `sync_to_channel` (which now pays nothing extra on
+  the happy path); non-prerequisite errors (auth, rate limit, transient 5xx) still surface unchanged.
+- **Clarified the ordering in tool descriptions** so an agent (including a fresh, memory-less
+  scheduled run) can't miss it: `create_product` states it produces a standalone product and names
+  the required next steps; `sync_to_channel` states its prerequisite and the auto-heal fallback;
+  `sync_to_fulfillment` states it does the store association too; and `ship_product` recommends
+  itself for automated / scheduled runs since it guarantees the correct order in one call.
+
 ## [0.3.0] - 2026-07-08
 
 ### Added
