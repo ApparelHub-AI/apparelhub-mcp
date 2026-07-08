@@ -10,6 +10,9 @@ on:
     types: [published]
   workflow_dispatch:
 
+# SECURITY (public repo): `id-token: write` below is for npm provenance only (audience is
+# the npm registry, NOT AWS). Do not repurpose it to assume AWS roles, and never add a
+# `pull_request` / `pull_request_target` trigger to a job that holds id-token in this repo.
 permissions:
   contents: read
   id-token: write # npm provenance (OIDC), used once NPM_TOKEN is set
