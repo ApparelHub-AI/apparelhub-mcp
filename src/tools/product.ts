@@ -5,6 +5,7 @@ import { asArray, isRecord, num, str, viewUrl } from '../util/shape.js';
 import { pickDimensions } from '../image/dimensions.js';
 import { pricingFloor, printStyleFor, type PrintStyle } from '../knowledge/garments.js';
 import {
+  expectedThreadColorsIdFromError,
   isEmbroideryPlacement,
   normalizeThreadColors,
   threadColorsOptionId,
@@ -273,6 +274,69 @@ function enforcePricingFloor(baseCost: number | undefined, price: number): void 
 }
 
 /**
+ * Fulfillment (merchandise) sync with the embroidery thread-colors self-heal: when Printful
+ * rejects the sync naming a DIFFERENT thread-colors option id than the one on the product
+ * ("<expected_id> option is missing or incorrect! Allowed values: ..."), rewrite the product's
+ * print_files option id to the expected one and retry ONCE. Printful's id convention varies by
+ * placement (bare `thread_colors` for plain embroidery_front, suffixed elsewhere) and can vary by
+ * product — the error message is the authoritative source. Any other failure propagates.
+ */
+async function syncFulfillmentHealingThreadColors(
+  ctx: ToolContext,
+  storeUuid: string,
+  productUuid: string,
+  workspace?: string,
+): Promise<{ healedOptionId?: string }> {
+  const syncOnce = () =>
+    ctx.api.post(`store/${enc(storeUuid)}/products/${enc(productUuid)}/sync`, {
+      query: { target: 'merchandise' },
+      workspace,
+      signal: ctx.signal,
+    });
+  try {
+    await syncOnce();
+    return {};
+  } catch (err) {
+    const message = err instanceof AhError ? err.message : String(err);
+    const expected = expectedThreadColorsIdFromError(message);
+    if (!expected) throw err;
+    const prodRaw = await ctx.api.get(`product/${enc(productUuid)}`, {
+      workspace,
+      signal: ctx.signal,
+    });
+    const prod = isRecord(prodRaw) && isRecord(prodRaw.product) ? prodRaw.product : prodRaw;
+    const printFiles = asArray(isRecord(prod) ? prod.print_files : undefined);
+    let changed = false;
+    const fixed = printFiles.map((pf) => {
+      if (!isRecord(pf) || !Array.isArray(pf.options)) return pf;
+      const options = pf.options.map((o) => {
+        if (
+          isRecord(o) &&
+          typeof o.id === 'string' &&
+          /^thread_colors/i.test(o.id) &&
+          o.id.toLowerCase() !== expected
+        ) {
+          changed = true;
+          return { ...o, id: expected };
+        }
+        return o;
+      });
+      return { ...pf, options };
+    });
+    // Nothing correctable (e.g. a pre-fix product with NO thread-colors options at all) — the
+    // original error is the real story; let it surface.
+    if (!changed) throw err;
+    await ctx.api.patch(`product/${enc(productUuid)}`, {
+      body: { print_files: fixed },
+      workspace,
+      signal: ctx.signal,
+    });
+    await syncOnce();
+    return { healedOptionId: expected };
+  }
+}
+
+/**
  * Idempotently (1) associate a product with a store and (2) sync it to the store's fulfillment
  * provider (Printful/Printify). This is the HARD prerequisite for any sales-channel sync: a
  * product created by create_product is standalone (on no store), and the ecommerce listing binds
@@ -286,17 +350,13 @@ async function associateAndSyncFulfillment(
   storeUuid: string,
   productUuid: string,
   workspace?: string,
-): Promise<void> {
+): Promise<{ healedOptionId?: string }> {
   await ctx.api.post(`store/${enc(storeUuid)}/products`, {
     body: { product_uuids: [productUuid] },
     workspace,
     signal: ctx.signal,
   });
-  await ctx.api.post(`store/${enc(storeUuid)}/products/${enc(productUuid)}/sync`, {
-    query: { target: 'merchandise' },
-    workspace,
-    signal: ctx.signal,
-  });
+  return syncFulfillmentHealingThreadColors(ctx, storeUuid, productUuid, workspace);
 }
 
 // Client-error statuses where a sync_to_channel failure most likely means "the product isn't on
@@ -474,12 +534,13 @@ export const shipProduct = defineTool({
       });
       await ctx.progress.report(85, 'Syncing to fulfillment...');
       try {
-        await ctx.api.post(`store/${enc(input.store_uuid)}/products/${enc(productUuid)}/sync`, {
-          query: { target: 'merchandise' },
-          workspace: ws,
-          signal: ctx.signal,
-        });
+        const healed = await syncFulfillmentHealingThreadColors(ctx, input.store_uuid, productUuid, ws);
         fulfillmentStatus = 'synced';
+        if (healed.healedOptionId) {
+          warnings.push(
+            `The fulfillment provider expects thread-colors option id "${healed.healedOptionId}" for this garment — auto-corrected on the product and re-synced.`,
+          );
+        }
       } catch (err) {
         fulfillmentStatus = 'failed';
         warnings.push(`Fulfillment sync failed: ${err instanceof AhError ? err.message : String(err)}`);
@@ -728,8 +789,17 @@ export const syncToFulfillment = defineTool({
     // Associate with the store (idempotent) THEN sync to the fulfillment provider. The association
     // was previously missing here, so a product created by create_product (standalone) could not
     // be fulfillment-synced without a separate association call the split-primitive path never made.
-    await associateAndSyncFulfillment(ctx, input.store_uuid, input.product_uuid, input.workspace);
-    return { product_uuid: input.product_uuid, store_uuid: input.store_uuid, fulfillment_status: 'synced' };
+    const healed = await associateAndSyncFulfillment(ctx, input.store_uuid, input.product_uuid, input.workspace);
+    return {
+      product_uuid: input.product_uuid,
+      store_uuid: input.store_uuid,
+      fulfillment_status: 'synced',
+      ...(healed.healedOptionId
+        ? {
+            note: `The fulfillment provider expects thread-colors option id "${healed.healedOptionId}" for this garment — auto-corrected on the product and re-synced.`,
+          }
+        : {}),
+    };
   },
 });
 

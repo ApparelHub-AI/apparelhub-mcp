@@ -38,12 +38,27 @@ export function isEmbroideryPlacement(placement: string | undefined): boolean {
 }
 
 /**
- * The Printful option id for a placement's thread colors is placement-suffixed:
- * `embroidery_front_large` -> `thread_colors_front_large`,
- * `embroidery_chest_left`  -> `thread_colors_chest_left` (the empirically verified shape).
+ * The Printful option id for a placement's thread colors. Placement-suffixed for most placements
+ * (`embroidery_front_large` -> `thread_colors_front_large`, `embroidery_chest_left` ->
+ * `thread_colors_chest_left`) — but the PLAIN `embroidery_front` placement uses the BARE
+ * `thread_colors` id (all three shapes verified empirically against live syncs, 2026-07-09).
+ * Printful's per-product quirks beyond this table are covered by the sync self-heal, which reads
+ * the expected id straight out of Printful's error message.
  */
 export function threadColorsOptionId(placement: string): string {
-  return `thread_colors_${placement.replace(/^addon_/i, '').replace(/^embroidery_/i, '')}`;
+  const p = placement.replace(/^addon_/i, '').toLowerCase();
+  if (p === 'embroidery_front') return 'thread_colors';
+  return `thread_colors_${p.replace(/^embroidery_/, '')}`;
+}
+
+/**
+ * Printful rejects a sync whose thread-colors option id doesn't match the product's expected id
+ * with `<expected_id> option is missing or incorrect! Allowed values: ...`. Extract that id so
+ * the sync can be healed (rewrite the option id, retry once).
+ */
+export function expectedThreadColorsIdFromError(message: string): string | undefined {
+  const m = /(thread_colors[a-z0-9_]*)\s+option is missing or incorrect/i.exec(message);
+  return m?.[1]?.toLowerCase();
 }
 
 /**

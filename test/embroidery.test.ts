@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  expectedThreadColorsIdFromError,
   isEmbroideryPlacement,
   normalizeThreadColors,
   threadColorsOptionId,
@@ -8,11 +9,22 @@ import {
 import { printStyleFor } from '../src/knowledge/garments.js';
 
 describe('embroidery knowledge', () => {
-  it('maps placements to Printful thread-color option ids (the verified suffixed shape)', () => {
+  it('maps placements to Printful thread-color option ids (all three shapes live-verified)', () => {
     expect(threadColorsOptionId('embroidery_front_large')).toBe('thread_colors_front_large');
-    expect(threadColorsOptionId('embroidery_front')).toBe('thread_colors_front');
+    // The PLAIN front placement uses the BARE id (beanie 266, verified against a live sync).
+    expect(threadColorsOptionId('embroidery_front')).toBe('thread_colors');
     expect(threadColorsOptionId('embroidery_chest_left')).toBe('thread_colors_chest_left');
-    expect(threadColorsOptionId('addon_embroidery_front')).toBe('thread_colors_front');
+    expect(threadColorsOptionId('addon_embroidery_front')).toBe('thread_colors');
+  });
+
+  it('extracts the expected option id from Printful sync errors (self-heal input)', () => {
+    const beanieError =
+      '{"code":400,"result":"thread_colors option is missing or incorrect! Allowed values: #FFFFFF, #000000"}';
+    expect(expectedThreadColorsIdFromError(beanieError)).toBe('thread_colors');
+    expect(
+      expectedThreadColorsIdFromError('thread_colors_chest_left option is missing or incorrect!'),
+    ).toBe('thread_colors_chest_left');
+    expect(expectedThreadColorsIdFromError('No valid variants found to sync.')).toBeUndefined();
   });
 
   it('detects embroidery placements', () => {
