@@ -28,7 +28,12 @@ interface GarmentInfo {
 
 function mapMatrix(raw: unknown): MatrixVariant[] {
   return asArray(raw).map((v) => ({
-    provider_variant_id: num(v, 'id', 'variant_id', 'provider_variant_id') ?? 0,
+    // Printify puts the variant id under `provider_ref_id` (a numeric string) with NO
+    // id/variant_id/provider_variant_id field — so it must be in this lookup or every Printify
+    // variant resolves to 0 and the platform rejects it ("No valid variants found matching the
+    // selection"). Mirrors catalog.ts's mapVariant (get_garment_details). Printful is unaffected
+    // (it has `id`, read first). num() coerces the numeric string.
+    provider_variant_id: num(v, 'id', 'variant_id', 'provider_variant_id', 'provider_ref_id') ?? 0,
     color: str(v, 'color', 'color_name'),
     size: str(v, 'size'),
     cost: num(v, 'cost', 'price'),
