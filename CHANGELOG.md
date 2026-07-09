@@ -9,6 +9,19 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.3.11] - 2026-07-09
+
+### Fixed
+
+- **Backpack designs favor the top half so a subject isn't split by the pocket seam** (the SPAIN
+  backpack: the goalkeeper's body and "La Roja" straddled the front-pocket seam). A Printful 279
+  All-Over Print Backpack has a front pocket whose seam runs across the lower ~40% of the front
+  face — a design filling the front area is cut in half by it. `faceLayoutFor` now composes the
+  backpack design into the upper-body window ABOVE the seam; the background fills the rest of the
+  front and the pocket/top/bottom panels stay solid, so lettering and player bodies stay intact.
+  Grid-calibrated + live-verified: the full SPAIN crest sits in the upper body, nothing split.
+  (Abstract all-over patterns that read fine when split can still be printed full-bleed.)
+
 ## [0.3.10] - 2026-07-09
 
 ### Fixed
