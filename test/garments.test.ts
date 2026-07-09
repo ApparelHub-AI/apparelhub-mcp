@@ -85,8 +85,7 @@ describe('faceLayoutFor (print area != visible face — the WC26 sock/drawstring
     expect(faceLayoutFor('All-Over Print Duffle Bag', 'pocket', 2060, 1269)).toBeUndefined();
   });
 
-  it('leaves normal faces alone (backpack front, canvas, tees)', () => {
-    expect(faceLayoutFor('All-Over Print Backpack', 'front', 1747, 2468)).toBeUndefined();
+  it('leaves genuinely flat faces alone (canvas, tees)', () => {
     expect(faceLayoutFor('Stretched Canvas', 'front', 2400, 3000)).toBeUndefined();
     expect(faceLayoutFor('Unisex Staple Tee', 'front', 1800, 2400)).toBeUndefined();
   });
@@ -133,5 +132,21 @@ describe('faceLayoutFor — cylindrical drinkware (the MOROCCO water-bottle star
   it('does not treat apparel/flat goods as cylinders', () => {
     expect(faceLayoutFor('Unisex Staple Tee', 'front', 1800, 2400)).toBeUndefined();
     expect(faceLayoutFor('Stretched Canvas', 'front', 2400, 3000)).toBeUndefined();
+  });
+});
+
+describe('faceLayoutFor — backpack front (the SPAIN backpack pocket-seam split)', () => {
+  it('keeps the design in the upper-body window above the pocket seam', () => {
+    const l = faceLayoutFor('All-Over Print Backpack', 'front', 1747, 2468);
+    expect(l?.faces).toHaveLength(1);
+    // the design stays in the TOP portion — its bottom edge clears the pocket seam (~lower 40%)
+    expect(l!.faces[0]!.y + l!.faces[0]!.h).toBeLessThan(0.6);
+  });
+  it('does not apply the top window to the pocket/side panels (they stay solid)', () => {
+    expect(faceLayoutFor('All-Over Print Backpack', 'pocket', 2060, 1269)).toBeUndefined();
+    expect(faceLayoutFor('All-Over Print Backpack', 'top', 3000, 857)).toBeUndefined();
+  });
+  it('does not treat a drawstring/duffle bag as a pocket-seam backpack', () => {
+    expect(faceLayoutFor('Drawstring Bag', 'front', 1800, 2400)).toBeUndefined();
   });
 });

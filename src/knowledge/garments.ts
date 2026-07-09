@@ -118,6 +118,7 @@ const SOCK_LEG_BACK_RE = /^leg_back_(left|right)$/i;
 const DRAWSTRING_RE = /drawstring|cinch/i;
 const WALLET_WRAP_RE = /wallet|passport cover|clutch|purse/i;
 const DUFFLE_RE = /duffle|duffel/i;
+const BACKPACK_RE = /backpack|\bruck ?sack\b|knapsack/i;
 // Cylindrical drinkware: the print area wraps around the tube, so the top maps onto the shoulder,
 // the bottom onto the base, and the left/right onto the sides (out of frontal view).
 const CYLINDER_RE = /bottle|tumbler|\bflask\b|thermos|\bcan\b|\bmug\b|stein|\bcup\b|\bglass\b/i;
@@ -185,6 +186,19 @@ export function faceLayoutFor(
     return {
       faces: [{ x: 0.12, y: 0.15, w: 0.76, h: 0.6 }],
       note: 'Duffle display face: the area wraps past the seams and rounded ends — art stays in the central frontal window; other panels get the solid background (no white strip).',
+    };
+  }
+  // Backpack front (Printful 279 All-Over Print Backpack, grid-calibrated 2026-07-09): a front
+  // POCKET seam runs across the lower ~40% of the front face, so a design filling the front area
+  // gets split by the seam — lettering + player bodies cut in half (the SPAIN backpack: the
+  // goalkeeper and "La Roja" straddled the pocket seam). Favor the TOP HALF: compose the design
+  // into the upper-body window above the seam; the background fills the rest of the front and the
+  // pocket/top/bottom panels stay solid, so nothing crosses the seam. (Abstract all-over patterns
+  // that read fine when split can be printed full-bleed by requesting print_style explicitly.)
+  if (BACKPACK_RE.test(garmentName ?? '') && /^front$/i.test(placement)) {
+    return {
+      faces: [{ x: 0.1, y: 0.05, w: 0.8, h: 0.46 }],
+      note: 'Backpack front: a pocket seam crosses the lower front — the design sits in the upper-body window above it so lettering and subjects are not split; the lower front + panels stay solid.',
     };
   }
   // Cylindrical drinkware (water bottles, tumblers, mugs — e.g. Printify 646 Slim Water Bottle,
