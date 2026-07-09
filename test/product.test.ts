@@ -145,6 +145,23 @@ describe('add_variants', () => {
     expect(res.warnings[0]).toContain('AQUA');
   });
 
+  it('resolves Printify variant ids from provider_ref_id by color+size (no explicit ids)', async () => {
+    // Printify's matrix carries the id under provider_ref_id (a numeric string), not id.
+    // Before the fix this resolved to 0 and shipped a 0-usable-variant product.
+    const { api, calls } = apiFrom([
+      { variants: [{ provider_ref_id: '24830', color: 'White', size: 'S' }] }, // Printify-shaped provider-options
+      {}, // POST variant
+    ]);
+    const res = (await addVariants.handler(
+      { product_uuid: 'p1', variants: [{ color: 'White', sizes: ['S'] }] },
+      fakeContext(api),
+    )) as any;
+    expect(res.variants_added).toBe(1);
+    const variantCall = calls.find((c) => c.url.endsWith('/variants'));
+    const body = JSON.parse(variantCall?.init?.body as string);
+    expect(body.provider_variant_id).toBe(24830); // coerced from provider_ref_id, NOT 0
+  });
+
   it('throws with the available options when nothing resolves (apparel sizes on a one-size garment)', async () => {
     // The Cap bug: hardcoded S/M/L/XL/2XL against a one-size garment resolves nothing. Fail loud,
     // do NOT create a 0-variant product.

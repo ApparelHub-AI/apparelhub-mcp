@@ -9,6 +9,20 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-07-09
+
+### Fixed
+
+- **Printify products came out with 0 variants** from `ship_product` / `create_product` / `add_variants`
+  (and `ship_product` failed outright with "No valid variants found matching the selection"). Printify's
+  variant matrix carries the variant id under **`provider_ref_id`** (a numeric string) with no
+  `id`/`variant_id`/`provider_variant_id` field, but `mapMatrix` didn't read `provider_ref_id`, so every
+  Printify variant resolved to id `0` and the platform rejected it. `mapMatrix` now includes
+  `provider_ref_id` in the lookup (mirroring `catalog.ts`'s `get_garment_details` mapper, which was
+  already correct — which is why that tool reported the right ids). Printful is unaffected (it has `id`,
+  read first). So color+size variant selection now works for Printify without passing explicit
+  `provider_variant_ids`.
+
 ## [0.3.1] - 2026-07-08
 
 ### Fixed
