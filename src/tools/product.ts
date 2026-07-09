@@ -3,7 +3,15 @@ import { defineTool, type ToolDef } from './registry.js';
 import { AhError } from '../errors.js';
 import { asArray, isRecord, num, str, viewUrl } from '../util/shape.js';
 import { pickDimensions } from '../image/dimensions.js';
-import { pricingFloor, printStyleFor, type PrintStyle } from '../knowledge/garments.js';
+import {
+  extremeAspectWarning,
+  faceLayoutFor,
+  placedStyleFor,
+  pricingFloor,
+  printStyleFor,
+  type FaceLayout,
+  type PrintStyle,
+} from '../knowledge/garments.js';
 import {
   expectedThreadColorsIdFromError,
   isEmbroideryPlacement,
@@ -26,9 +34,19 @@ import type { ToolContext } from './context.js';
 
 const enc = encodeURIComponent;
 
+interface PrintPlacement {
+  provider_ref_id: string;
+  area_width: number;
+  area_height: number;
+}
+
 interface GarmentInfo {
   matrix: MatrixVariant[];
   area: { area_width: number; area_height: number; provider_ref_id: string };
+  /** EVERY non-embroidery print placement (primary first, deduped). Fill-style goods must put
+   *  a file on all of them — an unprinted placement on an all-over product is raw white fabric
+   *  (the ENGLAND sock: 1 of 4 leg placements printed; the SPAIN backpack: top/bottom/pocket). */
+  placements: PrintPlacement[];
   baseCost: number | undefined;
   /** The chosen placement is an embroidery placement (caps/beanies/embroidered apparel). */
   isEmbroidery: boolean;
@@ -129,10 +147,23 @@ async function fetchGarment(
     area_height: num(chosen, 'area_height', 'print_area_height') ?? 2400,
     provider_ref_id: placement,
   };
+  // Every distinct non-embroidery placement, primary first. Fill goods must cover ALL of them.
+  const placements: PrintPlacement[] = [
+    { provider_ref_id: placement, area_width: area.area_width, area_height: area.area_height },
+  ];
+  for (const t of templates) {
+    const p = templatePlacement(t);
+    const w = num(t, 'area_width', 'print_area_width');
+    const h = num(t, 'area_height', 'print_area_height');
+    if (!p || p === placement || isEmbroideryPlacement(p) || !w || !h) continue;
+    if (placements.some((existing) => existing.provider_ref_id === p)) continue;
+    placements.push({ provider_ref_id: p, area_width: w, area_height: h });
+  }
   const baseCost = num(g, 'base_cost', 'cost', 'price') ?? matrix.find((m) => m.cost)?.cost;
   return {
     matrix,
     area,
+    placements,
     baseCost,
     isEmbroidery: isEmbroideryPlacement(placement),
     name: str(g, 'name', 'title'),
@@ -142,11 +173,12 @@ async function fetchGarment(
 function buildPrintData(
   area: GarmentInfo['area'],
   designUrl: string,
-  style: 'chest_fill' | 'all_over' = 'chest_fill',
+  style: 'chest_fill' | 'back_center' | 'all_over' = 'chest_fill',
 ): Record<string, unknown>[] {
-  // chest_fill: a placed print sized for a square design (the agent can refine with the
-  // dimensions helper) — respects the print area so Printful doesn't crop. all_over: the design
-  // (recomposed to the area's exact aspect) covers the full face edge-to-edge.
+  // chest_fill: a placed print sized for a square design on APPAREL (13% collar breathing room).
+  // back_center: the same sizing CENTERED on the face — non-apparel placed goods (phone cases,
+  // mugs): collar padding shoved the MOROCCO clear-case crest into the top third of the case.
+  // all_over: the design (recomposed to the area's exact aspect) covers the face edge-to-edge.
   const dims = pickDimensions(1, 1, area.area_width, area.area_height, style);
   return [
     {
@@ -193,7 +225,43 @@ interface FillDesign {
   image_uuid: string;
   image_url: string;
   background?: string;
-  mode: 'composited' | 'cover';
+  mode: 'composited' | 'cover' | 'solid';
+  /** print_data covering EVERY placement (art on the primary + same-size siblings, solid
+   *  background on the rest) — an unprinted placement on an all-over product is raw fabric. */
+  printData: Record<string, unknown>[];
+  warnings: string[];
+}
+
+/** Upload a composed file as a new revision of the design; returns its uuid + public URL. */
+async function uploadDesignRevision(
+  ctx: ToolContext,
+  parentUuid: string,
+  path: string,
+  name: string,
+  workspace?: string,
+): Promise<{ uuid?: string; url?: string }> {
+  const bytes = await ctx.imaging.readBytes(path);
+  const form = new FormData();
+  form.append('image', new Blob([Uint8Array.from(bytes)], { type: 'image/png' }), name);
+  const res = await ctx.api.post(`images/generated/${enc(parentUuid)}/transform`, {
+    multipart: form,
+    workspace,
+    signal: ctx.signal,
+  });
+  return { uuid: str(res, 'image_uuid', 'uuid'), url: str(res, 'url', 'image_url') };
+}
+
+function fillEntry(p: PrintPlacement, imageUrl: string): Record<string, unknown> {
+  return {
+    provider_ref_id: p.provider_ref_id,
+    area_width: p.area_width,
+    area_height: p.area_height,
+    width: p.area_width,
+    height: p.area_height,
+    top: 0,
+    left: 0,
+    image_url: imageUrl,
+  };
 }
 
 /**
@@ -201,37 +269,124 @@ interface FillDesign {
  * an aesthetically matching background at the area's exact aspect — or cover-crop a photo), then
  * upload it as a new design revision. Prevents the "green screen printed on the product" and
  * "white bands around a floating square" defects on canvases/backpacks/bags/etc.
+ *
+ * Face-aware and placement-complete (the WC26 sock/drawstring lesson):
+ *  - the art composes INSIDE the visible-face rectangle of wrap-style areas (drawstring bags
+ *    print front+back in one file folded at the bottom) and rotates 180deg where the template
+ *    renders inverted (Printful sock legs) — see knowledge/garments.ts faceLayoutFor;
+ *  - EVERY other placement gets a file too: same-size siblings (the other sock strips) reuse
+ *    the art file, different-size siblings (backpack top/bottom/pocket) get a solid canvas in
+ *    the same background color, so no surface prints as raw white fabric.
  */
 async function prepareFillDesign(
   ctx: ToolContext,
   designUuid: string,
   designUrl: string,
-  area: GarmentInfo['area'],
+  garment: GarmentInfo,
   workspace?: string,
 ): Promise<FillDesign> {
-  const inPath = await ctx.imaging.downloadToTemp(designUrl);
-  let rc;
-  try {
-    rc = await ctx.imaging.recomposeFill(inPath, area.area_width, area.area_height);
-  } catch (err) {
-    await ctx.imaging.cleanup([inPath]);
-    throw err;
+  const warnings: string[] = [];
+  const primary = garment.area;
+  const layout = faceLayoutFor(
+    garment.name,
+    primary.provider_ref_id,
+    primary.area_width,
+    primary.area_height,
+  );
+  if (!layout) {
+    const warn = extremeAspectWarning(
+      garment.name,
+      primary.provider_ref_id,
+      primary.area_width,
+      primary.area_height,
+    );
+    if (warn) warnings.push(warn);
   }
-  const bytes = await ctx.imaging.readBytes(rc.outputPath);
-  const form = new FormData();
-  form.append('image', new Blob([Uint8Array.from(bytes)], { type: 'image/png' }), 'fill.png');
-  const res = await ctx.api.post(`images/generated/${enc(designUuid)}/transform`, {
-    multipart: form,
-    workspace,
-    signal: ctx.signal,
-  });
-  await ctx.imaging.cleanup([inPath, rc.outputPath]);
-  return {
-    image_uuid: str(res, 'image_uuid', 'uuid') ?? designUuid,
-    image_url: str(res, 'url', 'image_url') ?? designUrl,
-    background: rc.background,
-    mode: rc.mode,
-  };
+
+  const inPath = await ctx.imaging.downloadToTemp(designUrl);
+  const tempPaths = [inPath];
+  try {
+    const rc = await ctx.imaging.recomposeFill(inPath, primary.area_width, primary.area_height, {
+      face: layout?.face,
+      rotate180: layout?.rotate180,
+    });
+    tempPaths.push(rc.outputPath);
+    const uploaded = await uploadDesignRevision(ctx, designUuid, rc.outputPath, 'fill.png', workspace);
+    const primaryUuid = uploaded.uuid ?? designUuid;
+    const primaryUrl = uploaded.url ?? designUrl;
+
+    const printData: Record<string, unknown>[] = [
+      fillEntry(
+        { provider_ref_id: primary.provider_ref_id, area_width: primary.area_width, area_height: primary.area_height },
+        primaryUrl,
+      ),
+    ];
+
+    // Same-size siblings share a composed art file PER LAYOUT: Printful sock FRONT strips
+    // render rotated 180deg while the BACK strips render upright (grid-calibrated), so one
+    // rotated file on all four prints upside down on the backs.
+    const layoutKeyOf = (l: FaceLayout | undefined): string =>
+      JSON.stringify({ f: l?.face ?? null, r: l?.rotate180 ?? false });
+    const artByLayout = new Map<string, string>([[layoutKeyOf(layout), primaryUrl]]);
+    // ONE solid canvas serves every differing sibling — a solid color stretches to any
+    // area aspect losslessly (the platform scales the file to each entry's width x height).
+    let solidUrl: string | undefined;
+    for (const p of garment.placements) {
+      if (p.provider_ref_id === primary.provider_ref_id) continue;
+      if (p.area_width === primary.area_width && p.area_height === primary.area_height) {
+        const siblingLayout = faceLayoutFor(
+          garment.name,
+          p.provider_ref_id,
+          p.area_width,
+          p.area_height,
+        );
+        const key = layoutKeyOf(siblingLayout);
+        let url = artByLayout.get(key);
+        if (url === undefined) {
+          const alt = await ctx.imaging.recomposeFill(inPath, p.area_width, p.area_height, {
+            face: siblingLayout?.face,
+            rotate180: siblingLayout?.rotate180,
+          });
+          tempPaths.push(alt.outputPath);
+          const up = await uploadDesignRevision(ctx, designUuid, alt.outputPath, 'fill-alt.png', workspace);
+          if (!up.url) {
+            warnings.push(
+              `Could not upload the composed art for placement "${p.provider_ref_id}" — it will print unfilled.`,
+            );
+            continue;
+          }
+          url = up.url;
+          artByLayout.set(key, url);
+        }
+        printData.push(fillEntry(p, url));
+        continue;
+      }
+      if (solidUrl === undefined) {
+        const solid = await ctx.imaging.solidFill(inPath, p.area_width, p.area_height, rc.background);
+        tempPaths.push(solid.outputPath);
+        const up = await uploadDesignRevision(ctx, designUuid, solid.outputPath, 'fill-bg.png', workspace);
+        if (!up.url) {
+          warnings.push(
+            `Could not upload the background fill for placement "${p.provider_ref_id}" — it will print unfilled.`,
+          );
+          continue;
+        }
+        solidUrl = up.url;
+      }
+      printData.push(fillEntry(p, solidUrl));
+    }
+
+    return {
+      image_uuid: primaryUuid,
+      image_url: primaryUrl,
+      background: rc.background,
+      mode: rc.mode,
+      printData,
+      warnings,
+    };
+  } finally {
+    await ctx.imaging.cleanup(tempPaths);
+  }
 }
 
 /** Explicit thread colors validated against the palette, else derived from the design. */
@@ -430,10 +585,18 @@ export const shipProduct = defineTool({
     );
     warnings.push(...resolvedR.warnings);
     if (!resolvedR.resolved.length) {
+      // Name the catalog's ACTUAL values so an unattended agent can self-correct on the next
+      // call instead of stalling (the MOROCCO phone-case run had to diagnose this blind).
+      const colors = [...new Set(garment.matrix.map((m) => m.color).filter(Boolean))].slice(0, 8);
+      const sizes = [...new Set(garment.matrix.map((m) => m.size).filter(Boolean))].slice(0, 12);
       throw new AhError({
         code: 'bad_request',
         message: 'No variants could be resolved for the requested colors/sizes.',
-        suggestion: 'Check colors/sizes against get_garment_details, or pass provider_variant_ids.',
+        suggestion:
+          `This garment's catalog has ` +
+          `${colors.length ? `colors: ${colors.join(', ')}` : 'NO color dimension'} and ` +
+          `${sizes.length ? `sizes: ${sizes.join(', ')}${garment.matrix.length > 12 ? ', ...' : ''}` : 'NO size dimension'}. ` +
+          'Match those names (see get_garment_details), or pass provider_variant_ids.',
       });
     }
     if (resolvedR.unresolved.length) {
@@ -450,9 +613,10 @@ export const shipProduct = defineTool({
     let fill: FillDesign | undefined;
     if (printStyle === 'fill') {
       await ctx.progress.report(12, 'Recomposing design to fill the print face...');
-      fill = await prepareFillDesign(ctx, designUuid, designUrl, garment.area, ws);
+      fill = await prepareFillDesign(ctx, designUuid, designUrl, garment, ws);
       designUuid = fill.image_uuid;
       designUrl = fill.image_url;
+      warnings.push(...fill.warnings);
     }
 
     let threadColors: string[] | undefined;
@@ -461,11 +625,8 @@ export const shipProduct = defineTool({
       threadColors = await resolveThreadColors(ctx, input.thread_colors, designUrl);
     }
 
-    const printData = buildPrintData(
-      garment.area,
-      designUrl,
-      printStyle === 'fill' ? 'all_over' : 'chest_fill',
-    );
+    const printData =
+      fill?.printData ?? buildPrintData(garment.area, designUrl, placedStyleFor(garment.name));
 
     let previewJobUuid: string | undefined;
     if (input.generate_mockup ?? true) {
@@ -623,12 +784,14 @@ export const createProduct = defineTool({
     let designUuid = input.design_uuid;
     let designUrl = input.design_url ?? (await resolveImageUrl(ctx, input.design_uuid, ws));
 
+    const warnings: string[] = [];
     const printStyle = resolvePrintStyle(input.print_style, garment);
     let fill: FillDesign | undefined;
     if (printStyle === 'fill') {
-      fill = await prepareFillDesign(ctx, designUuid, designUrl, garment.area, ws);
+      fill = await prepareFillDesign(ctx, designUuid, designUrl, garment, ws);
       designUuid = fill.image_uuid;
       designUrl = fill.image_url;
+      warnings.push(...fill.warnings);
     }
 
     let threadColors: string[] | undefined;
@@ -636,17 +799,13 @@ export const createProduct = defineTool({
       threadColors = await resolveThreadColors(ctx, input.thread_colors, designUrl);
     }
 
-    const printData = buildPrintData(
-      garment.area,
-      designUrl,
-      printStyle === 'fill' ? 'all_over' : 'chest_fill',
-    );
+    const printData =
+      fill?.printData ?? buildPrintData(garment.area, designUrl, placedStyleFor(garment.name));
 
     // Generate a mockup when asked. In the split-primitive flow, add_variants runs AFTER this, so
     // the product has no variants of its own yet — derive representative variant ids from the
     // garment catalog (fetched above) so `generate_mockup: true` actually produces a mockup instead
     // of silently leaving the raw design as the display image.
-    const warnings: string[] = [];
     const wantMockup = input.generate_mockup ?? Boolean(input.mockup_variant_ids?.length);
     let mockupVariantIds = input.mockup_variant_ids ?? [];
     if (wantMockup && mockupVariantIds.length === 0) {

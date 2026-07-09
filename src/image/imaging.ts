@@ -51,10 +51,19 @@ export interface MakeTransparentOptions {
   force?: boolean;
 }
 
+export interface RecomposeFillOptions {
+  /** Visible-face rectangle (fractions of the print area) the art must be composed within —
+   *  the background still fills the whole area. Wrap-style goods (drawstring bags, sock legs). */
+  face?: { x: number; y: number; w: number; h: number };
+  /** Rotate the art 180deg before composing (placements that render the file inverted). */
+  rotate180?: boolean;
+}
+
 export interface RecomposeFillResult {
   outputPath: string;
-  /** 'composited' = art re-laid on a derived background; 'cover' = photo cover-cropped. */
-  mode: 'composited' | 'cover';
+  /** 'composited' = art re-laid on a derived background; 'cover' = photo cover-cropped;
+   *  'solid' = background-only canvas (sibling placements of all-over goods). */
+  mode: 'composited' | 'cover' | 'solid';
   /** The chosen background hex (composited mode only). */
   background?: string;
   width?: number;
@@ -74,8 +83,22 @@ export interface Imaging {
   /**
    * Recompose a design to FILL a print face edge-to-edge at the given area aspect: keyed/green
    * art gets centered on an aesthetically matching background; opaque photos get cover-cropped.
+   * `options.face` confines the art to the visible-face rectangle of a wrap-style area;
+   * `options.rotate180` flips the art for placements that render the file inverted.
    */
-  recomposeFill(inputPath: string, areaWidth: number, areaHeight: number): Promise<RecomposeFillResult>;
+  recomposeFill(
+    inputPath: string,
+    areaWidth: number,
+    areaHeight: number,
+    options?: RecomposeFillOptions,
+  ): Promise<RecomposeFillResult>;
+  /** Background-only canvas for sibling placements of all-over goods (no raw-fabric surfaces). */
+  solidFill(
+    inputPath: string,
+    areaWidth: number,
+    areaHeight: number,
+    background?: string,
+  ): Promise<RecomposeFillResult>;
   cleanup(paths: string[]): Promise<void>;
 }
 
@@ -240,17 +263,16 @@ export class LocalImaging implements Imaging {
     inputPath: string,
     areaWidth: number,
     areaHeight: number,
+    options?: RecomposeFillOptions,
   ): Promise<RecomposeFillResult> {
-    const out = join(await this.dir(), `fill-${Date.now()}.png`);
+    const out = join(await this.dir(), `fill-${Date.now()}-${Math.floor(Math.random() * 1e6)}.png`);
+    const args = [RECOMPOSE_FILL, inputPath, out, '--aspect', `${areaWidth}:${areaHeight}`];
+    const face = options?.face;
+    if (face) args.push('--face', `${face.x}:${face.y}:${face.w}:${face.h}`);
+    if (options?.rotate180) args.push('--rotate180');
     let r: RunResult;
     try {
-      r = await run(PYTHON, [
-        RECOMPOSE_FILL,
-        inputPath,
-        out,
-        '--aspect',
-        `${areaWidth}:${areaHeight}`,
-      ]);
+      r = await run(PYTHON, args);
     } catch {
       throw pythonMissing();
     }
@@ -271,8 +293,55 @@ export class LocalImaging implements Imaging {
     }
     return {
       outputPath: out,
-      mode: meta.mode === 'cover' ? 'cover' : 'composited',
+      mode: meta.mode === 'cover' ? 'cover' : meta.mode === 'solid' ? 'solid' : 'composited',
       background: meta.background ?? undefined,
+      width: meta.width,
+      height: meta.height,
+    };
+  }
+
+  /**
+   * Background-only canvas at the given aspect: the fill file for SIBLING placements of an
+   * all-over product (backpack top/bottom/pocket) so no printable surface is left as raw
+   * fabric. `background` pins the exact hex (from the primary composition); without it the
+   * color is derived from the artwork at `inputPath`.
+   */
+  async solidFill(
+    inputPath: string,
+    areaWidth: number,
+    areaHeight: number,
+    background?: string,
+  ): Promise<RecomposeFillResult> {
+    const out = join(
+      await this.dir(),
+      `solid-${Date.now()}-${Math.floor(Math.random() * 1e6)}.png`,
+    );
+    const args = [RECOMPOSE_FILL, inputPath, out, '--aspect', `${areaWidth}:${areaHeight}`, '--solid'];
+    if (background) args.push('--bg', background);
+    let r: RunResult;
+    try {
+      r = await run(PYTHON, args);
+    } catch {
+      throw pythonMissing();
+    }
+    if (r.code !== 0) {
+      if (looksLikeMissingInterpreter(r)) throw pythonMissing();
+      throw new AhError({
+        code: 'recompose_failed',
+        message: `Solid fill failed: ${r.stderr.trim() || `exit ${r.code}`}`,
+        suggestion: 'Retry with print_style: "placed", or pass a background color.',
+      });
+    }
+    let meta: { background?: string | null; width?: number; height?: number } = {};
+    try {
+      meta = JSON.parse(r.stdout.trim()) as typeof meta;
+    } catch {
+      // Metadata is advisory; the output file is the contract.
+    }
+    return {
+      outputPath: out,
+      mode: 'solid',
+      background: meta.background ?? background,
       width: meta.width,
       height: meta.height,
     };

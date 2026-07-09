@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { pricingFloor, qualityTier, recommendGarment } from '../src/knowledge/garments.js';
+import {
+  extremeAspectWarning,
+  faceLayoutFor,
+  placedStyleFor,
+  pricingFloor,
+  qualityTier,
+  recommendGarment,
+} from '../src/knowledge/garments.js';
 
 describe('pricingFloor', () => {
   it('returns a positive-margin floor for a known cost', () => {
@@ -33,5 +40,62 @@ describe('recommendGarment', () => {
   });
   it('picks a budget body for a budget tier', () => {
     expect(recommendGarment({ budget_tier: 'budget' }).recommendation.brand).toBe('Gildan');
+  });
+});
+
+describe('faceLayoutFor (print area != visible face — the WC26 sock/drawstring lesson)', () => {
+  it('rotates sock leg FRONT strips (file renders toe-up) but not the BACKS (file renders cuff-up)', () => {
+    for (const p of ['leg_front_right', 'leg_front_left']) {
+      const l = faceLayoutFor('Cushioned Crew Socks', p, 632, 2620);
+      expect(l?.rotate180).toBe(true);
+      expect(l?.face?.w).toBeLessThan(0.7); // only the central band stays frontal
+    }
+    for (const p of ['leg_back_right', 'leg_back_left']) {
+      const l = faceLayoutFor('Cushioned Crew Socks', p, 632, 2620);
+      expect(l?.rotate180).toBeUndefined();
+      expect(l?.face?.w).toBeLessThan(0.7);
+    }
+  });
+
+  it('confines drawstring-bag wrap areas to the visible front (top half above the fold)', () => {
+    const l = faceLayoutFor('Drawstring Bag', 'front', 4950, 11100);
+    expect(l?.rotate180).toBeUndefined();
+    expect(l?.face).toBeDefined();
+    const f = l!.face!;
+    expect(f.y + f.h).toBeLessThan(0.5); // art never reaches the bottom fold
+  });
+
+  it('leaves normal faces alone (backpack front, canvas, tees)', () => {
+    expect(faceLayoutFor('All-Over Print Backpack', 'front', 1747, 2468)).toBeUndefined();
+    expect(faceLayoutFor('Stretched Canvas', 'front', 2400, 3000)).toBeUndefined();
+    expect(faceLayoutFor('Unisex Staple Tee', 'front', 1800, 2400)).toBeUndefined();
+  });
+
+  it('does not treat a normal-aspect drawstring front as a wrap', () => {
+    expect(faceLayoutFor('Drawstring Bag', 'front', 1800, 2400)).toBeUndefined();
+  });
+});
+
+describe('extremeAspectWarning', () => {
+  it('flags unknown extreme-aspect fill areas as suspect wraps', () => {
+    expect(extremeAspectWarning('Mystery Tote', 'front', 4000, 12000)).toContain('extreme aspect');
+    expect(extremeAspectWarning('Mystery Runner', 'front', 12000, 4000)).toContain('extreme aspect');
+  });
+  it('stays quiet for normal faces', () => {
+    expect(extremeAspectWarning('Canvas', 'front', 2400, 3000)).toBeUndefined();
+    expect(extremeAspectWarning('Tee', 'front', 1800, 2400)).toBeUndefined();
+  });
+});
+
+describe('placedStyleFor (collar padding is an APPAREL concept)', () => {
+  it('keeps collar breathing room on apparel', () => {
+    expect(placedStyleFor('Unisex Staple Tee')).toBe('chest_fill');
+    expect(placedStyleFor('Closed-Back Trucker Cap')).toBe('chest_fill');
+    expect(placedStyleFor('Fleece Pullover Hoodie')).toBe('chest_fill');
+  });
+  it('centers on non-apparel placed goods (the MOROCCO clear-case incident)', () => {
+    expect(placedStyleFor('Clear Case for iPhone®')).toBe('back_center');
+    expect(placedStyleFor('White Glossy Mug')).toBe('back_center');
+    expect(placedStyleFor(undefined)).toBe('chest_fill');
   });
 });
