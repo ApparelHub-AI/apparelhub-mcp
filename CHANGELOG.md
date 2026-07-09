@@ -9,6 +9,41 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-07-09
+
+### Fixed
+
+- **No blank faces on multi-face / multi-piece merch** (the WC26 headphones + wallet + duffle
+  incidents), all grid-calibrated against the live providers:
+  - **Zipper / passport wallets** (Printify 708, ~2482x2756): the near-square print area is BOTH
+    exterior faces folded at the bottom — a centered design split across the spine. Fill/placed now
+    composes the design onto BOTH faces (front = top half upright, back = bottom half composed
+    rotated 180deg so it reads upright past the fold). `faceLayoutFor` returns MULTIPLE face rects;
+    `recompose_fill.py --face` is now REPEATABLE with an optional per-face `:1` rotate flag.
+  - **Headphone ear-cup shells** (Printify 1666, AirPods Max): each cup is a separate oval face
+    (Left + Right). The design printed on ONE cup only. It now composes inset to the oval safe area
+    and prints on BOTH cups; a `replicatePlacedAcrossPieces` helper also covers any other placed
+    non-apparel multi-piece good so no piece ships blank.
+  - **All-over duffles** (Printful 465): the front/back display areas wrap past the seams and
+    rounded ends, so a full-width design clipped its edges and left the far side / a white strip
+    bare. The design now composes into the central frontal window and the sides/top/bottom/pocket
+    get the shared solid background (no unprinted face).
+- **Resolution safety net — the missing "regenerate at higher resolution" step** (the WC26 NORWAY
+  passport-wallet QC block). A design generated at ~1024px, keyed and auto-cropped to its artwork
+  bbox, can shrink to e.g. 847x596; placed on a large print area the fulfillment platform's QC gate
+  BLOCKS it ("low resolution") with no automatic remediation, dead-ending the build. The PLACED
+  path now upscales the design (Lanczos, white-premultiplied) to the print area's resolution (new
+  `ensure_resolution.py`, floor clamped to [2000, 3000]px) so it clears the gate; fill/face
+  composition already produced a high-pixel canvas. A `warnings[]` note recommends regenerating for
+  genuine large-format detail. Products carry a `placements_covered` list in the result.
+
+### Changed
+
+- `FaceLayout` now models `faces: FaceRect[]` (one rect per physical face, each optionally
+  `rotate180`) instead of a single `face` + top-level `rotate180`. `recompose_fill.py` gains a
+  `--transparent` mode (per-face composition preserving transparency for placed wrap goods) and
+  repeatable `--face X:Y:W:H[:R]`.
+
 ## [0.3.6] - 2026-07-09
 
 ### Fixed

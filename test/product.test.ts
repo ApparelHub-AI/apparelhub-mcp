@@ -32,6 +32,7 @@ function stubImaging(overrides: Partial<Imaging> = {}): Imaging {
     solidFill: async () => {
       throw new Error('not expected in this test');
     },
+    ensureResolution: async () => ({ outputPath: '/tmp/fake-hires.png', upscaled: false }),
     cleanup: async () => {},
     ...overrides,
   };
@@ -451,13 +452,14 @@ describe('ship_product: fill print style (canvas/backpack incident)', () => {
     // upright (file-top = cuff) — one rotated file on all four prints upside down on the backs.
     expect(recomposeCalls).toHaveLength(2);
     const frontOpts = (recomposeCalls[0] as unknown[])[3] as {
-      face?: { x: number; w: number };
-      rotate180?: boolean;
+      faces?: { x: number; w: number; rotate180?: boolean }[];
     };
-    expect(frontOpts?.rotate180).toBe(true);
-    expect(frontOpts?.face?.w).toBeLessThan(0.7);
-    const backOpts = (recomposeCalls[1] as unknown[])[3] as { rotate180?: boolean };
-    expect(backOpts?.rotate180).toBeFalsy();
+    expect(frontOpts?.faces?.[0]?.rotate180).toBe(true);
+    expect(frontOpts?.faces?.[0]?.w).toBeLessThan(0.7);
+    const backOpts = (recomposeCalls[1] as unknown[])[3] as {
+      faces?: { rotate180?: boolean }[];
+    };
+    expect(backOpts?.faces?.[0]?.rotate180).toBeFalsy();
 
     // ALL 4 placements carry a composed art file — one printed strip out of four is what
     // shipped the ENGLAND sock with three raw-white surfaces.
@@ -604,13 +606,12 @@ describe('ship_product: fill print style (canvas/backpack incident)', () => {
 
     expect(res.print_style).toBe('fill');
     const opts = (recomposeCalls[0] as unknown[])[3] as {
-      face?: { y: number; h: number };
-      rotate180?: boolean;
+      faces?: { y: number; h: number; rotate180?: boolean }[];
     };
     // The area is front + back folded at the bottom: art stays in the top (visible-front) band.
-    expect(opts?.face).toBeDefined();
-    expect(opts.face!.y + opts.face!.h).toBeLessThan(0.5);
-    expect(opts?.rotate180).toBeUndefined();
+    expect(opts?.faces?.[0]).toBeDefined();
+    expect(opts!.faces![0]!.y + opts!.faces![0]!.h).toBeLessThan(0.5);
+    expect(opts?.faces?.[0]?.rotate180).toBeUndefined();
     const createCall = calls.find((c) => c.url.endsWith('/product/create'));
     const createBody = JSON.parse(createCall?.init?.body as string);
     expect(createBody.print_data).toHaveLength(1);
@@ -964,5 +965,196 @@ describe('ship_product: placed placement centers on non-apparel (MOROCCO phone-c
     expect(t.width).toBe(1020);
     expect(t.top).toBe(697);
     expect(t.left).toBe(70);
+  });
+});
+
+describe('ship_product: multi-face merch — no blank faces (WC26 headphones/wallet/duffle incident)', () => {
+  it('wallet: composes the design onto BOTH faces (front + back) on a transparent canvas', async () => {
+    const walletGarment = {
+      product: {
+        name: 'Zipper Wallet',
+        variants: [
+          {
+            provider_ref_id: '73217',
+            color: 'White',
+            size: 'One size',
+            templates: [
+              { provider_location_ref_id: 'front', provider_ref_id: '73217', area_width: 2482, area_height: 2756 },
+            ],
+          },
+        ],
+      },
+    };
+    const recomposeCalls: unknown[] = [];
+    const { api, calls } = apiFrom([
+      walletGarment,
+      { image_uuid: 'd2', url: 'https://cdn.example/d2.png' }, // transform upload (2-face composed)
+      { job_uuid: 'j1' },
+      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/c.png' }] },
+      { uuid: 'p1' },
+      {},
+    ]);
+    await shipProduct.handler(
+      {
+        design_uuid: 'd1',
+        design_url: 'https://cdn.example/d.png',
+        garment: { provider_uuid: 'pfy', product_ref_id: '708' },
+        variants: [{ color: 'White', sizes: ['One size'] }],
+        pricing: { price: 34.99 },
+        product_meta: { name: 'WC26 QF - BELGIUM - Wallet', description: 'w' },
+        print_style: 'placed', // the task passes placed explicitly; wrap must still per-face compose
+      },
+      fakeContext(
+        api,
+        stubImaging({
+          recomposeFill: async (...args: unknown[]) => {
+            recomposeCalls.push(args);
+            return { outputPath: '/tmp/wallet.png', mode: 'composited' as const };
+          },
+        }),
+      ),
+    );
+
+    // Composed once, transparent, onto TWO faces (front upright + back rotated).
+    expect(recomposeCalls).toHaveLength(1);
+    const opts = (recomposeCalls[0] as unknown[])[3] as {
+      faces?: { rotate180?: boolean }[];
+      transparent?: boolean;
+    };
+    expect(opts?.transparent).toBe(true);
+    expect(opts?.faces).toHaveLength(2);
+    expect(opts?.faces?.[1]?.rotate180).toBe(true);
+    const createBody = JSON.parse(calls.find((c) => c.url.endsWith('/product/create'))?.init?.body as string);
+    expect(createBody.print_data[0].image_url).toBe('https://cdn.example/d2.png');
+  });
+
+  it('headphones: replicates the placed design across BOTH ear cups (Left + Right)', async () => {
+    const phonesGarment = {
+      product: {
+        name: 'AirPods Max Shell Case',
+        variants: [
+          {
+            provider_ref_id: '114956',
+            size: 'AirPods Max 1st / 2nd Gen',
+            templates: [
+              { provider_location_ref_id: 'Left', provider_ref_id: '114956', area_width: 1234, area_height: 1644 },
+              { provider_location_ref_id: 'Right', provider_ref_id: '114957', area_width: 1234, area_height: 1644 },
+            ],
+          },
+        ],
+      },
+    };
+    const { api, calls } = apiFrom([
+      phonesGarment,
+      { image_uuid: 'd2', url: 'https://cdn.example/d2.png' }, // transform (inset composed cup art)
+      { job_uuid: 'j1' },
+      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/c.png' }] },
+      { uuid: 'p1' },
+      {},
+    ]);
+    const res = (await shipProduct.handler(
+      {
+        design_uuid: 'd1',
+        design_url: 'https://cdn.example/d.png',
+        garment: { provider_uuid: 'pfy', product_ref_id: '1666' },
+        variants: [{ color: 'Clear', sizes: ['AirPods Max 1st / 2nd Gen'] }],
+        pricing: { price: 29.99 },
+        product_meta: { name: 'WC26 QF - BELGIUM - Headphones', description: 'h' },
+        print_style: 'placed',
+      },
+      fakeContext(
+        api,
+        stubImaging({
+          recomposeFill: async () => ({ outputPath: '/tmp/cup.png', mode: 'composited' as const }),
+        }),
+      ),
+    )) as any;
+
+    const createBody = JSON.parse(calls.find((c) => c.url.endsWith('/product/create'))?.init?.body as string);
+    const byPlacement = Object.fromEntries(
+      createBody.print_data.map((t: any) => [t.provider_ref_id, t.image_url]),
+    );
+    // BOTH cups carry the composed art — one cup printed and one blank is what shipped BELGIUM.
+    expect(Object.keys(byPlacement).sort()).toEqual(['Left', 'Right']);
+    expect(byPlacement.Left).toBe('https://cdn.example/d2.png');
+    expect(byPlacement.Right).toBe('https://cdn.example/d2.png');
+    expect(res.placements_covered.sort()).toEqual(['Left', 'Right']);
+  });
+
+  it('resolution safety net: upscales a low-res placed design to the print-area floor', async () => {
+    const phoneCase = {
+      product: {
+        name: 'Clear Case for iPhone®',
+        variants: [
+          {
+            id: 9181,
+            size: 'iPhone 15',
+            cost: 8.95,
+            templates: [
+              { provider_location_ref_id: 'default', provider_ref_id: 4181, area_width: 1160, area_height: 2414 },
+            ],
+          },
+        ],
+      },
+    };
+    let ensureFloor = 0;
+    const { api, calls } = apiFrom([
+      phoneCase,
+      { image_uuid: 'hd', url: 'https://cdn.example/hd.png' }, // transform upload (upscaled)
+      { job_uuid: 'j1' },
+      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/c.png' }] },
+      { uuid: 'p1' },
+      {},
+    ]);
+    const res = (await shipProduct.handler(
+      {
+        design_uuid: 'd1',
+        design_url: 'https://cdn.example/d.png',
+        garment: { provider_uuid: 'pf', product_ref_id: '181' },
+        variants: [{ color: 'Clear', sizes: ['iPhone 15'] }],
+        pricing: { price: 19.99 },
+        product_meta: { name: 'WC26 QF - MOROCCO - Phone Case', description: 'c' },
+        print_style: 'placed',
+      },
+      fakeContext(
+        api,
+        stubImaging({
+          ensureResolution: async (_p: string, min: number) => {
+            ensureFloor = min;
+            return { outputPath: '/tmp/hd.png', upscaled: true };
+          },
+        }),
+      ),
+    )) as any;
+
+    expect(ensureFloor).toBe(2414); // floor = the print-area long side, clamped to [2000, 3000]
+    const createBody = JSON.parse(calls.find((c) => c.url.endsWith('/product/create'))?.init?.body as string);
+    expect(createBody.generated_image_uuid).toBe('hd'); // the upscaled revision is used
+    expect(res.warnings.some((w: string) => /upscaled/i.test(w))).toBe(true);
+  });
+
+  it('resolution safety net: no upload when the design already meets the floor', async () => {
+    const { api, calls } = apiFrom([
+      garmentDetail, // tee
+      { job_uuid: 'j1' },
+      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/c.png' }] },
+      { uuid: 'p1' },
+      {},
+    ]);
+    await shipProduct.handler(
+      {
+        design_uuid: 'd1',
+        design_url: 'https://cdn.example/d.png',
+        garment: { provider_uuid: 'pf', product_ref_id: '71' },
+        variants: [{ color: 'Black', sizes: ['S'] }],
+        pricing: { price: 27.99 },
+        product_meta: { name: 'Tee', description: 't' },
+      },
+      fakeContext(api), // default imaging: ensureResolution returns upscaled:false
+    );
+    // No /transform upload happened (design was large enough) — create uses the original design.
+    expect(calls.some((c) => c.url.includes('/transform'))).toBe(false);
+    const createBody = JSON.parse(calls.find((c) => c.url.endsWith('/product/create'))?.init?.body as string);
+    expect(createBody.generated_image_uuid).toBe('d1');
   });
 });

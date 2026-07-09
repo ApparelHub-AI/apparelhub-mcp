@@ -17,6 +17,7 @@ const MAKE_TRANSPARENT = fileURLToPath(
 const IMAGE_STATS = fileURLToPath(new URL('../../python/image_stats.py', import.meta.url));
 const THREAD_COLORS = fileURLToPath(new URL('../../python/thread_colors.py', import.meta.url));
 const RECOMPOSE_FILL = fileURLToPath(new URL('../../python/recompose_fill.py', import.meta.url));
+const ENSURE_RESOLUTION = fileURLToPath(new URL('../../python/ensure_resolution.py', import.meta.url));
 const PYTHON = process.env.APPARELHUB_MCP_PYTHON || 'python3';
 
 export interface ImageStats {
@@ -52,11 +53,14 @@ export interface MakeTransparentOptions {
 }
 
 export interface RecomposeFillOptions {
-  /** Visible-face rectangle (fractions of the print area) the art must be composed within —
-   *  the background still fills the whole area. Wrap-style goods (drawstring bags, sock legs). */
-  face?: { x: number; y: number; w: number; h: number };
-  /** Rotate the art 180deg before composing (placements that render the file inverted). */
-  rotate180?: boolean;
+  /** Visible-face rectangles (fractions of the print area) the art is composed into — one per
+   *  physical face the file covers; the background still fills the whole area. A face with
+   *  `rotate180` renders inverted on the product (far side of a fold), so the art is flipped
+   *  there. Wrap-style goods: drawstring bags, sock legs, zipper wallets. */
+  faces?: { x: number; y: number; w: number; h: number; rotate180?: boolean }[];
+  /** Compose onto a TRANSPARENT canvas (placed-style wrap goods: per-face art, transparency
+   *  preserved, transparent pixels premultiplied white). */
+  transparent?: boolean;
 }
 
 export interface RecomposeFillResult {
@@ -66,6 +70,14 @@ export interface RecomposeFillResult {
   mode: 'composited' | 'cover' | 'solid';
   /** The chosen background hex (composited mode only). */
   background?: string;
+  width?: number;
+  height?: number;
+}
+
+export interface EnsureResolutionResult {
+  outputPath: string;
+  /** true when the design was actually upscaled (false = already >= the floor, unchanged). */
+  upscaled: boolean;
   width?: number;
   height?: number;
 }
@@ -99,6 +111,9 @@ export interface Imaging {
     areaHeight: number,
     background?: string,
   ): Promise<RecomposeFillResult>;
+  /** Upscale a design to a minimum long-side resolution (Lanczos, white-premultiplied) so it
+   *  clears the fulfillment platform's low-resolution QC gate. No-op if already large enough. */
+  ensureResolution(inputPath: string, minLongSide: number): Promise<EnsureResolutionResult>;
   cleanup(paths: string[]): Promise<void>;
 }
 
@@ -267,9 +282,10 @@ export class LocalImaging implements Imaging {
   ): Promise<RecomposeFillResult> {
     const out = join(await this.dir(), `fill-${Date.now()}-${Math.floor(Math.random() * 1e6)}.png`);
     const args = [RECOMPOSE_FILL, inputPath, out, '--aspect', `${areaWidth}:${areaHeight}`];
-    const face = options?.face;
-    if (face) args.push('--face', `${face.x}:${face.y}:${face.w}:${face.h}`);
-    if (options?.rotate180) args.push('--rotate180');
+    for (const f of options?.faces ?? []) {
+      args.push('--face', `${f.x}:${f.y}:${f.w}:${f.h}${f.rotate180 ? ':1' : ''}`);
+    }
+    if (options?.transparent) args.push('--transparent');
     let r: RunResult;
     try {
       r = await run(PYTHON, args);
@@ -342,6 +358,39 @@ export class LocalImaging implements Imaging {
       outputPath: out,
       mode: 'solid',
       background: meta.background ?? background,
+      width: meta.width,
+      height: meta.height,
+    };
+  }
+
+  async ensureResolution(inputPath: string, minLongSide: number): Promise<EnsureResolutionResult> {
+    const out = join(
+      await this.dir(),
+      `res-${Date.now()}-${Math.floor(Math.random() * 1e6)}.png`,
+    );
+    let r: RunResult;
+    try {
+      r = await run(PYTHON, [ENSURE_RESOLUTION, inputPath, out, '--min-long-side', String(minLongSide)]);
+    } catch {
+      throw pythonMissing();
+    }
+    if (r.code !== 0) {
+      if (looksLikeMissingInterpreter(r)) throw pythonMissing();
+      throw new AhError({
+        code: 'recompose_failed',
+        message: `Resolution upscale failed: ${r.stderr.trim() || `exit ${r.code}`}`,
+        suggestion: 'Retry, or regenerate the design at a higher resolution.',
+      });
+    }
+    let meta: { upscaled?: boolean; width?: number; height?: number } = {};
+    try {
+      meta = JSON.parse(r.stdout.trim()) as typeof meta;
+    } catch {
+      // Metadata is advisory; the output file is the contract.
+    }
+    return {
+      outputPath: out,
+      upscaled: Boolean(meta.upscaled),
       width: meta.width,
       height: meta.height,
     };

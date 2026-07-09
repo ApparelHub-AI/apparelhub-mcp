@@ -47,22 +47,42 @@ describe('faceLayoutFor (print area != visible face — the WC26 sock/drawstring
   it('rotates sock leg FRONT strips (file renders toe-up) but not the BACKS (file renders cuff-up)', () => {
     for (const p of ['leg_front_right', 'leg_front_left']) {
       const l = faceLayoutFor('Cushioned Crew Socks', p, 632, 2620);
-      expect(l?.rotate180).toBe(true);
-      expect(l?.face?.w).toBeLessThan(0.7); // only the central band stays frontal
+      expect(l?.faces[0]?.rotate180).toBe(true);
+      expect(l?.faces[0]?.w).toBeLessThan(0.7); // only the central band stays frontal
     }
     for (const p of ['leg_back_right', 'leg_back_left']) {
       const l = faceLayoutFor('Cushioned Crew Socks', p, 632, 2620);
-      expect(l?.rotate180).toBeUndefined();
-      expect(l?.face?.w).toBeLessThan(0.7);
+      expect(l?.faces[0]?.rotate180).toBeUndefined();
+      expect(l?.faces[0]?.w).toBeLessThan(0.7);
     }
   });
 
   it('confines drawstring-bag wrap areas to the visible front (top half above the fold)', () => {
     const l = faceLayoutFor('Drawstring Bag', 'front', 4950, 11100);
-    expect(l?.rotate180).toBeUndefined();
-    expect(l?.face).toBeDefined();
-    const f = l!.face!;
+    expect(l?.faces).toHaveLength(1);
+    expect(l?.faces[0]?.rotate180).toBeUndefined();
+    const f = l!.faces[0]!;
     expect(f.y + f.h).toBeLessThan(0.5); // art never reaches the bottom fold
+  });
+
+  it('composes wallet wraps onto BOTH faces (front upright, back rotated) — no blank face', () => {
+    const l = faceLayoutFor('Zipper Wallet', 'front', 2482, 2756);
+    expect(l?.faces).toHaveLength(2);
+    expect(l?.faces[0]?.rotate180).toBeUndefined(); // front face upright
+    expect(l?.faces[1]?.rotate180).toBe(true); // back face renders inverted past the fold
+    expect((l!.faces[0]!.y + l!.faces[0]!.h)).toBeLessThanOrEqual(l!.faces[1]!.y); // front above back
+  });
+
+  it('insets headphone ear-cup art so both oval cups print clean', () => {
+    const l = faceLayoutFor('AirPods Max Shell Case', 'Left', 1234, 1644);
+    expect(l?.faces).toHaveLength(1);
+    expect(l?.faces[0]?.w).toBeLessThan(0.8); // inset within the oval
+  });
+
+  it('confines duffle display faces to the central frontal window', () => {
+    const l = faceLayoutFor('All-Over Print Duffle Bag', 'front', 3000, 1998);
+    expect(l?.faces[0]?.w).toBeLessThan(0.85);
+    expect(faceLayoutFor('All-Over Print Duffle Bag', 'pocket', 2060, 1269)).toBeUndefined();
   });
 
   it('leaves normal faces alone (backpack front, canvas, tees)', () => {
