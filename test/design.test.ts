@@ -46,6 +46,13 @@ function fakeImaging(over: Partial<Imaging> = {}): Imaging {
       premultiplied_white: true,
     }),
     ocr: async () => ({ available: true, text: 'STAY WILD' }),
+    recomposeFill: async () => {
+      throw new Error('not expected in this test');
+    },
+    solidFill: async () => {
+      throw new Error('not expected in this test');
+    },
+    ensureResolution: async () => ({ outputPath: '/tmp/fake-out.png', upscaled: false }),
     cleanup: async () => {},
     ...over,
   };
@@ -328,5 +335,54 @@ describe('iterate_design', () => {
     expect(res).toMatchObject({ design_uuid: 'g9', design_url: 'https://cdn.example/v.png' });
     const body = JSON.parse(calls[0]?.init?.body as string);
     expect(body.source_image_uuid).toBe('g1');
+  });
+});
+
+describe('process_transparency: resolution floor (NORWAY passport-wallet QC-skip)', () => {
+  it('upscales a low-res keyed design to the floor so verify_design_quality does not block', async () => {
+    // A 1024x1024 design keyed + tight-cropped to its artwork can come out 847x596 (min side
+    // 596 < 600 = the QC gate's hard block). process_transparency now upscales the keyed result
+    // and uploads THAT, so the design that reaches verify_design_quality is print-ready.
+    const { api } = apiFrom([jsonResponse(200, { image_uuid: 'hi', url: 'https://cdn.example/hi.png' })]);
+    let ensuredFloor = 0;
+    const readPaths: string[] = [];
+    const imaging = fakeImaging({
+      makeTransparent: async () => ({ outputPath: '/tmp/keyed-847x596.png', cornersClean: true, width: 847, height: 596 }),
+      ensureResolution: async (p: string, min: number) => {
+        ensuredFloor = min;
+        return { outputPath: '/tmp/keyed-upscaled.png', upscaled: true, width: 2843, height: 2000 };
+      },
+      readBytes: async (p: string) => {
+        readPaths.push(p);
+        return new Uint8Array([1, 2, 3]);
+      },
+    });
+    const res = (await processTransparency.handler(
+      { image_uuid: 'g1', image_url: 'https://cdn.example/x.png' },
+      fakeContext(api, imaging),
+    )) as any;
+
+    expect(ensuredFloor).toBe(2000); // upscaled to the resolution floor
+    expect(readPaths).toContain('/tmp/keyed-upscaled.png'); // the UPSCALED file is what gets uploaded
+    expect(res.image_uuid).toBe('hi');
+  });
+
+  it('does not re-upload when the keyed design is already large enough', async () => {
+    const { api } = apiFrom([jsonResponse(200, { image_uuid: 't1', url: 'https://cdn.example/t.png' })]);
+    const readPaths: string[] = [];
+    const imaging = fakeImaging({
+      makeTransparent: async () => ({ outputPath: '/tmp/keyed-big.png', cornersClean: true, width: 2400, height: 2000 }),
+      ensureResolution: async () => ({ outputPath: '/tmp/unused.png', upscaled: false }),
+      readBytes: async (p: string) => {
+        readPaths.push(p);
+        return new Uint8Array([1, 2, 3]);
+      },
+    });
+    await processTransparency.handler(
+      { image_uuid: 'g1', image_url: 'https://cdn.example/x.png' },
+      fakeContext(api, imaging),
+    );
+    // upscaled:false -> the ORIGINAL keyed file is uploaded, not a new one.
+    expect(readPaths).toEqual(['/tmp/keyed-big.png']);
   });
 });

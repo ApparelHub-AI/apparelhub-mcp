@@ -66,14 +66,20 @@ export function scoreQuality(
 
   const minDim = Math.min(stats.width, stats.height);
   if (minDim < 1000) {
-    const block = minDim < 600;
+    // Low resolution is a WARN, never a hard BLOCK: the build pipeline auto-upscales a low-res
+    // design to the print-area resolution (process_transparency restores a floor after its tight
+    // crop; ship_product's placed path upscales to the print area), so a low-res design must NOT
+    // make an unattended run SKIP the item — that left the NORWAY passport wallet (847x596 after
+    // keying) permanently unbuilt at the QC gate. The warn still surfaces it (regenerate the
+    // source for genuine large-format detail); the score penalty scales with how low it is.
+    const veryLow = minDim < 600;
     issues.push({
-      severity: block ? 'block' : 'warn',
+      severity: 'warn',
       category: 'resolution',
-      finding: `Low resolution (${stats.width}x${stats.height}); it may print blurry.`,
-      suggested_fix: 'Generate the design at 1024px or larger.',
+      finding: `Low resolution (${stats.width}x${stats.height}); the pipeline will upscale it to the print area, but regenerate the source at 1024px+ for sharp large-format detail.`,
+      suggested_fix: 'Regenerate the design at 1024px or larger (the pipeline upscales meanwhile).',
     });
-    score -= block ? 30 : 10;
+    score -= veryLow ? 20 : 10;
   }
 
   if (opts.ocrText && opts.ocrText.trim()) {
