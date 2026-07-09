@@ -9,6 +9,51 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-07-09
+
+### Fixed
+
+- **Fill printing now knows the print area is not always the visible FACE** (the WC26
+  ENGLAND sock + drawstring incidents). Two wrap-style templates are face-calibrated (grid-file
+  preview renders against the live providers):
+  - **Printful sock leg placements**: the FRONT strips render the file **rotated 180°** (file-top
+    = toe) while the BACK strips render it upright (file-top = cuff), and the strip wraps the leg
+    tube so art at ~86% width clipped at the silhouette. Fill now composes a rotated file for the
+    fronts and an upright file for the backs, both confined to the central frontal band.
+  - **Drawstring-bag wrap areas** (Printify blueprint 414: 4950x11100 ~= 16.5"x37") are the front +
+    back folded at the bottom — centered art straddled the fold and printed cut off at the hem.
+    Fill now composes the art into the visible front (top band, clear of the drawstring channel
+    and grommet corners) while the background still fills the whole area (solid back).
+  - Unknown fill areas with an extreme aspect (<=1:2 / >=2.2:1) surface a **warning** to inspect
+    the mockup for wrap/fold cropping instead of silently center-composing.
+- **Fill goods now put a file on EVERY print placement, not just the chosen one.** The ENGLAND
+  sock printed 1 of its 4 leg strips (the other sock + both backs shipped as raw white fabric);
+  the SPAIN backpack's top/bottom/pocket placements were never printed (white bands). Same-size
+  sibling placements reuse the composed art file; differing siblings get ONE shared solid canvas
+  in the art's background color (`recompose_fill.py --solid`). Mockup previews cover the same
+  placement set.
+- **Single-dimension variant matching** (the MOROCCO clear-phone-case failure): garments whose
+  catalog has NO color dimension (clear cases: device sizes only) or NO size dimension resolve by
+  the dimension they DO have instead of failing the whole build with "No variants could be
+  resolved"; the requested name is kept as the variant label and a warning explains the match. The
+  zero-resolved error now also lists the catalog's actual color/size names so an unattended agent
+  can self-correct on the next call.
+
+## [0.3.5] - 2026-07-09
+
+### Fixed
+
+- Thread-colors option id for plain `embroidery_front` placements (bare `thread_colors`), and an
+  error-driven sync self-heal that rewrites the option id Printful names in its rejection. (See
+  release notes for #84.)
+
+## [0.3.4] - 2026-07-09
+
+### Fixed
+
+- Embroidery placements resolved from per-variant templates + thread colors attached at create;
+  fill-face printing (`print_style`) introduced for face goods. (See release notes for #83.)
+
 ## [0.3.3] - 2026-07-09
 
 ### Fixed

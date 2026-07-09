@@ -67,6 +67,97 @@ export function printStyleFor(garmentName: string | undefined): PrintStyle {
   return FILL_FACE_RE.test(garmentName) ? 'fill' : 'placed';
 }
 
+/**
+ * How a PLACED design sits vertically. Collar breathing room is a GARMENT concept: on apparel
+ * the design hangs below the collar (chest_fill, 13% top padding). On everything else that
+ * prints placed (phone cases, mugs, drinkware) the same math shoved the design into the top
+ * third — the MOROCCO clear-case incident (top=313/2414: "too far up, not centered") — so
+ * non-apparel placed goods CENTER the design on the face instead.
+ */
+export function placedStyleFor(garmentName: string | undefined): 'chest_fill' | 'back_center' {
+  if (!garmentName) return 'chest_fill';
+  return APPAREL_RE.test(garmentName) ? 'chest_fill' : 'back_center';
+}
+
+/**
+ * The print AREA is not always the visible FACE (the WC26 sock/drawstring lesson, 2026-07-09).
+ * Wrap-style goods print one file across several physical surfaces, and some templates render
+ * the file inverted. A FaceLayout tells the fill compositor where the art must live inside the
+ * print area (the background still fills the whole area) and whether to rotate it.
+ *
+ * Empirically calibrated with grid-file preview renders (numbered bands + edge markers):
+ *  - Printful sock `leg_*` placements (e.g. product 882, 632x2620): the file renders 180deg
+ *    ROTATED on the sock (file-top = toe), and the strip wraps the leg tube so only the central
+ *    ~64% of the width stays frontal — art at 86% width clipped at the silhouette (the ENGLAND
+ *    sock incident).
+ *  - Drawstring bag wrap areas (e.g. Printify blueprint 414, 4950x11100 ~= 16.5"x37"): the area
+ *    is the front + back folded at the bottom — the visible front is the TOP ~50% (grid rows
+ *    1-5), the drawstring channel eats the top ~5%, and grommet corner cuts start at ~45%. Art
+ *    centered on the AREA straddles the fold (the ENGLAND drawstring incident).
+ */
+export interface FaceLayout {
+  /** Fractions (0..1) of the print area the art must be composed within. */
+  face?: { x: number; y: number; w: number; h: number };
+  /** Compose the art rotated 180deg (placements that render the file inverted). */
+  rotate180?: boolean;
+  note: string;
+}
+
+const SOCK_LEG_FRONT_RE = /^leg_front_(left|right)$/i;
+const SOCK_LEG_BACK_RE = /^leg_back_(left|right)$/i;
+const DRAWSTRING_RE = /drawstring|cinch/i;
+
+export function faceLayoutFor(
+  garmentName: string | undefined,
+  placement: string,
+  areaWidth: number,
+  areaHeight: number,
+): FaceLayout | undefined {
+  if (SOCK_LEG_FRONT_RE.test(placement)) {
+    return {
+      face: { x: 0.18, y: 0.05, w: 0.64, h: 0.9 },
+      rotate180: true,
+      note: 'Printful sock leg FRONT: renders the file rotated 180deg (file-top = toe) and the strip wraps the leg — art composes inverted, confined to the central band.',
+    };
+  }
+  if (SOCK_LEG_BACK_RE.test(placement)) {
+    // Calibrated separately: the BACK strips render the file UPRIGHT (file-top = cuff) —
+    // opposite of the fronts. One rotated file on all four strips prints upside down on the
+    // backs, so backs get their own non-rotated composition.
+    return {
+      face: { x: 0.18, y: 0.05, w: 0.64, h: 0.9 },
+      note: 'Printful sock leg BACK: renders the file upright (file-top = cuff), central band only.',
+    };
+  }
+  const aspect = areaWidth > 0 && areaHeight > 0 ? areaWidth / areaHeight : 1;
+  if (DRAWSTRING_RE.test(garmentName ?? '') && aspect < 0.55) {
+    return {
+      face: { x: 0.06, y: 0.05, w: 0.88, h: 0.38 },
+      note: 'Drawstring bag wrap: the area is front + back folded at the bottom — art composes into the visible front (top half), clear of the drawstring channel and grommet corners.',
+    };
+  }
+  return undefined;
+}
+
+/** A fill area with an extreme aspect and NO known face layout is likely a wrap/fold template —
+ *  surface a warning so the agent verifies the mockup instead of trusting a blind center. */
+export function extremeAspectWarning(
+  garmentName: string | undefined,
+  placement: string,
+  areaWidth: number,
+  areaHeight: number,
+): string | undefined {
+  if (areaWidth <= 0 || areaHeight <= 0) return undefined;
+  const aspect = areaWidth / areaHeight;
+  if (aspect > 0.5 && aspect < 2.2) return undefined;
+  return (
+    `Print area "${placement}" on ${garmentName ?? 'this garment'} has an extreme aspect ` +
+    `(${areaWidth}x${areaHeight}) with no known face layout — it may wrap several product ` +
+    `surfaces (fold/seam in the middle). Inspect the mockup carefully for art straddling a ` +
+    `fold or rendering rotated before syncing.`
+  );
+}
+
 /** BC 3001 (product_ref_id "71") variant-ID trap: 4021-4025 render AQUA, not Navy. Use the
  *  Heather Midnight Navy IDs (8495-8499) instead. Surfaced on get_garment_details. */
 export function garmentWarnings(providerRefId: string | undefined): string[] {

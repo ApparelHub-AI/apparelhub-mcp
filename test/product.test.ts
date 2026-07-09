@@ -29,6 +29,9 @@ function stubImaging(overrides: Partial<Imaging> = {}): Imaging {
     recomposeFill: async () => {
       throw new Error('not expected in this test');
     },
+    solidFill: async () => {
+      throw new Error('not expected in this test');
+    },
     cleanup: async () => {},
     ...overrides,
   };
@@ -393,6 +396,228 @@ describe('ship_product: fill print style (canvas/backpack incident)', () => {
     expect(createBody.print_data[0].image_url).toBe('https://cdn.example/d2.png');
   });
 
+  it('sock: covers ALL leg placements with the SAME art file, composed rotated in the frontal band', async () => {
+    // Printful 882: templates live per-VARIANT; 4 same-size leg strips; variants have NO color.
+    const sockGarment = {
+      product: {
+        name: 'Cushioned Crew Socks',
+        variants: [
+          {
+            id: 22786,
+            size: 'S',
+            cost: 7.5,
+            templates: [
+              { provider_location_ref_id: 'leg_front_right', provider_ref_id: 905474, area_width: 632, area_height: 2620 },
+              { provider_location_ref_id: 'leg_front_left', provider_ref_id: 905473, area_width: 632, area_height: 2620 },
+              { provider_location_ref_id: 'leg_back_right', provider_ref_id: 905472, area_width: 632, area_height: 2620 },
+              { provider_location_ref_id: 'leg_back_left', provider_ref_id: 905471, area_width: 632, area_height: 2620 },
+            ],
+          },
+        ],
+      },
+    };
+    const recomposeCalls: unknown[] = [];
+    const { api, calls } = apiFrom([
+      sockGarment, // fetchGarment
+      { image_uuid: 'd2', url: 'https://cdn.example/d2.png' }, // transform upload (front art, rotated)
+      { image_uuid: 'd4', url: 'https://cdn.example/d4.png' }, // transform upload (back art, upright)
+      { job_uuid: 'j1' }, // mockup POST
+      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/c.png' }] }, // poll
+      { uuid: 'p1' }, // create
+      {}, // variant POST
+    ]);
+    const res = (await shipProduct.handler(
+      {
+        design_uuid: 'd1',
+        design_url: 'https://cdn.example/d.png',
+        garment: { provider_uuid: 'pf', product_ref_id: '882' },
+        variants: [{ color: 'Navy', sizes: ['S'] }],
+        pricing: { price: 24.99 },
+        product_meta: { name: 'WC26 QF - ENGLAND - Socks', description: 's' },
+      },
+      fakeContext(
+        api,
+        stubImaging({
+          recomposeFill: async (...args: unknown[]) => {
+            recomposeCalls.push(args);
+            return { outputPath: '/tmp/fill.png', mode: 'composited' as const, background: '#0C0C4C' };
+          },
+        }),
+      ),
+    )) as any;
+
+    expect(res.print_style).toBe('fill');
+    // TWO compositions: fronts render the file rotated 180deg (file-top = toe), backs render it
+    // upright (file-top = cuff) — one rotated file on all four prints upside down on the backs.
+    expect(recomposeCalls).toHaveLength(2);
+    const frontOpts = (recomposeCalls[0] as unknown[])[3] as {
+      face?: { x: number; w: number };
+      rotate180?: boolean;
+    };
+    expect(frontOpts?.rotate180).toBe(true);
+    expect(frontOpts?.face?.w).toBeLessThan(0.7);
+    const backOpts = (recomposeCalls[1] as unknown[])[3] as { rotate180?: boolean };
+    expect(backOpts?.rotate180).toBeFalsy();
+
+    // ALL 4 placements carry a composed art file — one printed strip out of four is what
+    // shipped the ENGLAND sock with three raw-white surfaces.
+    const createCall = calls.find((c) => c.url.endsWith('/product/create'));
+    const createBody = JSON.parse(createCall?.init?.body as string);
+    expect(createBody.print_data).toHaveLength(4);
+    const byPlacement = Object.fromEntries(
+      createBody.print_data.map((t: any) => [t.provider_ref_id, t.image_url]),
+    );
+    expect(byPlacement).toEqual({
+      leg_front_right: 'https://cdn.example/d2.png',
+      leg_front_left: 'https://cdn.example/d2.png',
+      leg_back_right: 'https://cdn.example/d4.png',
+      leg_back_left: 'https://cdn.example/d4.png',
+    });
+    for (const t of createBody.print_data) {
+      expect(t.width).toBe(632);
+      expect(t.height).toBe(2620);
+    }
+    // Colorless catalog: variants matched by size alone (the phone-case lesson generalized).
+    expect(res.variants_added).toBe(1);
+
+    // The mockup previews the same 4 placements.
+    const mockupCall = calls.find((c) => c.url.endsWith('/merchandise/product/preview'));
+    const mockupBody = JSON.parse(mockupCall?.init?.body as string);
+    expect(mockupBody.templates).toHaveLength(4);
+  });
+
+  it('backpack: differing sibling placements (top/bottom/pocket) get ONE shared solid background file', async () => {
+    const backpackGarment = {
+      product: {
+        name: 'All-Over Print Backpack',
+        variants: [
+          {
+            id: 8279,
+            size: 'One size',
+            cost: 32,
+            templates: [
+              { provider_location_ref_id: 'front', provider_ref_id: 4294, area_width: 1747, area_height: 2468 },
+              { provider_location_ref_id: 'top', provider_ref_id: 4295, area_width: 3000, area_height: 857 },
+              { provider_location_ref_id: 'bottom', provider_ref_id: 4296, area_width: 2999, area_height: 535 },
+              { provider_location_ref_id: 'pocket', provider_ref_id: 4297, area_width: 2060, area_height: 1269 },
+            ],
+          },
+        ],
+      },
+    };
+    const solidCalls: unknown[] = [];
+    const { api, calls } = apiFrom([
+      backpackGarment, // fetchGarment
+      { image_uuid: 'd2', url: 'https://cdn.example/d2.png' }, // transform upload (art)
+      { image_uuid: 'd3', url: 'https://cdn.example/d3-solid.png' }, // transform upload (solid bg)
+      { job_uuid: 'j1' }, // mockup POST
+      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/c.png' }] }, // poll
+      { uuid: 'p1' }, // create
+      {}, // variant POST
+    ]);
+    const res = (await shipProduct.handler(
+      {
+        design_uuid: 'd1',
+        design_url: 'https://cdn.example/d.png',
+        garment: { provider_uuid: 'pf', product_ref_id: '279' },
+        variants: [{ color: 'Black', sizes: ['One size'] }],
+        pricing: { price: 64.99 },
+        product_meta: { name: 'WC26 QF - SPAIN - Backpack', description: 'b' },
+      },
+      fakeContext(
+        api,
+        stubImaging({
+          recomposeFill: async () => ({
+            outputPath: '/tmp/fill.png',
+            mode: 'composited' as const,
+            background: '#0C0C0C',
+          }),
+          solidFill: async (...args: unknown[]) => {
+            solidCalls.push(args);
+            return { outputPath: '/tmp/solid.png', mode: 'solid' as const, background: '#0C0C0C' };
+          },
+        }),
+      ),
+    )) as any;
+
+    expect(res.print_style).toBe('fill');
+    // One solid canvas serves every differing sibling (a solid color stretches losslessly)...
+    expect(solidCalls).toHaveLength(1);
+    expect((solidCalls[0] as unknown[])[3]).toBe('#0C0C0C'); // pinned to the art's background
+    // ...and the print covers all 4 surfaces: art on front, background on top/bottom/pocket.
+    const createCall = calls.find((c) => c.url.endsWith('/product/create'));
+    const createBody = JSON.parse(createCall?.init?.body as string);
+    const byPlacement = Object.fromEntries(
+      createBody.print_data.map((t: any) => [t.provider_ref_id, t.image_url]),
+    );
+    expect(byPlacement).toEqual({
+      front: 'https://cdn.example/d2.png',
+      top: 'https://cdn.example/d3-solid.png',
+      bottom: 'https://cdn.example/d3-solid.png',
+      pocket: 'https://cdn.example/d3-solid.png',
+    });
+  });
+
+  it('drawstring wrap: art composes into the visible-front face region, never across the fold', async () => {
+    const bagGarment = {
+      product: {
+        name: 'Drawstring Bag',
+        variants: [
+          {
+            provider_ref_id: '61365',
+            size: 'One size',
+            templates: [
+              { provider_location_ref_id: 'front', provider_ref_id: '61365', area_width: 4950, area_height: 11100 },
+            ],
+          },
+        ],
+      },
+    };
+    const recomposeCalls: unknown[] = [];
+    const { api, calls } = apiFrom([
+      bagGarment,
+      { image_uuid: 'd2', url: 'https://cdn.example/d2.png' },
+      { job_uuid: 'j1' },
+      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/c.png' }] },
+      { uuid: 'p1' },
+      {},
+    ]);
+    const res = (await shipProduct.handler(
+      {
+        design_uuid: 'd1',
+        design_url: 'https://cdn.example/d.png',
+        garment: { provider_uuid: 'pfy', product_ref_id: '414' },
+        variants: [{ color: 'Black', sizes: ['One size'] }],
+        pricing: { price: 21.99 },
+        product_meta: { name: 'WC26 QF - ENGLAND - Drawstring Bag', description: 'd' },
+      },
+      fakeContext(
+        api,
+        stubImaging({
+          recomposeFill: async (...args: unknown[]) => {
+            recomposeCalls.push(args);
+            return { outputPath: '/tmp/fill.png', mode: 'composited' as const, background: '#12224C' };
+          },
+        }),
+      ),
+    )) as any;
+
+    expect(res.print_style).toBe('fill');
+    const opts = (recomposeCalls[0] as unknown[])[3] as {
+      face?: { y: number; h: number };
+      rotate180?: boolean;
+    };
+    // The area is front + back folded at the bottom: art stays in the top (visible-front) band.
+    expect(opts?.face).toBeDefined();
+    expect(opts.face!.y + opts.face!.h).toBeLessThan(0.5);
+    expect(opts?.rotate180).toBeUndefined();
+    const createCall = calls.find((c) => c.url.endsWith('/product/create'));
+    const createBody = JSON.parse(createCall?.init?.body as string);
+    expect(createBody.print_data).toHaveLength(1);
+    expect(createBody.print_data[0].width).toBe(4950); // file still fills the whole area
+    expect(createBody.print_data[0].height).toBe(11100);
+  });
+
   it('respects an explicit print_style: "placed" on a face good', async () => {
     const canvasGarment = {
       product: { name: 'Canvas', variants: [{ id: 91001, color: 'White', size: '12x16', cost: 9 }] },
@@ -689,5 +914,55 @@ describe('delete_product', () => {
     )) as any;
     expect(res.archived).toBe(true);
     expect(calls[0]?.init?.method).toBe('PATCH');
+  });
+});
+
+describe('ship_product: placed placement centers on non-apparel (MOROCCO phone-case incident)', () => {
+  it('centers the design on a phone case instead of applying tee collar padding', async () => {
+    const caseGarment = {
+      product: {
+        name: 'Clear Case for iPhone®',
+        variants: [
+          {
+            id: 9181,
+            size: 'iPhone 15',
+            cost: 8.95,
+            templates: [
+              { provider_location_ref_id: 'default', provider_ref_id: 4181, area_width: 1160, area_height: 2414 },
+            ],
+          },
+        ],
+      },
+    };
+    const { api, calls } = apiFrom([
+      caseGarment, // fetchGarment
+      { job_uuid: 'j1' }, // mockup POST
+      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/c.png' }] }, // poll
+      { uuid: 'p1' }, // create
+      {}, // variant POST
+    ]);
+    const res = (await shipProduct.handler(
+      {
+        design_uuid: 'd1',
+        design_url: 'https://cdn.example/d.png',
+        garment: { provider_uuid: 'pf', product_ref_id: '181' },
+        variants: [{ color: 'Clear', sizes: ['iPhone 15'] }],
+        pricing: { price: 19.99 },
+        product_meta: { name: 'WC26 QF - MOROCCO - Phone Case', description: 'c' },
+        print_style: 'placed',
+      },
+      fakeContext(api),
+    )) as any;
+
+    expect(res.print_style).toBe('placed');
+    // Colorless catalog resolves by size alone (see resolveVariants tests).
+    expect(res.variants_added).toBe(1);
+    const createCall = calls.find((c) => c.url.endsWith('/product/create'));
+    const t = JSON.parse(createCall?.init?.body as string).print_data[0];
+    // 88% width, VERTICALLY CENTERED: top = (2414 - 1020) / 2 — not the 13% collar padding
+    // (top=313) that put the crest in the top third of the case.
+    expect(t.width).toBe(1020);
+    expect(t.top).toBe(697);
+    expect(t.left).toBe(70);
   });
 });
