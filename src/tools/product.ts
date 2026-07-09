@@ -40,6 +40,31 @@ function mapMatrix(raw: unknown): MatrixVariant[] {
   }));
 }
 
+/**
+ * One representative provider_variant_id per DISTINCT color (in order, up to `cap`). Mockups are
+ * rendered per variant, and variants of the same color share the same print image — so passing
+ * "the first N variants" yields N shades of ONE color and leaves the other colors you're offering
+ * with NO mockup. Passing one-per-color makes the generated mockup set COVER every color imported,
+ * so the product's gallery has a mockup for each variant color (not just the first).
+ */
+function mockupIdsCoveringColors(
+  variants: { color?: string; provider_variant_id: number }[],
+  cap = 5,
+): number[] {
+  const seen = new Set<string>();
+  const ids: number[] = [];
+  for (const v of variants) {
+    const id = v.provider_variant_id;
+    const color = (v.color ?? '').toLowerCase().trim();
+    if (typeof id === 'number' && id > 0 && !seen.has(color)) {
+      seen.add(color);
+      ids.push(id);
+      if (ids.length >= cap) break;
+    }
+  }
+  return ids;
+}
+
 async function fetchGarment(
   ctx: ToolContext,
   providerUuid: string,
@@ -147,7 +172,7 @@ const variantSchema = z.object({
 export const shipProduct = defineTool({
   name: 'ship_product',
   description:
-    'End-to-end pipeline in ONE call: take a design, generate + verify a mockup, create the product with the correct field names, add all variants, associate with a store, sync to fulfillment, then (optionally) sync to sales channels as DRAFT. Enforces pricing floors and guards the AQUA-vs-Navy variant trap. Streams progress. PREFER this over chaining create_product + add_variants + sync_to_fulfillment + sync_to_channel yourself — especially for AUTOMATED or SCHEDULED runs — because it guarantees the correct order (store association + fulfillment sync BEFORE any channel sync). Use the split primitives only when you deliberately need a partial/interactive flow.',
+    'End-to-end pipeline in ONE call: take a design, generate + verify a mockup (one per imported color, so every color variant has a matching mockup), create the product with the correct field names, add all variants, associate with a store, sync to fulfillment, then (optionally) sync to sales channels as DRAFT. Enforces pricing floors and guards the AQUA-vs-Navy variant trap. Streams progress. PREFER this over chaining create_product + add_variants + sync_to_fulfillment + sync_to_channel yourself — especially for AUTOMATED or SCHEDULED runs — because it guarantees the correct order (store association + fulfillment sync BEFORE any channel sync). Use the split primitives only when you deliberately need a partial/interactive flow.',
   inputSchema: z.object({
     design_uuid: z.string().min(1),
     garment: garmentSchema,
@@ -197,8 +222,6 @@ export const shipProduct = defineTool({
           .join(', ')}.`,
       );
     }
-    const variantIds = resolvedR.resolved.map((r) => r.provider_variant_id);
-
     const designUrl = input.design_url ?? (await resolveImageUrl(ctx, input.design_uuid, ws));
     const printData = buildPrintData(garment.area, designUrl);
 
@@ -211,7 +234,9 @@ export const shipProduct = defineTool({
           generated_image_uuid: input.design_uuid,
           provider_product_ref_id: input.garment.product_ref_id,
           templates: printData,
-          variant_ids: variantIds.slice(0, 5),
+          // Cover EVERY color being imported (one mockup per color), not the first 5 variants —
+          // which are all one color and leave the other imported colors with no mockup.
+          variant_ids: mockupIdsCoveringColors(resolvedR.resolved),
         },
         { progress: ctx.progress, signal: ctx.signal, workspace: ws },
       );
@@ -344,10 +369,11 @@ export const createProduct = defineTool({
     const wantMockup = input.generate_mockup ?? Boolean(input.mockup_variant_ids?.length);
     let mockupVariantIds = input.mockup_variant_ids ?? [];
     if (wantMockup && mockupVariantIds.length === 0) {
-      mockupVariantIds = garment.matrix
-        .map((m) => m.provider_variant_id)
-        .filter((id) => typeof id === 'number' && id > 0)
-        .slice(0, 5);
+      // Cover a RANGE of colors (one per color), not the first N variants (all one color).
+      // Caveat: create_product runs before add_variants, so it can't know the exact colors you'll
+      // import — for color-ACCURATE mockups use ship_product (it resolves your variants first and
+      // renders one mockup per imported color), or pass mockup_variant_ids for your chosen colors.
+      mockupVariantIds = mockupIdsCoveringColors(garment.matrix);
     }
     let previewJobUuid: string | undefined;
     let mockupStatus: 'generated' | 'skipped' = 'skipped';

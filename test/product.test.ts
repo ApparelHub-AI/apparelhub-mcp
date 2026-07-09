@@ -97,6 +97,47 @@ describe('ship_product', () => {
       ),
     ).rejects.toMatchObject({ code: 'pricing_floor' });
   });
+
+  it('generates a mockup covering EACH imported color (one per color), not N shades of the first', async () => {
+    const twoColorGarment = {
+      product: {
+        name: 'Tee',
+        base_cost: 11.69,
+        variants: [
+          { id: 100, color: 'Black', size: 'S', cost: 11.69 },
+          { id: 101, color: 'Black', size: 'M', cost: 11.69 },
+          { id: 200, color: 'White', size: 'S', cost: 11.69 },
+          { id: 201, color: 'White', size: 'M', cost: 11.69 },
+        ],
+        print_templates: [{ placement: 'front', area_width: 1800, area_height: 2400 }],
+      },
+    };
+    const { api, calls } = apiFrom([
+      twoColorGarment, // fetchGarment
+      { job_uuid: 'job1' }, // mockup preview POST
+      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/m.png' }] }, // job poll
+      { uuid: 'p1' }, // create
+      {}, {}, {}, {}, // 4 variant POSTs
+    ]);
+    await shipProduct.handler(
+      {
+        design_uuid: 'd1',
+        design_url: 'https://cdn.example/d.png',
+        garment: { provider_uuid: 'pf', product_ref_id: '71' },
+        variants: [
+          { color: 'Black', sizes: ['S', 'M'] },
+          { color: 'White', sizes: ['S', 'M'] },
+        ],
+        pricing: { price: 27.99 },
+        product_meta: { name: 'x', description: 'y' },
+      },
+      fakeContext(api),
+    );
+    const mockupCall = calls.find((c) => c.url.endsWith('/merchandise/product/preview'));
+    const body = JSON.parse(mockupCall?.init?.body as string);
+    // One id per color (first Black + first White) — NOT [100, 101] (two blacks, no white mockup).
+    expect(body.variant_ids).toEqual([100, 200]);
+  });
 });
 
 describe('create_product', () => {
