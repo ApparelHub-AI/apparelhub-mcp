@@ -9,8 +9,30 @@ import {
   deleteProduct,
 } from '../src/tools/product.js';
 import { ApiClient } from '../src/http/client.js';
+import type { Imaging } from '../src/image/imaging.js';
 import { fakeContext } from './helpers/ctx.js';
 import { queueFetch, jsonResponse, noSleep } from './helpers/fakeFetch.js';
+
+function stubImaging(overrides: Partial<Imaging> = {}): Imaging {
+  return {
+    downloadToTemp: async () => '/tmp/fake-design.png',
+    makeTransparent: async () => {
+      throw new Error('not expected in this test');
+    },
+    readBytes: async () => new Uint8Array([137, 80, 78, 71]),
+    imageSize: async () => undefined,
+    imageStats: async () => undefined,
+    ocr: async () => ({ available: false, text: '' }),
+    threadColors: async () => {
+      throw new Error('not expected in this test');
+    },
+    recomposeFill: async () => {
+      throw new Error('not expected in this test');
+    },
+    cleanup: async () => {},
+    ...overrides,
+  };
+}
 
 function apiFrom(bodies: unknown[]) {
   const { fetchImpl, calls } = queueFetch(bodies.map((b) => jsonResponse(200, b)));
@@ -137,6 +159,265 @@ describe('ship_product', () => {
     const body = JSON.parse(mockupCall?.init?.body as string);
     // One id per color (first Black + first White) — NOT [100, 101] (two blacks, no white mockup).
     expect(body.variant_ids).toEqual([100, 200]);
+  });
+});
+
+// Shaped like the REAL raw payload for Printful 596 (Closed-Back Trucker Cap): NO top-level
+// template keys; templates live per-VARIANT with the placement under provider_location_ref_id
+// and a NUMERIC template id under provider_ref_id.
+const capGarment = {
+  product: {
+    name: 'Closed-Back Trucker Cap | Flexfit 6511',
+    variants: [
+      {
+        provider_ref_id: 15403,
+        color: 'Black',
+        size: 'One size',
+        price: '15.99',
+        templates: [
+          {
+            area_height: 640,
+            area_width: 1888,
+            left: 555,
+            provider_location_ref_id: 'embroidery_front_large',
+            provider_ref_id: 257169,
+            template_height: 3000,
+            template_width: 3000,
+            top: 1176,
+          },
+        ],
+      },
+      {
+        provider_ref_id: 15404,
+        color: 'Black/White',
+        size: 'One size',
+        price: '15.99',
+        templates: [
+          {
+            area_height: 640,
+            area_width: 1888,
+            left: 555,
+            provider_location_ref_id: 'embroidery_front_large',
+            provider_ref_id: 257170,
+            template_height: 3000,
+            template_width: 3000,
+            top: 1176,
+          },
+        ],
+      },
+    ],
+  },
+};
+
+describe('ship_product: embroidery garments (cap/beanie incident)', () => {
+  it('routes the print to the embroidery placement with real dims and attaches thread colors on create (not on the mockup)', async () => {
+    const { api, calls } = apiFrom([
+      capGarment, // fetchGarment (raw 596 shape)
+      { job_uuid: 'j1' }, // mockup POST
+      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/cap.png' }] }, // poll
+      { uuid: 'p1' }, // create
+      {}, {}, // 2 variant POSTs
+      {}, // associate
+      {}, // merchandise sync
+    ]);
+    const res = (await shipProduct.handler(
+      {
+        design_uuid: 'd1',
+        design_url: 'https://cdn.example/d.png',
+        garment: { provider_uuid: 'pf', product_ref_id: '596' },
+        variants: [
+          { color: 'Black', sizes: ['One size'] },
+          { color: 'Black/White', sizes: ['One size'] },
+        ],
+        pricing: { price: 34.99 },
+        product_meta: { name: 'WC26 QF - ARGENTINA - Cap', description: 'cap' },
+        store_uuid: 's1',
+        thread_colors: ['#3399ff', '#ffcc00'], // lowercase on purpose: normalized to palette case
+      },
+      fakeContext(api),
+    )) as any;
+
+    expect(res.print_style).toBe('placed');
+    expect(res.thread_colors).toEqual(['#3399FF', '#FFCC00']);
+    expect(res.fulfillment_status).toBe('synced');
+
+    // The mockup targets the EMBROIDERY placement (was 'front' -> Printful rejected it) with the
+    // variant template's real dims — and stays options-free.
+    const mockupCall = calls.find((c) => c.url.endsWith('/merchandise/product/preview'));
+    const mockupBody = JSON.parse(mockupCall?.init?.body as string);
+    expect(mockupBody.templates[0].provider_ref_id).toBe('embroidery_front_large');
+    expect(mockupBody.templates[0].area_width).toBe(1888);
+    expect(mockupBody.templates[0].area_height).toBe(640);
+    expect(mockupBody.templates[0].options).toBeUndefined();
+
+    // The CREATE payload carries the thread-colors option (the platform hoists it to the
+    // sync-variant level at Printful sync — Lesson 61), placement-suffixed.
+    const createCall = calls.find((c) => c.url.endsWith('/product/create'));
+    const createBody = JSON.parse(createCall?.init?.body as string);
+    expect(createBody.print_data[0].provider_ref_id).toBe('embroidery_front_large');
+    expect(createBody.print_data[0].options).toEqual([
+      { id: 'thread_colors_front_large', value: ['#3399FF', '#FFCC00'] },
+    ]);
+  });
+
+  it('derives thread colors from the design when none are passed', async () => {
+    const { api, calls } = apiFrom([
+      capGarment,
+      { job_uuid: 'j1' },
+      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/cap.png' }] },
+      { uuid: 'p1' },
+      {},
+    ]);
+    const res = (await shipProduct.handler(
+      {
+        design_uuid: 'd1',
+        design_url: 'https://cdn.example/d.png',
+        garment: { provider_uuid: 'pf', product_ref_id: '596' },
+        variants: [{ color: 'Black', sizes: ['One size'] }],
+        pricing: { price: 34.99 },
+        product_meta: { name: 'x', description: 'y' },
+      },
+      fakeContext(api, stubImaging({ threadColors: async () => ['#CC3333', '#FFCC00'] })),
+    )) as any;
+    expect(res.thread_colors).toEqual(['#CC3333', '#FFCC00']);
+    const createCall = calls.find((c) => c.url.endsWith('/product/create'));
+    const createBody = JSON.parse(createCall?.init?.body as string);
+    expect(createBody.print_data[0].options[0].value).toEqual(['#CC3333', '#FFCC00']);
+  });
+
+  it('reads the print front from VARIANT templates (real dims, not the 1800x2400 default) and prefers front over other placements', async () => {
+    const teeViaVariantTemplates = {
+      product: {
+        name: 'Unisex Staple T-Shirt | Bella + Canvas 3001',
+        variants: [
+          {
+            id: 4016,
+            color: 'Black',
+            size: 'S',
+            cost: 11.69,
+            templates: [
+              // back first on purpose: the chooser must still pick 'front'.
+              { area_height: 1346, area_width: 1010, provider_location_ref_id: 'back', provider_ref_id: 150552 },
+              { area_height: 1346, area_width: 1010, provider_location_ref_id: 'front', provider_ref_id: 150551 },
+            ],
+          },
+        ],
+      },
+    };
+    const { api, calls } = apiFrom([
+      teeViaVariantTemplates,
+      { job_uuid: 'j1' },
+      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/t.png' }] },
+      { uuid: 'p1' },
+      {},
+    ]);
+    const res = (await shipProduct.handler(
+      {
+        design_uuid: 'd1',
+        design_url: 'https://cdn.example/d.png',
+        garment: { provider_uuid: 'pf', product_ref_id: '71' },
+        variants: [{ color: 'Black', sizes: ['S'] }],
+        pricing: { price: 27.99 },
+        product_meta: { name: 'Tee', description: 't' },
+      },
+      fakeContext(api),
+    )) as any;
+    expect(res.print_style).toBe('placed'); // "Bella + Canvas" must NOT trip the canvas fill rule
+    const createCall = calls.find((c) => c.url.endsWith('/product/create'));
+    const body = JSON.parse(createCall?.init?.body as string);
+    expect(body.print_data[0].provider_ref_id).toBe('front');
+    expect(body.print_data[0].area_width).toBe(1010);
+    expect(body.print_data[0].area_height).toBe(1346);
+    expect(body.print_data[0].options).toBeUndefined();
+  });
+});
+
+describe('ship_product: fill print style (canvas/backpack incident)', () => {
+  it('auto-fills face goods: recomposes the design, uploads it, and prints edge-to-edge', async () => {
+    const canvasGarment = {
+      product: {
+        name: 'Canvas',
+        variants: [{ id: 91001, color: 'White', size: '12x16', cost: 9 }],
+      },
+    };
+    const { api, calls } = apiFrom([
+      canvasGarment, // fetchGarment
+      { image_uuid: 'd2', url: 'https://cdn.example/d2.png' }, // transform upload (recomposed)
+      { job_uuid: 'j1' }, // mockup POST
+      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/c.png' }] }, // poll
+      { uuid: 'p1' }, // create
+      {}, // variant POST
+    ]);
+    const res = (await shipProduct.handler(
+      {
+        design_uuid: 'd1',
+        design_url: 'https://cdn.example/d.png',
+        garment: { provider_uuid: 'pfy', product_ref_id: '555' },
+        variants: [{ color: 'White', sizes: ['12x16'] }],
+        pricing: { price: 44.99 },
+        product_meta: { name: 'WC26 QF - SPAIN - Canvas', description: 'c' },
+        // no print_style: 'Canvas' must AUTO-classify as fill
+      },
+      fakeContext(
+        api,
+        stubImaging({
+          recomposeFill: async () => ({
+            outputPath: '/tmp/fill.png',
+            mode: 'composited',
+            background: '#0B1E3C',
+          }),
+        }),
+      ),
+    )) as any;
+
+    expect(res.print_style).toBe('fill');
+    expect(res.fill_background).toBe('#0B1E3C');
+
+    // The recomposed design was uploaded as a new revision of the design...
+    const transformCall = calls.find((c) => c.url.includes('/images/generated/d1/transform'));
+    expect(transformCall).toBeDefined();
+
+    // ...and BOTH the mockup and the product use the recomposed image, full-bleed.
+    const mockupCall = calls.find((c) => c.url.endsWith('/merchandise/product/preview'));
+    const mockupBody = JSON.parse(mockupCall?.init?.body as string);
+    expect(mockupBody.generated_image_uuid).toBe('d2');
+    expect(mockupBody.templates[0].image_url).toBe('https://cdn.example/d2.png');
+    expect(mockupBody.templates[0].width).toBe(mockupBody.templates[0].area_width);
+    expect(mockupBody.templates[0].height).toBe(mockupBody.templates[0].area_height);
+    expect(mockupBody.templates[0].top).toBe(0);
+    expect(mockupBody.templates[0].left).toBe(0);
+
+    const createCall = calls.find((c) => c.url.endsWith('/product/create'));
+    const createBody = JSON.parse(createCall?.init?.body as string);
+    expect(createBody.generated_image_uuid).toBe('d2');
+    expect(createBody.print_data[0].image_url).toBe('https://cdn.example/d2.png');
+  });
+
+  it('respects an explicit print_style: "placed" on a face good', async () => {
+    const canvasGarment = {
+      product: { name: 'Canvas', variants: [{ id: 91001, color: 'White', size: '12x16', cost: 9 }] },
+    };
+    const { api, calls } = apiFrom([
+      canvasGarment,
+      { job_uuid: 'j1' },
+      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/c.png' }] },
+      { uuid: 'p1' },
+      {},
+    ]);
+    const res = (await shipProduct.handler(
+      {
+        design_uuid: 'd1',
+        design_url: 'https://cdn.example/d.png',
+        garment: { provider_uuid: 'pfy', product_ref_id: '555' },
+        variants: [{ color: 'White', sizes: ['12x16'] }],
+        pricing: { price: 44.99 },
+        product_meta: { name: 'x', description: 'y' },
+        print_style: 'placed',
+      },
+      fakeContext(api), // throwing imaging: placed must never touch the local toolchain
+    )) as any;
+    expect(res.print_style).toBe('placed');
+    expect(calls.some((c) => c.url.includes('/transform'))).toBe(false);
   });
 });
 

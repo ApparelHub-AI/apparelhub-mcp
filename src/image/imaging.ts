@@ -15,6 +15,8 @@ const MAKE_TRANSPARENT = fileURLToPath(
   new URL('../../python/make_transparent.py', import.meta.url),
 );
 const IMAGE_STATS = fileURLToPath(new URL('../../python/image_stats.py', import.meta.url));
+const THREAD_COLORS = fileURLToPath(new URL('../../python/thread_colors.py', import.meta.url));
+const RECOMPOSE_FILL = fileURLToPath(new URL('../../python/recompose_fill.py', import.meta.url));
 const PYTHON = process.env.APPARELHUB_MCP_PYTHON || 'python3';
 
 export interface ImageStats {
@@ -49,6 +51,16 @@ export interface MakeTransparentOptions {
   force?: boolean;
 }
 
+export interface RecomposeFillResult {
+  outputPath: string;
+  /** 'composited' = art re-laid on a derived background; 'cover' = photo cover-cropped. */
+  mode: 'composited' | 'cover';
+  /** The chosen background hex (composited mode only). */
+  background?: string;
+  width?: number;
+  height?: number;
+}
+
 export interface Imaging {
   downloadToTemp(url: string, ext?: string): Promise<string>;
   makeTransparent(inputPath: string, opts?: MakeTransparentOptions): Promise<TransparencyResult>;
@@ -57,6 +69,13 @@ export interface Imaging {
   /** Full quality stats (alpha, transparency, premultiply). Undefined if Python/Pillow missing. */
   imageStats(path: string): Promise<ImageStats | undefined>;
   ocr(imagePath: string): Promise<{ available: boolean; text: string }>;
+  /** Dominant design colors mapped to Printful's fixed embroidery thread palette (CIE Lab). */
+  threadColors(inputPath: string, max?: number): Promise<string[]>;
+  /**
+   * Recompose a design to FILL a print face edge-to-edge at the given area aspect: keyed/green
+   * art gets centered on an aesthetically matching background; opaque photos get cover-cropped.
+   */
+  recomposeFill(inputPath: string, areaWidth: number, areaHeight: number): Promise<RecomposeFillResult>;
   cleanup(paths: string[]): Promise<void>;
 }
 
@@ -186,6 +205,77 @@ export class LocalImaging implements Imaging {
     } catch {
       return undefined;
     }
+  }
+
+  async threadColors(inputPath: string, max = 5): Promise<string[]> {
+    let r: RunResult;
+    try {
+      r = await run(PYTHON, [THREAD_COLORS, inputPath, '--max', String(max)]);
+    } catch {
+      throw pythonMissing();
+    }
+    if (r.code !== 0) {
+      if (looksLikeMissingInterpreter(r)) throw pythonMissing();
+      throw new AhError({
+        code: 'thread_colors_failed',
+        message: `Thread-color derivation failed: ${r.stderr.trim() || `exit ${r.code}`}`,
+        suggestion: 'Pass thread_colors explicitly from the Printful 15-color palette.',
+      });
+    }
+    try {
+      const parsed = JSON.parse(r.stdout.trim()) as { thread_colors?: string[] };
+      const colors = parsed.thread_colors ?? [];
+      if (!colors.length) throw new Error('empty');
+      return colors;
+    } catch {
+      throw new AhError({
+        code: 'thread_colors_failed',
+        message: 'Thread-color derivation returned no colors.',
+        suggestion: 'Pass thread_colors explicitly from the Printful 15-color palette.',
+      });
+    }
+  }
+
+  async recomposeFill(
+    inputPath: string,
+    areaWidth: number,
+    areaHeight: number,
+  ): Promise<RecomposeFillResult> {
+    const out = join(await this.dir(), `fill-${Date.now()}.png`);
+    let r: RunResult;
+    try {
+      r = await run(PYTHON, [
+        RECOMPOSE_FILL,
+        inputPath,
+        out,
+        '--aspect',
+        `${areaWidth}:${areaHeight}`,
+      ]);
+    } catch {
+      throw pythonMissing();
+    }
+    if (r.code !== 0) {
+      if (looksLikeMissingInterpreter(r)) throw pythonMissing();
+      throw new AhError({
+        code: 'recompose_failed',
+        message: `Fill recompose failed: ${r.stderr.trim() || `exit ${r.code}`}`,
+        suggestion:
+          'Retry with print_style: "placed", or verify the design downloads and decodes correctly.',
+      });
+    }
+    let meta: { mode?: string; background?: string | null; width?: number; height?: number } = {};
+    try {
+      meta = JSON.parse(r.stdout.trim()) as typeof meta;
+    } catch {
+      // Metadata is advisory; the output file is the contract.
+    }
+    return {
+      outputPath: out,
+      mode: meta.mode === 'cover' ? 'cover' : 'composited',
+      background: meta.background ?? undefined,
+      width: meta.width,
+      height: meta.height,
+    };
   }
 
   async ocr(imagePath: string): Promise<{ available: boolean; text: string }> {

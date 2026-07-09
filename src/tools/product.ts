@@ -3,7 +3,12 @@ import { defineTool, type ToolDef } from './registry.js';
 import { AhError } from '../errors.js';
 import { asArray, isRecord, num, str, viewUrl } from '../util/shape.js';
 import { pickDimensions } from '../image/dimensions.js';
-import { pricingFloor } from '../knowledge/garments.js';
+import { pricingFloor, printStyleFor, type PrintStyle } from '../knowledge/garments.js';
+import {
+  isEmbroideryPlacement,
+  normalizeThreadColors,
+  threadColorsOptionId,
+} from '../knowledge/embroidery.js';
 import { resolveVariants, type MatrixVariant } from '../knowledge/variants.js';
 import { runMockup } from '../image/mockup.js';
 import { resolveImageUrl } from './design.js';
@@ -24,6 +29,9 @@ interface GarmentInfo {
   matrix: MatrixVariant[];
   area: { area_width: number; area_height: number; provider_ref_id: string };
   baseCost: number | undefined;
+  /** The chosen placement is an embroidery placement (caps/beanies/embroidered apparel). */
+  isEmbroidery: boolean;
+  name: string | undefined;
 }
 
 function mapMatrix(raw: unknown): MatrixVariant[] {
@@ -65,6 +73,31 @@ function mockupIdsCoveringColors(
   return ids;
 }
 
+/**
+ * A template's placement name. Variant templates carry it under `provider_location_ref_id` and a
+ * NUMERIC template id under `provider_ref_id` (which str() would coerce to "257169"), so
+ * provider_location_ref_id MUST be read before provider_ref_id. Mirrors catalog.ts's mapTemplate.
+ */
+function templatePlacement(tpl: unknown): string | undefined {
+  return str(tpl, 'placement', 'provider_location_ref_id', 'provider_ref_id', 'type');
+}
+
+/**
+ * Choose the template the print targets: the true print front first, then any non-embroidery
+ * placement, then whatever exists — embroidery-only garments (caps/beanies) carry ONLY
+ * `embroidery_*` templates, and for those the embroidery placement IS the correct target.
+ */
+function pickPrintTemplate(templates: unknown[]): unknown {
+  return (
+    templates.find((t) => /^(front|default)$/i.test(templatePlacement(t) ?? '')) ??
+    templates.find((t) => {
+      const p = templatePlacement(t);
+      return Boolean(p) && !isEmbroideryPlacement(p);
+    }) ??
+    templates[0]
+  );
+}
+
 async function fetchGarment(
   ctx: ToolContext,
   providerUuid: string,
@@ -77,29 +110,43 @@ async function fetchGarment(
   );
   const g = isRecord(raw) && isRecord(raw.product) ? raw.product : raw;
   const matrix = mapMatrix(isRecord(g) ? g.variants : undefined);
-  const templates = asArray(
+  let templates = asArray(
     isRecord(g) ? (g.templates ?? g.print_templates ?? g.print_areas) : undefined,
   );
-  const front =
-    templates.find((tpl) =>
-      /front|default/i.test(str(tpl, 'placement', 'provider_ref_id', 'type') ?? ''),
-    ) ?? templates[0];
+  if (!templates.length && isRecord(g)) {
+    // The raw garment endpoint has NO top-level template keys for Printful — templates live
+    // per-VARIANT. Falling straight through to the 'front' default is what shipped
+    // embroidery-only garments (caps/beanies) as `front` PRINT files, which Printful rejects
+    // ("File type front is not allowed") at BOTH mockup generation and fulfillment sync.
+    const firstVariant = asArray(g.variants)[0];
+    if (isRecord(firstVariant)) templates = asArray(firstVariant.templates);
+  }
+  const chosen = pickPrintTemplate(templates);
+  const placement = templatePlacement(chosen) ?? 'front';
   const area = {
-    area_width: num(front, 'area_width', 'print_area_width') ?? 1800,
-    area_height: num(front, 'area_height', 'print_area_height') ?? 2400,
-    provider_ref_id: str(front, 'placement', 'provider_ref_id', 'type') ?? 'front',
+    area_width: num(chosen, 'area_width', 'print_area_width') ?? 1800,
+    area_height: num(chosen, 'area_height', 'print_area_height') ?? 2400,
+    provider_ref_id: placement,
   };
   const baseCost = num(g, 'base_cost', 'cost', 'price') ?? matrix.find((m) => m.cost)?.cost;
-  return { matrix, area, baseCost };
+  return {
+    matrix,
+    area,
+    baseCost,
+    isEmbroidery: isEmbroideryPlacement(placement),
+    name: str(g, 'name', 'title'),
+  };
 }
 
 function buildPrintData(
   area: GarmentInfo['area'],
   designUrl: string,
+  style: 'chest_fill' | 'all_over' = 'chest_fill',
 ): Record<string, unknown>[] {
-  // Default placement: a chest-fill print sized for a square design (the agent can refine with
-  // the dimensions helper). Encodes "respect the print area so Printful doesn't crop".
-  const dims = pickDimensions(1, 1, area.area_width, area.area_height, 'chest_fill');
+  // chest_fill: a placed print sized for a square design (the agent can refine with the
+  // dimensions helper) — respects the print area so Printful doesn't crop. all_over: the design
+  // (recomposed to the area's exact aspect) covers the full face edge-to-edge.
+  const dims = pickDimensions(1, 1, area.area_width, area.area_height, style);
   return [
     {
       provider_ref_id: area.provider_ref_id,
@@ -112,6 +159,106 @@ function buildPrintData(
       image_url: designUrl,
     },
   ];
+}
+
+/**
+ * Copy of print_data with the embroidery thread-colors option attached. Goes ONLY on the
+ * product-create payload (the platform persists it into print_files and hoists it to the
+ * sync-variant level at Printful sync — Lesson 61); mockup templates stay options-free.
+ */
+function withThreadColorOptions(
+  printData: Record<string, unknown>[],
+  placement: string,
+  colors: string[],
+): Record<string, unknown>[] {
+  return printData.map((t) => ({
+    ...t,
+    options: [{ id: threadColorsOptionId(placement), value: colors }],
+  }));
+}
+
+/** The effective print style: embroidery is stitched art (never a full-bleed fill); an explicit
+ *  choice wins; otherwise face goods default to 'fill', apparel to 'placed'. */
+function resolvePrintStyle(
+  requested: 'auto' | PrintStyle | undefined,
+  garment: GarmentInfo,
+): PrintStyle {
+  if (garment.isEmbroidery) return 'placed';
+  if (requested && requested !== 'auto') return requested;
+  return printStyleFor(garment.name);
+}
+
+interface FillDesign {
+  image_uuid: string;
+  image_url: string;
+  background?: string;
+  mode: 'composited' | 'cover';
+}
+
+/**
+ * Recompose the design to FILL the print face (key any leftover chroma green, center the art on
+ * an aesthetically matching background at the area's exact aspect — or cover-crop a photo), then
+ * upload it as a new design revision. Prevents the "green screen printed on the product" and
+ * "white bands around a floating square" defects on canvases/backpacks/bags/etc.
+ */
+async function prepareFillDesign(
+  ctx: ToolContext,
+  designUuid: string,
+  designUrl: string,
+  area: GarmentInfo['area'],
+  workspace?: string,
+): Promise<FillDesign> {
+  const inPath = await ctx.imaging.downloadToTemp(designUrl);
+  let rc;
+  try {
+    rc = await ctx.imaging.recomposeFill(inPath, area.area_width, area.area_height);
+  } catch (err) {
+    await ctx.imaging.cleanup([inPath]);
+    throw err;
+  }
+  const bytes = await ctx.imaging.readBytes(rc.outputPath);
+  const form = new FormData();
+  form.append('image', new Blob([Uint8Array.from(bytes)], { type: 'image/png' }), 'fill.png');
+  const res = await ctx.api.post(`images/generated/${enc(designUuid)}/transform`, {
+    multipart: form,
+    workspace,
+    signal: ctx.signal,
+  });
+  await ctx.imaging.cleanup([inPath, rc.outputPath]);
+  return {
+    image_uuid: str(res, 'image_uuid', 'uuid') ?? designUuid,
+    image_url: str(res, 'url', 'image_url') ?? designUrl,
+    background: rc.background,
+    mode: rc.mode,
+  };
+}
+
+/** Explicit thread colors validated against the palette, else derived from the design. */
+async function resolveThreadColors(
+  ctx: ToolContext,
+  explicit: string[] | undefined,
+  designUrl: string,
+): Promise<string[]> {
+  if (explicit?.length) return normalizeThreadColors(explicit);
+  let inPath: string | undefined;
+  try {
+    inPath = await ctx.imaging.downloadToTemp(designUrl);
+    const derived = await ctx.imaging.threadColors(inPath);
+    return normalizeThreadColors(derived);
+  } catch (err) {
+    if (err instanceof AhError && err.code === 'local_tool_unavailable') {
+      throw new AhError({
+        code: 'local_tool_unavailable',
+        message:
+          'This is an EMBROIDERY garment: Printful requires thread colors from its fixed 15-color palette, and the local toolchain to derive them from the design (Python 3 + Pillow) is unavailable.',
+        suggestion:
+          'Pass thread_colors explicitly (e.g. ["#000000", "#FFCC00"]) using only palette colors, or install Python 3 + Pillow and retry.',
+      });
+    }
+    throw err;
+  } finally {
+    if (inPath) await ctx.imaging.cleanup([inPath]);
+  }
 }
 
 function enforcePricingFloor(baseCost: number | undefined, price: number): void {
@@ -172,7 +319,7 @@ const variantSchema = z.object({
 export const shipProduct = defineTool({
   name: 'ship_product',
   description:
-    'End-to-end pipeline in ONE call: take a design, generate + verify a mockup (one per imported color, so every color variant has a matching mockup), create the product with the correct field names, add all variants, associate with a store, sync to fulfillment, then (optionally) sync to sales channels as DRAFT. Enforces pricing floors and guards the AQUA-vs-Navy variant trap. Streams progress. PREFER this over chaining create_product + add_variants + sync_to_fulfillment + sync_to_channel yourself — especially for AUTOMATED or SCHEDULED runs — because it guarantees the correct order (store association + fulfillment sync BEFORE any channel sync). Use the split primitives only when you deliberately need a partial/interactive flow.',
+    'End-to-end pipeline in ONE call: take a design, generate + verify a mockup (one per imported color, so every color variant has a matching mockup), create the product with the correct field names, add all variants, associate with a store, sync to fulfillment, then (optionally) sync to sales channels as DRAFT. Handles EMBROIDERY garments (caps/beanies/embroidered apparel) automatically: routes the design to the real embroidery placement and attaches Printful thread colors (derived from the design, or pass thread_colors). Face goods (canvas, posters, backpacks, bags, socks, towels, blankets, pillows, cases...) default to print_style "fill": the design is recomposed onto an aesthetically matching background and printed edge-to-edge, so no green-screen background or contrasting borders reach the product. Enforces pricing floors and guards the AQUA-vs-Navy variant trap. Streams progress. PREFER this over chaining create_product + add_variants + sync_to_fulfillment + sync_to_channel yourself — especially for AUTOMATED or SCHEDULED runs — because it guarantees the correct order (store association + fulfillment sync BEFORE any channel sync). Use the split primitives only when you deliberately need a partial/interactive flow.',
   inputSchema: z.object({
     design_uuid: z.string().min(1),
     garment: garmentSchema,
@@ -184,6 +331,20 @@ export const shipProduct = defineTool({
       .array(z.object({ integration_uuid: z.string(), state: z.enum(['draft', 'live']).optional() }))
       .optional(),
     generate_mockup: z.boolean().optional().describe('Default true.'),
+    print_style: z
+      .enum(['auto', 'placed', 'fill'])
+      .optional()
+      .describe(
+        'How the design sits on the print face. "fill": recompose onto a matching background and print edge-to-edge (default for face goods like canvas/backpacks/bags/socks/towels/blankets/pillows/cases). "placed": the design floats with transparency preserved (default for apparel and embroidery). "auto" (default) picks by garment.',
+      ),
+    thread_colors: z
+      .array(z.string().regex(/^#[0-9A-Fa-f]{6}$/))
+      .min(1)
+      .max(6)
+      .optional()
+      .describe(
+        'EMBROIDERY garments only: explicit Printful thread palette colors. Omit to auto-derive from the design (mapped to the fixed 15-color palette).',
+      ),
     design_url: z.string().url().optional().describe('The design URL, if known (else resolved).'),
     workspace: z.string().optional(),
   }),
@@ -222,8 +383,29 @@ export const shipProduct = defineTool({
           .join(', ')}.`,
       );
     }
-    const designUrl = input.design_url ?? (await resolveImageUrl(ctx, input.design_uuid, ws));
-    const printData = buildPrintData(garment.area, designUrl);
+    let designUuid = input.design_uuid;
+    let designUrl = input.design_url ?? (await resolveImageUrl(ctx, input.design_uuid, ws));
+
+    const printStyle = resolvePrintStyle(input.print_style, garment);
+    let fill: FillDesign | undefined;
+    if (printStyle === 'fill') {
+      await ctx.progress.report(12, 'Recomposing design to fill the print face...');
+      fill = await prepareFillDesign(ctx, designUuid, designUrl, garment.area, ws);
+      designUuid = fill.image_uuid;
+      designUrl = fill.image_url;
+    }
+
+    let threadColors: string[] | undefined;
+    if (garment.isEmbroidery) {
+      await ctx.progress.report(15, 'Resolving embroidery thread colors...');
+      threadColors = await resolveThreadColors(ctx, input.thread_colors, designUrl);
+    }
+
+    const printData = buildPrintData(
+      garment.area,
+      designUrl,
+      printStyle === 'fill' ? 'all_over' : 'chest_fill',
+    );
 
     let previewJobUuid: string | undefined;
     if (input.generate_mockup ?? true) {
@@ -231,7 +413,7 @@ export const shipProduct = defineTool({
         ctx.api,
         {
           merchandise_provider_uuid: input.garment.provider_uuid,
-          generated_image_uuid: input.design_uuid,
+          generated_image_uuid: designUuid,
           provider_product_ref_id: input.garment.product_ref_id,
           templates: printData,
           // Cover EVERY color being imported (one mockup per color), not the first 5 variants —
@@ -248,12 +430,14 @@ export const shipProduct = defineTool({
       body: {
         name: input.product_meta.name,
         description: input.product_meta.description,
-        generated_image_uuid: input.design_uuid,
+        generated_image_uuid: designUuid,
         preview_job_uuid: previewJobUuid,
         provider_uuid: input.garment.provider_uuid,
         product_ref_id: String(input.garment.product_ref_id),
         price: input.pricing.price,
-        print_data: printData,
+        print_data: threadColors
+          ? withThreadColorOptions(printData, garment.area.provider_ref_id, threadColors)
+          : printData,
       },
       workspace: ws,
       signal: ctx.signal,
@@ -332,6 +516,9 @@ export const shipProduct = defineTool({
       fulfillment_status: fulfillmentStatus,
       variants_added: added,
       channel_sync_results: channelResults,
+      print_style: printStyle,
+      ...(threadColors ? { thread_colors: threadColors } : {}),
+      ...(fill?.background ? { fill_background: fill.background } : {}),
       warnings,
     };
   },
@@ -342,7 +529,7 @@ export const shipProduct = defineTool({
 export const createProduct = defineTool({
   name: 'create_product',
   description:
-    'Create a STANDALONE product from a design (split primitive) — it is NOT placed on any store yet. Applies the correct field names + pricing floor. Set generate_mockup: true to render a garment mockup as the display image (it auto-derives representative variants from the catalog, so you do NOT need mockup_variant_ids) — otherwise the raw design is used as the display image. To get it onto a store and listed, the required sequence is: add_variants -> sync_to_fulfillment(product_uuid, store_uuid) [associates it with the store + syncs to Printful/Printify] -> sync_to_channel [sales channel]. To run that whole pipeline in one call instead, use ship_product.',
+    'Create a STANDALONE product from a design (split primitive) — it is NOT placed on any store yet. Applies the correct field names + pricing floor, routes EMBROIDERY garments (caps/beanies) to their real embroidery placement with Printful thread colors (derived or explicit), and defaults face goods (canvas/backpacks/bags/socks/towels/blankets/pillows/cases...) to print_style "fill" (design recomposed onto a matching background, printed edge-to-edge). Set generate_mockup: true to render a garment mockup as the display image (it auto-derives representative variants from the catalog, so you do NOT need mockup_variant_ids) — otherwise the raw design is used as the display image. To get it onto a store and listed, the required sequence is: add_variants -> sync_to_fulfillment(product_uuid, store_uuid) [associates it with the store + syncs to Printful/Printify] -> sync_to_channel [sales channel]. To run that whole pipeline in one call instead, use ship_product.',
   inputSchema: z.object({
     design_uuid: z.string().min(1),
     garment: garmentSchema,
@@ -350,6 +537,20 @@ export const createProduct = defineTool({
     product_meta: z.object({ name: z.string().min(1), description: z.string() }),
     generate_mockup: z.boolean().optional(),
     mockup_variant_ids: z.array(z.number()).optional().describe('Representative variant ids for the mockup preview.'),
+    print_style: z
+      .enum(['auto', 'placed', 'fill'])
+      .optional()
+      .describe(
+        'How the design sits on the print face. "fill": recompose onto a matching background and print edge-to-edge (default for face goods). "placed": transparency preserved (default for apparel and embroidery). "auto" (default) picks by garment.',
+      ),
+    thread_colors: z
+      .array(z.string().regex(/^#[0-9A-Fa-f]{6}$/))
+      .min(1)
+      .max(6)
+      .optional()
+      .describe(
+        'EMBROIDERY garments only: explicit Printful thread palette colors. Omit to auto-derive from the design.',
+      ),
     design_url: z.string().url().optional(),
     workspace: z.string().optional(),
   }),
@@ -358,8 +559,27 @@ export const createProduct = defineTool({
     const ws = input.workspace;
     const garment = await fetchGarment(ctx, input.garment.provider_uuid, input.garment.product_ref_id, ws);
     enforcePricingFloor(garment.baseCost, input.pricing.price);
-    const designUrl = input.design_url ?? (await resolveImageUrl(ctx, input.design_uuid, ws));
-    const printData = buildPrintData(garment.area, designUrl);
+    let designUuid = input.design_uuid;
+    let designUrl = input.design_url ?? (await resolveImageUrl(ctx, input.design_uuid, ws));
+
+    const printStyle = resolvePrintStyle(input.print_style, garment);
+    let fill: FillDesign | undefined;
+    if (printStyle === 'fill') {
+      fill = await prepareFillDesign(ctx, designUuid, designUrl, garment.area, ws);
+      designUuid = fill.image_uuid;
+      designUrl = fill.image_url;
+    }
+
+    let threadColors: string[] | undefined;
+    if (garment.isEmbroidery) {
+      threadColors = await resolveThreadColors(ctx, input.thread_colors, designUrl);
+    }
+
+    const printData = buildPrintData(
+      garment.area,
+      designUrl,
+      printStyle === 'fill' ? 'all_over' : 'chest_fill',
+    );
 
     // Generate a mockup when asked. In the split-primitive flow, add_variants runs AFTER this, so
     // the product has no variants of its own yet — derive representative variant ids from the
@@ -382,7 +602,7 @@ export const createProduct = defineTool({
         ctx.api,
         {
           merchandise_provider_uuid: input.garment.provider_uuid,
-          generated_image_uuid: input.design_uuid,
+          generated_image_uuid: designUuid,
           provider_product_ref_id: input.garment.product_ref_id,
           templates: printData,
           variant_ids: mockupVariantIds.slice(0, 5),
@@ -401,12 +621,14 @@ export const createProduct = defineTool({
       body: {
         name: input.product_meta.name,
         description: input.product_meta.description,
-        generated_image_uuid: input.design_uuid,
+        generated_image_uuid: designUuid,
         preview_job_uuid: previewJobUuid,
         provider_uuid: input.garment.provider_uuid,
         product_ref_id: String(input.garment.product_ref_id),
         price: input.pricing.price,
-        print_data: printData,
+        print_data: threadColors
+          ? withThreadColorOptions(printData, garment.area.provider_ref_id, threadColors)
+          : printData,
       },
       workspace: ws,
       signal: ctx.signal,
@@ -416,6 +638,9 @@ export const createProduct = defineTool({
       product_uuid: productUuid,
       product_url: productUuid ? viewUrl.product(productUuid) : undefined,
       mockup_status: mockupStatus,
+      print_style: printStyle,
+      ...(threadColors ? { thread_colors: threadColors } : {}),
+      ...(fill?.background ? { fill_background: fill.background } : {}),
       warnings,
     };
   },

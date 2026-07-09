@@ -19,6 +19,12 @@ const throwingImaging: Imaging = {
   imageSize: async () => undefined,
   imageStats: async () => undefined,
   ocr: async () => ({ available: false, text: '' }),
+  threadColors: async () => {
+    throw new Error('imaging not provided to this test');
+  },
+  recomposeFill: async () => {
+    throw new Error('imaging not provided to this test');
+  },
   cleanup: async () => {},
 };
 
