@@ -119,3 +119,19 @@ describe('placedStyleFor (collar padding is an APPAREL concept)', () => {
     expect(placedStyleFor(undefined)).toBe('chest_fill');
   });
 });
+
+describe('faceLayoutFor — cylindrical drinkware (the MOROCCO water-bottle star-clip)', () => {
+  it('insets art on water bottles / tumblers / mugs / glasses so nothing clips at the shoulder/base/sides', () => {
+    for (const name of ['Slim Water Bottle', 'Stainless Tumbler', 'White Glossy Mug', 'Rocks Glass']) {
+      const l = faceLayoutFor(name, 'front', 2502, 2303);
+      expect(l?.faces).toHaveLength(1);
+      expect(l?.faces[0]?.w).toBeLessThan(0.8); // inset from the wrapping sides
+      expect(l?.faces[0]?.y).toBeGreaterThan(0.05); // clear of the shoulder/neck
+      expect(l!.faces[0]!.y + l!.faces[0]!.h).toBeLessThan(0.9); // clear of the base
+    }
+  });
+  it('does not treat apparel/flat goods as cylinders', () => {
+    expect(faceLayoutFor('Unisex Staple Tee', 'front', 1800, 2400)).toBeUndefined();
+    expect(faceLayoutFor('Stretched Canvas', 'front', 2400, 3000)).toBeUndefined();
+  });
+});
