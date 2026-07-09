@@ -505,6 +505,79 @@ describe('add_variants', () => {
   });
 });
 
+describe('sync_to_fulfillment: thread-colors self-heal', () => {
+  it('rewrites the option id Printful names in the error, PATCHes, and retries once', async () => {
+    // Printful's expected id varies by placement/product; the error message is authoritative.
+    // Real platform shape: the provider error rides as a STRING inside body.message.
+    const printfulReject = jsonResponse(400, {
+      message:
+        '{"code":400,"result":"thread_colors option is missing or incorrect! Allowed values: #FFFFFF, #000000, #96A1A8"}',
+    });
+    const { fetchImpl, calls } = queueFetch([
+      jsonResponse(200, {}), // associate
+      printfulReject, // merchandise sync attempt 1
+      jsonResponse(200, {
+        product: {
+          uuid: 'p1',
+          print_files: [
+            {
+              provider_ref_id: 'embroidery_front',
+              image_url: 'https://cdn.example/d.png',
+              options: [{ id: 'thread_colors_front', value: ['#FFFFFF', '#000000'] }],
+            },
+          ],
+        },
+      }), // GET product
+      jsonResponse(200, {}), // PATCH print_files
+      jsonResponse(200, {}), // merchandise sync retry
+    ]);
+    const api = new ApiClient({
+      apiKey: 'k',
+      baseUrl: 'https://api.example.test/agents/v1',
+      userAgent: 't',
+      fetchImpl,
+      sleepImpl: noSleep,
+    });
+    const res = (await syncToFulfillment.handler(
+      { product_uuid: 'p1', store_uuid: 's1' },
+      fakeContext(api),
+    )) as any;
+
+    expect(res.fulfillment_status).toBe('synced');
+    expect(res.note).toContain('thread_colors');
+    expect(calls).toHaveLength(5);
+    const patchCall = calls[3];
+    expect(patchCall?.init?.method).toBe('PATCH');
+    const patched = JSON.parse(patchCall?.init?.body as string);
+    expect(patched.print_files[0].options[0].id).toBe('thread_colors'); // rewritten to the expected id
+    expect(patched.print_files[0].options[0].value).toEqual(['#FFFFFF', '#000000']); // values untouched
+    expect(calls[4]?.url).toContain('target=merchandise'); // retried
+  });
+
+  it('does NOT heal when the product has no thread-colors options — the original error surfaces', async () => {
+    const { fetchImpl, calls } = queueFetch([
+      jsonResponse(200, {}), // associate
+      jsonResponse(400, {
+        message: '{"code":400,"result":"thread_colors option is missing or incorrect! Allowed values: #FFFFFF"}',
+      }), // sync fails
+      jsonResponse(200, {
+        product: { uuid: 'p1', print_files: [{ provider_ref_id: 'front', image_url: 'https://x/y.png' }] },
+      }), // GET product: pre-fix product, no options to rewrite
+    ]);
+    const api = new ApiClient({
+      apiKey: 'k',
+      baseUrl: 'https://api.example.test/agents/v1',
+      userAgent: 't',
+      fetchImpl,
+      sleepImpl: noSleep,
+    });
+    await expect(
+      syncToFulfillment.handler({ product_uuid: 'p1', store_uuid: 's1' }, fakeContext(api)),
+    ).rejects.toBeTruthy();
+    expect(calls).toHaveLength(3); // no PATCH, no blind retry
+  });
+});
+
 describe('sync_to_fulfillment', () => {
   it('associates the product with the store BEFORE the merchandise sync', async () => {
     // A create_product product is standalone; the merchandise sync is addressed under the store's
