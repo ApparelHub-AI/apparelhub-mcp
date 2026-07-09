@@ -393,29 +393,30 @@ async function prepareFillDesign(
       ),
     ];
 
-    // Same-size siblings share a composed art file PER LAYOUT: Printful sock FRONT strips
-    // render rotated 180deg while the BACK strips render upright (grid-calibrated), so one
-    // rotated file on all four prints upside down on the backs.
-    const layoutKeyOf = (l: FaceLayout | undefined): string =>
-      JSON.stringify(l?.faces ?? null);
+    // Cover EVERY sibling placement, but distinguish DISPLAY faces from STRUCTURAL panels:
+    //  - a sibling with its OWN faceLayout is a display face (sock's 4 leg strips, both
+    //    headphone cups) → gets the composed art for that layout (shared per layout: sock
+    //    FRONT strips render rotated, BACK strips upright, so they compose differently);
+    //  - a sibling with NO layout is a structural/wrap panel (duffle sides/top/bottom/pocket,
+    //    backpack top/bottom/pocket) → gets the SOLID background, NEVER the design full-bleed
+    //    (which would plaster + clip it) and NEVER left blank/white.
+    // This is what keeps a duffle's front the hero while its wrap panels stay a clean solid
+    // (the "white strip / design-on-every-panel" duffle failure).
+    const layoutKeyOf = (l: FaceLayout | undefined): string => JSON.stringify(l?.faces ?? null);
     const artByLayout = new Map<string, string>([[layoutKeyOf(layout), primaryUrl]]);
-    // ONE solid canvas serves every differing sibling — a solid color stretches to any
-    // area aspect losslessly (the platform scales the file to each entry's width x height).
+    // ONE solid canvas serves every structural panel — a solid color stretches to any area
+    // aspect losslessly (the platform scales the file to each entry's width x height).
     let solidUrl: string | undefined;
     for (const p of garment.placements) {
       if (p.provider_ref_id === primary.provider_ref_id) continue;
-      if (p.area_width === primary.area_width && p.area_height === primary.area_height) {
-        const siblingLayout = faceLayoutFor(
-          garment.name,
-          p.provider_ref_id,
-          p.area_width,
-          p.area_height,
-        );
+      const siblingLayout = faceLayoutFor(garment.name, p.provider_ref_id, p.area_width, p.area_height);
+      if (siblingLayout) {
+        // Display face: composed art (reused across identical layouts).
         const key = layoutKeyOf(siblingLayout);
         let url = artByLayout.get(key);
         if (url === undefined) {
           const alt = await ctx.imaging.recomposeFill(inPath, p.area_width, p.area_height, {
-            faces: siblingLayout?.faces,
+            faces: siblingLayout.faces,
             transparent,
           });
           tempPaths.push(alt.outputPath);
@@ -432,6 +433,7 @@ async function prepareFillDesign(
         printData.push(fillEntry(p, url));
         continue;
       }
+      // Structural panel.
       if (transparent) continue; // placed semantics: no background canvases on other surfaces
       if (solidUrl === undefined) {
         const solid = await ctx.imaging.solidFill(inPath, p.area_width, p.area_height, rc.background);

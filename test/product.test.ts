@@ -1158,3 +1158,78 @@ describe('ship_product: multi-face merch — no blank faces (WC26 headphones/wal
     expect(createBody.generated_image_uuid).toBe('d1');
   });
 });
+
+describe('ship_product: duffle — hero front, solid panels, no white strip (WC26 NORWAY duffle)', () => {
+  it('composes the design on the front window and fills the SAME-SIZE wrap panels with solid, not full-bleed art', async () => {
+    // Printful 465: front + 5 same-size panels (back/sides/top/bottom/pocket, all 3000x1998).
+    const duffleGarment = {
+      product: {
+        name: 'All-Over Print Duffle Bag',
+        variants: [
+          {
+            id: 12021,
+            size: 'One size',
+            cost: 30,
+            templates: [
+              { provider_location_ref_id: 'front', provider_ref_id: 1, area_width: 3000, area_height: 1998 },
+              { provider_location_ref_id: 'back', provider_ref_id: 2, area_width: 3000, area_height: 1998 },
+              { provider_location_ref_id: 'sides', provider_ref_id: 3, area_width: 3000, area_height: 1998 },
+              { provider_location_ref_id: 'top', provider_ref_id: 4, area_width: 3000, area_height: 1998 },
+              { provider_location_ref_id: 'bottom', provider_ref_id: 5, area_width: 3000, area_height: 1998 },
+              { provider_location_ref_id: 'pocket', provider_ref_id: 6, area_width: 3000, area_height: 1998 },
+            ],
+          },
+        ],
+      },
+    };
+    let recomposeCount = 0;
+    let solidCount = 0;
+    const { api, calls } = apiFrom([
+      duffleGarment, // fetchGarment
+      { image_uuid: 'dfront', url: 'https://cdn.example/dfront.png' }, // transform (front composed)
+      { image_uuid: 'dsolid', url: 'https://cdn.example/dsolid.png' }, // transform (solid bg)
+      { job_uuid: 'j1' },
+      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/c.png' }] },
+      { uuid: 'p1' },
+      {},
+    ]);
+    const res = (await shipProduct.handler(
+      {
+        design_uuid: 'd1',
+        design_url: 'https://cdn.example/d.png',
+        garment: { provider_uuid: 'pf', product_ref_id: '465' },
+        variants: [{ color: 'White', sizes: ['One size'] }],
+        pricing: { price: 59.99 },
+        product_meta: { name: 'WC26 QF - NORWAY - Duffle Bag', description: 'd' },
+      },
+      fakeContext(
+        api,
+        stubImaging({
+          recomposeFill: async () => {
+            recomposeCount += 1;
+            return { outputPath: '/tmp/dfront.png', mode: 'composited' as const, background: '#0C0C0C' };
+          },
+          solidFill: async () => {
+            solidCount += 1;
+            return { outputPath: '/tmp/dsolid.png', mode: 'solid' as const, background: '#0C0C0C' };
+          },
+        }),
+      ),
+    )) as any;
+
+    // The design is composed ONCE (front window); ONE solid canvas serves all 5 wrap panels —
+    // NOT the design plastered full-bleed on every same-size panel.
+    expect(recomposeCount).toBe(1);
+    expect(solidCount).toBe(1);
+    const createBody = JSON.parse(calls.find((c) => c.url.endsWith('/product/create'))?.init?.body as string);
+    const byPlacement = Object.fromEntries(
+      createBody.print_data.map((t: any) => [t.provider_ref_id, t.image_url]),
+    );
+    expect(byPlacement.front).toBe('https://cdn.example/dfront.png'); // hero design
+    for (const panel of ['back', 'sides', 'top', 'bottom', 'pocket']) {
+      expect(byPlacement[panel]).toBe('https://cdn.example/dsolid.png'); // solid, no white, no full-bleed art
+    }
+    // Every panel covered — no blank/white face.
+    expect(res.placements_covered.sort()).toEqual(['back', 'bottom', 'front', 'pocket', 'sides', 'top']);
+  });
+});

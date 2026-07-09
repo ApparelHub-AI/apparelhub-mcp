@@ -9,6 +9,23 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-07-09
+
+### Fixed
+
+- **Lettering never clipped at a face edge** (the BELGIUM headphones cut the "S" in SPAIN at the
+  oval edge). The headphone ear-cup art is now inset well inside the oval's safe area (56% width,
+  centered), so no lettering touches an edge; both cups still print. General rule for oval / irregular
+  faces: the composed art must sit fully within the printable silhouette with margin, never bled to
+  the edge.
+- **No white strip / no full-bleed-everywhere on duffles** (the NORWAY duffle). The fill sibling
+  logic now distinguishes DISPLAY faces from STRUCTURAL panels by whether a placement has its own
+  face layout: display faces (sock leg strips, both headphone cups) get the composed art; structural
+  panels (duffle sides/top/bottom/pocket, backpack top/bottom/pocket) get the SOLID background — never
+  the design plastered full-bleed (the previous same-size-sibling behavior would have stamped the
+  duffle's design onto every panel and clipped it) and never left blank/white. A duffle now prints as
+  a hero design on the front window with clean solid wrap panels, fully covered on every face.
+
 ## [0.3.7] - 2026-07-09
 
 ### Fixed
