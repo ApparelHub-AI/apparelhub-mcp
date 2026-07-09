@@ -9,6 +9,19 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.3.10] - 2026-07-09
+
+### Fixed
+
+- **Designs no longer clip at the top/bottom/sides of cylindrical drinkware** (the MOROCCO water
+  bottle: the flag star clipped at the top, "MOROCCO" clipped at the base). A water bottle / tumbler
+  / mug / glass print area WRAPS AROUND the tube — its top maps onto the shoulder/neck, its bottom
+  onto the base, and its left/right around the sides out of frontal view — so a design that fills
+  the area gets cut at every edge. `faceLayoutFor` now recognizes cylindrical drinkware and insets
+  the art into the flat frontal band with margin, so nothing touches a wrapping edge (grid-calibrated
+  + live-verified clip-free on the Slim Water Bottle). Same "print area != visible face" family as
+  the duffle and headphone ear cups.
+
 ## [0.3.9] - 2026-07-09
 
 ### Fixed

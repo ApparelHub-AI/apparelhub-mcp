@@ -118,6 +118,9 @@ const SOCK_LEG_BACK_RE = /^leg_back_(left|right)$/i;
 const DRAWSTRING_RE = /drawstring|cinch/i;
 const WALLET_WRAP_RE = /wallet|passport cover|clutch|purse/i;
 const DUFFLE_RE = /duffle|duffel/i;
+// Cylindrical drinkware: the print area wraps around the tube, so the top maps onto the shoulder,
+// the bottom onto the base, and the left/right onto the sides (out of frontal view).
+const CYLINDER_RE = /bottle|tumbler|\bflask\b|thermos|\bcan\b|\bmug\b|stein|\bcup\b|\bglass\b/i;
 
 export function faceLayoutFor(
   garmentName: string | undefined,
@@ -182,6 +185,18 @@ export function faceLayoutFor(
     return {
       faces: [{ x: 0.12, y: 0.15, w: 0.76, h: 0.6 }],
       note: 'Duffle display face: the area wraps past the seams and rounded ends — art stays in the central frontal window; other panels get the solid background (no white strip).',
+    };
+  }
+  // Cylindrical drinkware (water bottles, tumblers, mugs — e.g. Printify 646 Slim Water Bottle,
+  // grid-calibrated 2026-07-09): the print area wraps AROUND the tube. Its top maps onto the
+  // shoulder/neck, its bottom onto the base, and its left/right around the sides out of frontal
+  // view — so a design filling the area gets CLIPPED at top + bottom + sides (the MOROCCO bottle:
+  // star clipped at the top, "MOROCCO" clipped at the base). Inset the art into the flat frontal
+  // band with generous margin so no element touches an edge (verified clip-free on the bottle).
+  if (CYLINDER_RE.test(garmentName ?? '')) {
+    return {
+      faces: [{ x: 0.16, y: 0.13, w: 0.68, h: 0.72 }],
+      note: 'Cylindrical drinkware: the print area wraps around the tube — art inset to the flat frontal band so nothing clips at the shoulder, base, or sides.',
     };
   }
   return undefined;
