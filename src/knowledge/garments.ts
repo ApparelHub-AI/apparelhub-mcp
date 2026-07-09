@@ -163,23 +163,25 @@ export function faceLayoutFor(
   }
   // AirPods-Max / headphone shell cases (Printify 1666, grid-calibrated): each ear cup is a
   // separate OVAL face (Left + Right, same size). The rectangular print area's corners fall
-  // outside the oval, so a full-width placed design bleeds off the cup edges (the BELGIUM
-  // headphones showed the crest clipped at the oval). Inset the art to the oval's safe area;
-  // the same-size sibling (the other cup) reuses the composed file, so BOTH cups print.
+  // outside the oval, so art near the edges bleeds off / CLIPS LETTERING (the BELGIUM headphones
+  // cut the "S" in SPAIN at the oval edge). Inset the art WELL inside the oval's safe area so no
+  // lettering touches an edge; the sibling cup reuses the composed file, so both cups print clean.
   if (/airpods|ear ?cup|headphone|\bshell case\b/i.test(garmentName ?? '')) {
     return {
-      faces: [{ x: 0.16, y: 0.14, w: 0.68, h: 0.62 }],
-      note: 'Headphone ear-cup shell: oval face — art inset to the cup safe area; both Left and Right cups print (no blank cup).',
+      faces: [{ x: 0.2, y: 0.2, w: 0.56, h: 0.52 }],
+      note: 'Headphone ear-cup shell: oval face — art inset to the cup safe area (no lettering clipped at the oval edge); both Left and Right cups print.',
     };
   }
-  // All-over duffle display faces (Printful 465, grid-calibrated): the front/back areas wrap
-  // over the top zipper seam, under the base, and around the rounded ends — only roughly the
-  // central x 0.10-0.90 / y 0.15-0.75 stays flat-frontal. Art at 88% width clipped its edges
-  // (the NORWAY duffle). Sides/top/bottom/pocket keep plain centered art (wrap surfaces).
-  if (DUFFLE_RE.test(garmentName ?? '') && /^(front|back)$/i.test(placement)) {
+  // All-over duffle display FACE (Printful 465, grid-calibrated): the front area wraps over the
+  // top zipper seam, under the base, and around the rounded ends — only roughly the central
+  // x 0.10-0.90 / y 0.15-0.75 stays flat-frontal, and full-width art clipped its edges (the
+  // NORWAY duffle). Only `front` is a display face here; the other panels (back/sides/top/bottom/
+  // pocket) have NO layout, so they get the solid background — never the design full-bleed and
+  // never blank/white. (A merchant who wants the design on the back too can request it.)
+  if (DUFFLE_RE.test(garmentName ?? '') && /^front$/i.test(placement)) {
     return {
       faces: [{ x: 0.12, y: 0.15, w: 0.76, h: 0.6 }],
-      note: 'Duffle display face: the area wraps past the seams and rounded ends — art stays in the central frontal window.',
+      note: 'Duffle display face: the area wraps past the seams and rounded ends — art stays in the central frontal window; other panels get the solid background (no white strip).',
     };
   }
   return undefined;
