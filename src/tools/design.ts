@@ -20,6 +20,11 @@ import type { ToolContext } from './context.js';
 const sizeEnum = z.enum(['1024x1024', '1024x1792', '1792x1024']);
 const styleEnum = z.enum(['photoreal', 'vector', 'abstract', 'auto']);
 
+// Min long-side a keyed design is upscaled back to after the tight crop, so it clears the QC
+// gate's low-resolution threshold (min side < 600 = block, < 1000 = warn) for typical aspects and
+// matches ship_product's placed-path floor (so no double upscale). See processTransparencyImpl.
+const RESOLUTION_FLOOR = 2000;
+
 export async function resolveImageUrl(
   ctx: ToolContext,
   imageUuid: string,
@@ -99,8 +104,27 @@ async function processTransparencyImpl(
     }
   }
 
+  // Resolution floor after keying: the flood-fill + tight-crop can shrink a design below the QC
+  // gate's low-resolution threshold (a 1024x1024 design keyed + cropped to its artwork bbox came
+  // out 847x596 — min side 596 < 600, which made verify_design_quality BLOCK and an unattended run
+  // SKIP the NORWAY passport wallet forever). Upscale the keyed result to a usable floor (Lanczos,
+  // white-premultiplied) so QC passes and the design is print-ready; ship_product bumps it further
+  // for large print areas. No-op + no extra work when the crop stayed large enough.
+  const outPaths = [inPath, t.outputPath];
+  let keyedPath = t.outputPath;
+  try {
+    const hi = await ctx.imaging.ensureResolution(t.outputPath, RESOLUTION_FLOOR);
+    if (hi.upscaled) {
+      keyedPath = hi.outputPath;
+      outPaths.push(hi.outputPath);
+    }
+  } catch {
+    // A resolution upscale is best-effort — never fail transparency over it; ship_product's
+    // placed-path resolution net is the backstop.
+  }
+
   await ctx.progress.report(80, 'Uploading transparent design...');
-  const bytes = await ctx.imaging.readBytes(t.outputPath);
+  const bytes = await ctx.imaging.readBytes(keyedPath);
   const form = new FormData();
   // Uint8Array.from gives an ArrayBuffer-backed view (a valid BlobPart under TS 6's narrowed types).
   form.append('image', new Blob([Uint8Array.from(bytes)], { type: 'image/png' }), 'transparent.png');
@@ -109,7 +133,7 @@ async function processTransparencyImpl(
     workspace,
     signal: ctx.signal,
   });
-  await ctx.imaging.cleanup([inPath, t.outputPath]);
+  await ctx.imaging.cleanup(outPaths);
   await ctx.progress.report(100, 'Transparency complete.');
   return {
     image_uuid: str(res, 'image_uuid', 'uuid') ?? imageUuid,

@@ -39,9 +39,20 @@ describe('scoreQuality', () => {
     expect(r.quality_score).toBeLessThan(100);
   });
 
-  it('blocks a very low-resolution design', () => {
+  it('WARNS (never blocks) on a very low-resolution design — the pipeline auto-upscales it', () => {
+    // The build pipeline upscales low-res designs to the print area, so a low-res design must not
+    // make an unattended run SKIP the item (the NORWAY passport-wallet 847x596 QC-skip). It stays
+    // a warn so the score is only lightly penalized and the item still builds.
     const r = scoreQuality({ ...cleanStats, width: 500, height: 500 });
-    expect(r.issues.some((i) => i.category === 'resolution' && i.severity === 'block')).toBe(true);
+    const res = r.issues.find((i) => i.category === 'resolution');
+    expect(res?.severity).toBe('warn');
+    expect(r.issues.some((i) => i.severity === 'block')).toBe(false);
+    expect(r.quality_score).toBeGreaterThanOrEqual(70); // still passes the task's score gate
+  });
+
+  it('does not flag resolution at 1024x1024', () => {
+    const r = scoreQuality({ ...cleanStats, width: 1024, height: 1024 });
+    expect(r.issues.some((i) => i.category === 'resolution')).toBe(false);
   });
 });
 

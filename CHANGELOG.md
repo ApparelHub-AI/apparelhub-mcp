@@ -9,6 +9,23 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.3.9] - 2026-07-09
+
+### Fixed
+
+- **Low-resolution QC block no longer strands an unattended run** (the NORWAY passport wallet, which
+  an hourly scheduled task skipped every run and could never finish). Two changes so a low-res
+  design AUTO-RECOVERS instead of dead-ending at the pre-flight QC gate:
+  - `process_transparency` now upscales its keyed result back to a resolution floor (2000px long
+    side, Lanczos, white-premultiplied). Keying + tight-crop can shrink a 1024×1024 design to
+    847×396 (min side < 600 = the QC gate's hard block); it now emerges print-ready, so a caller
+    that gates on `verify_design_quality` before building passes instead of skipping.
+  - `verify_design_quality` now treats low resolution as a **warn, never a hard block** — the build
+    pipeline upscales low-res designs to the print area (process_transparency here, ship_product's
+    placed-path resolution net downstream), so a low-res design must not make an unattended run skip
+    the item. The warn still surfaces it (regenerate the source for genuine large-format detail) and
+    the score stays ≥70 so the item builds.
+
 ## [0.3.8] - 2026-07-09
 
 ### Fixed
