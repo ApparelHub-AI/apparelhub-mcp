@@ -9,6 +9,20 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-07-09
+
+### Fixed
+
+- **Mockups didn't cover every color being imported.** `ship_product` generated the mockup from the
+  first 5 resolved variants — which for a multi-color order (e.g. Black + White) are all ONE color
+  (Black's sizes come first), so the White variants shipped with no mockup and the product gallery
+  only showed black. Mockups are now generated for **one representative variant per DISTINCT color**
+  (new `mockupIdsCoveringColors` helper), so the generated set covers every color the product
+  offers. `ship_product` "thinks ahead": it resolves your variants first, then renders one mockup
+  per imported color. `create_product`'s auto-derived mockup now also samples one-per-color from the
+  catalog (best-effort — it runs before variants exist, so for color-accurate mockups use
+  `ship_product` or pass `mockup_variant_ids` for your chosen colors).
+
 ## [0.3.2] - 2026-07-09
 
 ### Fixed
