@@ -95,17 +95,29 @@ export function placedStyleFor(garmentName: string | undefined): 'chest_fill' | 
  *    1-5), the drawstring channel eats the top ~5%, and grommet corner cuts start at ~45%. Art
  *    centered on the AREA straddles the fold (the ENGLAND drawstring incident).
  */
-export interface FaceLayout {
-  /** Fractions (0..1) of the print area the art must be composed within. */
-  face?: { x: number; y: number; w: number; h: number };
-  /** Compose the art rotated 180deg (placements that render the file inverted). */
+export interface FaceRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** This face renders 180deg rotated on the product (the far side of a fold, or a template
+   *  whose file orientation is inverted) — the art is composed flipped so it reads upright. */
   rotate180?: boolean;
+}
+
+export interface FaceLayout {
+  /** The visible-face rectangles (fractions of the print area) the art is composed into —
+   *  one rect per physical FACE the file covers. Multi-face wraps (zipper wallets) get the
+   *  art on EVERY face ("no blank faces"); the background still fills the whole area. */
+  faces: FaceRect[];
   note: string;
 }
 
 const SOCK_LEG_FRONT_RE = /^leg_front_(left|right)$/i;
 const SOCK_LEG_BACK_RE = /^leg_back_(left|right)$/i;
 const DRAWSTRING_RE = /drawstring|cinch/i;
+const WALLET_WRAP_RE = /wallet|passport cover|clutch|purse/i;
+const DUFFLE_RE = /duffle|duffel/i;
 
 export function faceLayoutFor(
   garmentName: string | undefined,
@@ -115,8 +127,7 @@ export function faceLayoutFor(
 ): FaceLayout | undefined {
   if (SOCK_LEG_FRONT_RE.test(placement)) {
     return {
-      face: { x: 0.18, y: 0.05, w: 0.64, h: 0.9 },
-      rotate180: true,
+      faces: [{ x: 0.18, y: 0.05, w: 0.64, h: 0.9, rotate180: true }],
       note: 'Printful sock leg FRONT: renders the file rotated 180deg (file-top = toe) and the strip wraps the leg — art composes inverted, confined to the central band.',
     };
   }
@@ -125,15 +136,50 @@ export function faceLayoutFor(
     // opposite of the fronts. One rotated file on all four strips prints upside down on the
     // backs, so backs get their own non-rotated composition.
     return {
-      face: { x: 0.18, y: 0.05, w: 0.64, h: 0.9 },
+      faces: [{ x: 0.18, y: 0.05, w: 0.64, h: 0.9 }],
       note: 'Printful sock leg BACK: renders the file upright (file-top = cuff), central band only.',
     };
   }
   const aspect = areaWidth > 0 && areaHeight > 0 ? areaWidth / areaHeight : 1;
   if (DRAWSTRING_RE.test(garmentName ?? '') && aspect < 0.55) {
     return {
-      face: { x: 0.06, y: 0.05, w: 0.88, h: 0.38 },
+      faces: [{ x: 0.06, y: 0.05, w: 0.88, h: 0.38 }],
       note: 'Drawstring bag wrap: the area is front + back folded at the bottom — art composes into the visible front (top half), clear of the drawstring channel and grommet corners.',
+    };
+  }
+  // Zipper-wallet / passport-cover wraps (Printify 708 "Zipper Wallet", grid-calibrated
+  // 2026-07-09): the near-square area is BOTH faces folded at the bottom — the front face is
+  // the TOP half (renders upright, zipper above it), the back face is the BOTTOM half and
+  // renders ROTATED 180deg. Art composed once in the middle split at the fold (the BELGIUM
+  // wallet). The logo goes on EACH face, flipped on the back so both read upright.
+  if (WALLET_WRAP_RE.test(garmentName ?? '') && aspect >= 0.7 && aspect <= 1.15) {
+    return {
+      faces: [
+        { x: 0.05, y: 0.05, w: 0.9, h: 0.4 },
+        { x: 0.05, y: 0.55, w: 0.9, h: 0.4, rotate180: true },
+      ],
+      note: 'Zipper-wallet wrap: front face = top half (upright), back face = bottom half (renders rotated 180deg past the fold) — art composes onto BOTH faces so neither is blank.',
+    };
+  }
+  // AirPods-Max / headphone shell cases (Printify 1666, grid-calibrated): each ear cup is a
+  // separate OVAL face (Left + Right, same size). The rectangular print area's corners fall
+  // outside the oval, so a full-width placed design bleeds off the cup edges (the BELGIUM
+  // headphones showed the crest clipped at the oval). Inset the art to the oval's safe area;
+  // the same-size sibling (the other cup) reuses the composed file, so BOTH cups print.
+  if (/airpods|ear ?cup|headphone|\bshell case\b/i.test(garmentName ?? '')) {
+    return {
+      faces: [{ x: 0.16, y: 0.14, w: 0.68, h: 0.62 }],
+      note: 'Headphone ear-cup shell: oval face — art inset to the cup safe area; both Left and Right cups print (no blank cup).',
+    };
+  }
+  // All-over duffle display faces (Printful 465, grid-calibrated): the front/back areas wrap
+  // over the top zipper seam, under the base, and around the rounded ends — only roughly the
+  // central x 0.10-0.90 / y 0.15-0.75 stays flat-frontal. Art at 88% width clipped its edges
+  // (the NORWAY duffle). Sides/top/bottom/pocket keep plain centered art (wrap surfaces).
+  if (DUFFLE_RE.test(garmentName ?? '') && /^(front|back)$/i.test(placement)) {
+    return {
+      faces: [{ x: 0.12, y: 0.15, w: 0.76, h: 0.6 }],
+      note: 'Duffle display face: the area wraps past the seams and rounded ends — art stays in the central frontal window.',
     };
   }
   return undefined;

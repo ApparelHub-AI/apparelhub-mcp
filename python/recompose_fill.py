@@ -36,12 +36,20 @@ Usage:
   recompose_fill.py IN.png OUT.png --aspect 1888:640 [--margin 0.06] [--bg #0B1E3C]
                     [--face X:Y:W:H] [--rotate180] [--solid]
 
-  --face X:Y:W:H   fractions (0..1) of the output canvas: the visible-face rectangle the
-                   art must stay inside. Background still fills the whole canvas.
-  --rotate180      rotate the artwork 180 degrees before composing (placements that
-                   render the file inverted, e.g. Printful sock legs).
+  --face X:Y:W:H[:R] fractions (0..1) of the output canvas: a visible-face rectangle the
+                   art is composed into. REPEATABLE — wrap templates that carry several
+                   physical faces in one file (zipper wallets: front + back around the
+                   spine) get the art composed onto EACH face. Optional 5th field R=1
+                   rotates the art 180 degrees on THAT face only (faces on the far side
+                   of a fold render inverted). Background still fills the whole canvas.
+  --rotate180      rotate the artwork 180 degrees on every face (whole-file inversion,
+                   e.g. Printful sock leg fronts).
   --solid          emit a background-only canvas (no art) at the target aspect. Uses
                    --bg when given, else derives the background from IN's artwork.
+  --transparent    compose onto a TRANSPARENT canvas instead of a background color
+                   (placed-style wrap goods: the art must sit per-face but transparency
+                   is preserved). Transparent pixels are premultiplied white. Not
+                   compatible with --solid.
 
 Output (stdout): JSON {"mode": "composited"|"cover"|"solid", "background": "#RRGGBB"|null,
                        "width": W, "height": H, "face": [x,y,w,h], "rotated": bool}
@@ -84,10 +92,14 @@ def parse_aspect(s):
 
 def parse_face(s):
     try:
-        x, y, w, h = (float(v) for v in s.split(":"))
+        parts = s.split(":")
+        if len(parts) not in (4, 5):
+            raise ValueError
+        x, y, w, h = (float(v) for v in parts[:4])
+        rot = bool(int(parts[4])) if len(parts) == 5 else False
         if w <= 0 or h <= 0 or x < 0 or y < 0 or x + w > 1.0001 or y + h > 1.0001:
             raise ValueError
-        return (x, y, min(w, 1 - x), min(h, 1 - y))
+        return (x, y, min(w, 1 - x), min(h, 1 - y), rot)
     except ValueError:
         return None
 
@@ -119,13 +131,13 @@ def canvas_size(aspect):
     return max(1, round(TARGET_LONG_SIDE * aspect)), TARGET_LONG_SIDE
 
 
-def emit(mode, bg, w, h, face, rotated):
+def emit(mode, bg, w, h, faces, rotated):
     print(json.dumps({
         "mode": mode,
         "background": ("#{:02X}{:02X}{:02X}".format(*bg) if bg else None),
         "width": w,
         "height": h,
-        "face": list(face),
+        "faces": [list(f) for f in faces],
         "rotated": rotated,
     }))
 
@@ -135,14 +147,33 @@ def main():
     aspect = None
     margin = 0.06
     bg_override = None
-    face = (0.0, 0.0, 1.0, 1.0)
+    faces = []
     rotate180 = "--rotate180" in args
     if rotate180:
         args.remove("--rotate180")
     solid = "--solid" in args
     if solid:
         args.remove("--solid")
-    for flag in ("--aspect", "--margin", "--bg", "--face"):
+    transparent = "--transparent" in args
+    if transparent:
+        args.remove("--transparent")
+    if solid and transparent:
+        sys.stderr.write("recompose_fill: --solid and --transparent are mutually exclusive\n")
+        return 2
+    while "--face" in args:
+        i = args.index("--face")
+        try:
+            val = args[i + 1]
+        except IndexError:
+            sys.stderr.write("recompose_fill: --face needs a value\n")
+            return 2
+        f = parse_face(val)
+        if f is None:
+            sys.stderr.write("recompose_fill: --face must be X:Y:W:H[:R] fractions in 0..1\n")
+            return 2
+        faces.append(f)
+        del args[i:i + 2]
+    for flag in ("--aspect", "--margin", "--bg"):
         if flag in args:
             i = args.index(flag)
             try:
@@ -161,11 +192,6 @@ def main():
                 except ValueError:
                     sys.stderr.write("recompose_fill: --margin must be a number\n")
                     return 2
-            elif flag == "--face":
-                face = parse_face(val)
-                if face is None:
-                    sys.stderr.write("recompose_fill: --face must be X:Y:W:H fractions in 0..1\n")
-                    return 2
             else:
                 v = val.lstrip("#")
                 if len(v) != 6:
@@ -173,6 +199,8 @@ def main():
                     return 2
                 bg_override = tuple(int(v[j:j + 2], 16) for j in (0, 2, 4))
             del args[i:i + 2]
+    if not faces:
+        faces = [(0.0, 0.0, 1.0, 1.0, False)]
     if len(args) != 2 or aspect is None:
         sys.stderr.write(
             "usage: recompose_fill.py IN OUT --aspect W:H [--margin f] [--bg #hex]"
@@ -186,7 +214,7 @@ def main():
     # Solid mode with an explicit background never needs the artwork at all.
     if solid and bg_override:
         Image.new("RGB", (out_w, out_h), bg_override).save(out_path, "PNG")
-        emit("solid", bg_override, out_w, out_h, face, False)
+        emit("solid", bg_override, out_w, out_h, faces, False)
         return 0
 
     try:
@@ -226,36 +254,51 @@ def main():
             im.putdata(keyed)
             alpha = im.split()[-1]
         elif not solid:
-            # A full-bleed photo/art: cover-fit (scale to cover, center-crop). With a face
-            # rectangle, the photo covers the FACE and a palette background fills the rest
+            # A full-bleed photo/art: cover-fit (scale to cover, center-crop). With face
+            # rectangles, the photo covers EACH FACE and a palette background fills the rest
             # (a photo cover-cropped to a wrap-style AREA would straddle folds/seams).
             photo = im.convert("RGB")
             if rotate180:
                 photo = photo.rotate(180)
-            full_face = face == (0.0, 0.0, 1.0, 1.0)
-            fx = round(face[0] * out_w)
-            fy = round(face[1] * out_h)
-            fw = max(1, round(face[2] * out_w))
-            fh = max(1, round(face[3] * out_h))
-            scale = max(fw / w, fh / h)
-            rw, rh = max(1, round(w * scale)), max(1, round(h * scale))
-            resized = photo.resize((rw, rh), Image.LANCZOS)
-            crop = resized.crop((
-                (rw - fw) // 2,
-                (rh - fh) // 2,
-                (rw - fw) // 2 + fw,
-                (rh - fh) // 2 + fh,
-            ))
+            full_face = faces == [(0.0, 0.0, 1.0, 1.0, False)]
             if full_face:
-                crop.save(out_path, "PNG")
-                emit("cover", None, out_w, out_h, face, rotate180)
+                fw, fh = out_w, out_h
+                scale = max(fw / w, fh / h)
+                rw, rh = max(1, round(w * scale)), max(1, round(h * scale))
+                resized = photo.resize((rw, rh), Image.LANCZOS)
+                resized.crop((
+                    (rw - fw) // 2,
+                    (rh - fh) // 2,
+                    (rw - fw) // 2 + fw,
+                    (rh - fh) // 2 + fh,
+                )).save(out_path, "PNG")
+                emit("cover", None, out_w, out_h, faces, rotate180)
                 return 0
             sample = photo.resize((64, 64), Image.LANCZOS)
-            bg = pick_background(list(sample.getdata()))
-            canvas = Image.new("RGB", (out_w, out_h), bg)
-            canvas.paste(crop, (fx, fy))
+            bg = None if transparent else pick_background(list(sample.getdata()))
+            canvas = (
+                Image.new("RGBA", (out_w, out_h), (255, 255, 255, 0))
+                if transparent
+                else Image.new("RGB", (out_w, out_h), bg)
+            )
+            for face in faces:
+                fx = round(face[0] * out_w)
+                fy = round(face[1] * out_h)
+                fw = max(1, round(face[2] * out_w))
+                fh = max(1, round(face[3] * out_h))
+                fphoto = photo.rotate(180) if face[4] else photo
+                scale = max(fw / w, fh / h)
+                rw, rh = max(1, round(w * scale)), max(1, round(h * scale))
+                resized = fphoto.resize((rw, rh), Image.LANCZOS)
+                crop = resized.crop((
+                    (rw - fw) // 2,
+                    (rh - fh) // 2,
+                    (rw - fw) // 2 + fw,
+                    (rh - fh) // 2 + fh,
+                ))
+                canvas.paste(crop, (fx, fy))
             canvas.save(out_path, "PNG")
-            emit("cover", bg, out_w, out_h, face, rotate180)
+            emit("cover", bg, out_w, out_h, faces, rotate180)
             return 0
 
     # Transparent art path: tight-crop to the artwork bbox.
@@ -273,33 +316,40 @@ def main():
 
     if solid:
         Image.new("RGB", (out_w, out_h), bg).save(out_path, "PNG")
-        emit("solid", bg, out_w, out_h, face, False)
+        emit("solid", bg, out_w, out_h, faces, False)
         return 0
 
     if rotate180:
         art = art.rotate(180)
-    aw, ah = art.size
 
-    face_x = round(face[0] * out_w)
-    face_y = round(face[1] * out_h)
-    face_w = max(1, round(face[2] * out_w))
-    face_h = max(1, round(face[3] * out_h))
-
-    avail_w = face_w * (1 - 2 * margin)
-    avail_h = face_h * (1 - 2 * margin)
-    scale = min(avail_w / aw, avail_h / ah)
-    rw, rh = max(1, round(aw * scale)), max(1, round(ah * scale))
-    art_resized = art.resize((rw, rh), Image.LANCZOS)
-
-    canvas = Image.new("RGBA", (out_w, out_h), (*bg, 255))
-    canvas.paste(
-        art_resized,
-        (face_x + (face_w - rw) // 2, face_y + (face_h - rh) // 2),
-        art_resized,
+    canvas = Image.new(
+        "RGBA", (out_w, out_h), (255, 255, 255, 0) if transparent else (*bg, 255)
     )
+    for face in faces:
+        face_x = round(face[0] * out_w)
+        face_y = round(face[1] * out_h)
+        face_w = max(1, round(face[2] * out_w))
+        face_h = max(1, round(face[3] * out_h))
+
+        fart = art.rotate(180) if face[4] else art
+        aw, ah = fart.size
+        avail_w = face_w * (1 - 2 * margin)
+        avail_h = face_h * (1 - 2 * margin)
+        scale = min(avail_w / aw, avail_h / ah)
+        rw, rh = max(1, round(aw * scale)), max(1, round(ah * scale))
+        art_resized = fart.resize((rw, rh), Image.LANCZOS)
+        canvas.paste(
+            art_resized,
+            (face_x + (face_w - rw) // 2, face_y + (face_h - rh) // 2),
+            art_resized,
+        )
+    if transparent:
+        canvas.save(out_path, "PNG")
+        emit("composited", None, out_w, out_h, faces, rotate180)
+        return 0
     canvas.convert("RGB").save(out_path, "PNG")
 
-    emit("composited", bg, out_w, out_h, face, rotate180)
+    emit("composited", bg, out_w, out_h, faces, rotate180)
     return 0
 
 
