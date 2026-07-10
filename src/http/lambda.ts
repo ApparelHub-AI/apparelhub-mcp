@@ -317,6 +317,9 @@ async function handleInner(
   // both hit the same environment.
   config.baseUrl = apiBaseUrl;
   if (apiKeyOverride) config.apiKey = apiKeyOverride;
+  // Hosted-only: the platform garment-intelligence resolve (mcp#100) is authed with the same
+  // SERVICE key as resolve-token. Absent (local `npx`) => layouts come from the bundled tables.
+  if (serviceKey) config.garmentIntelligenceServiceKey = serviceKey;
   const { server } = createServer(config, deps);
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,

@@ -13,6 +13,10 @@ export interface Config {
   /** Client-side telemetry signal (ticket #19). Off when APPARELHUB_MCP_TELEMETRY=off. */
   telemetryEnabled: boolean;
   userAgent: string;
+  /** SERVICE key for the garment-intelligence resolve endpoint (Garment Intelligence epic,
+   *  mcp#100). Set ONLY by the hosted Lambda (from MCP_SERVICE_KEY); undefined for local `npx`,
+   *  so local usage always resolves layouts from the bundled `garments.ts` tables. */
+  garmentIntelligenceServiceKey?: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {

@@ -5,14 +5,15 @@ import { asArray, isRecord, num, str, viewUrl } from '../util/shape.js';
 import { pickDimensions } from '../image/dimensions.js';
 import {
   extremeAspectWarning,
-  faceLayoutFor,
   isInteriorPlacement,
-  placedStyleFor,
   pricingFloor,
-  printStyleFor,
   type FaceLayout,
   type PrintStyle,
 } from '../knowledge/garments.js';
+import {
+  resolveGarmentLayout,
+  type GarmentLayoutResolver,
+} from '../knowledge/intelligence.js';
 import {
   expectedThreadColorsIdFromError,
   isEmbroideryPlacement,
@@ -52,6 +53,9 @@ interface GarmentInfo {
   /** The chosen placement is an embroidery placement (caps/beanies/embroidered apparel). */
   isEmbroidery: boolean;
   name: string | undefined;
+  /** Resolved print-geometry (face layouts + style routing + interior blanking). Platform-backed
+   *  on the hosted server (mcp#100), the bundled `garments.ts` tables everywhere else. */
+  layout: GarmentLayoutResolver;
 }
 
 function mapMatrix(raw: unknown): MatrixVariant[] {
@@ -166,13 +170,31 @@ async function fetchGarment(
     placements.push({ provider_ref_id: p, area_width: w, area_height: h });
   }
   const baseCost = num(g, 'base_cost', 'cost', 'price') ?? matrix.find((m) => m.cost)?.cost;
+  const name = str(g, 'name', 'title');
+
+  // Resolve the print geometry once per garment. Hosted (MCP_SERVICE_KEY set) prefers the
+  // platform garment_layouts store so new calibrations arrive as DB rows (mcp#100); local `npx`
+  // and any platform failure fall back to the bundled tables. Then honor the platform's per-row
+  // exclude_placements by dropping those SIBLINGS from the fill set (the primary always prints) —
+  // an excluded interior surface must print BLANK, never get the solid background canvas.
+  const layout = await resolveGarmentLayout(providerUuid, productRefId, name, placements, {
+    serviceKey: ctx.config.garmentIntelligenceServiceKey,
+    baseUrl: ctx.config.baseUrl,
+    signal: ctx.signal,
+  });
+  const displayPlacements = [
+    placements[0],
+    ...placements.slice(1).filter((p) => !layout.isInterior(p.provider_ref_id)),
+  ].filter((p): p is PrintPlacement => p !== undefined);
+
   return {
     matrix,
     area,
-    placements,
+    placements: displayPlacements,
     baseCost,
     isEmbroidery: isEmbroideryPlacement(placement),
-    name: str(g, 'name', 'title'),
+    name,
+    layout,
   };
 }
 
@@ -218,8 +240,7 @@ function withThreadColorOptions(
 
 /** The face layout of the garment's primary print area, if any. */
 function primaryFaceLayout(garment: GarmentInfo): FaceLayout | undefined {
-  return faceLayoutFor(
-    garment.name,
+  return garment.layout.faceLayout(
     garment.area.provider_ref_id,
     garment.area.area_width,
     garment.area.area_height,
@@ -237,7 +258,7 @@ function replicatePlacedAcrossPieces(
   printData: Record<string, unknown>[],
   garment: GarmentInfo,
 ): Record<string, unknown>[] {
-  if (garment.isEmbroidery || placedStyleFor(garment.name) !== 'back_center') return printData;
+  if (garment.isEmbroidery || garment.layout.placedStyle() !== 'back_center') return printData;
   const primaryEntry = printData[0];
   if (!primaryEntry) return printData;
   const out = [...printData];
@@ -259,7 +280,7 @@ function resolvePrintStyle(
 ): PrintStyle {
   if (garment.isEmbroidery) return 'placed';
   if (requested && requested !== 'auto') return requested;
-  return printStyleFor(garment.name);
+  return garment.layout.printStyle();
 }
 
 interface FillDesign {
@@ -364,8 +385,7 @@ async function prepareFillDesign(
 ): Promise<FillDesign> {
   const warnings: string[] = [];
   const primary = garment.area;
-  const layout = faceLayoutFor(
-    garment.name,
+  const layout = garment.layout.faceLayout(
     primary.provider_ref_id,
     primary.area_width,
     primary.area_height,
@@ -415,7 +435,7 @@ async function prepareFillDesign(
     let solidUrl: string | undefined;
     for (const p of garment.placements) {
       if (p.provider_ref_id === primary.provider_ref_id) continue;
-      const siblingLayout = faceLayoutFor(garment.name, p.provider_ref_id, p.area_width, p.area_height);
+      const siblingLayout = garment.layout.faceLayout(p.provider_ref_id, p.area_width, p.area_height);
       if (siblingLayout) {
         // Display face: composed art (reused across identical layouts).
         const key = layoutKeyOf(siblingLayout);
@@ -725,7 +745,7 @@ export const shipProduct = defineTool({
     const printData =
       fill?.printData ??
       replicatePlacedAcrossPieces(
-        buildPrintData(garment.area, designUrl, placedStyleFor(garment.name)),
+        buildPrintData(garment.area, designUrl, garment.layout.placedStyle()),
         garment,
       );
 
@@ -915,7 +935,7 @@ export const createProduct = defineTool({
     const printData =
       fill?.printData ??
       replicatePlacedAcrossPieces(
-        buildPrintData(garment.area, designUrl, placedStyleFor(garment.name)),
+        buildPrintData(garment.area, designUrl, garment.layout.placedStyle()),
         garment,
       );
 
