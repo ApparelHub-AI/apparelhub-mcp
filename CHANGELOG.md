@@ -9,6 +9,16 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.3.12] - 2026-07-10
+
+### Added
+
+- **`list_my_products` now returns `created` and `updated` per product.** The underlying list
+  endpoint already provides them; the tool was dropping them. Exposing the timestamps lets a caller
+  reason about recency — e.g. a reconciler/scheduled job deciding whether the product set has been
+  stable long enough to self-terminate (nothing built or rebuilt within a grace window). Without
+  this a stable-completion self-delete couldn't verify its condition and had to stay running.
+
 ## [0.3.11] - 2026-07-09
 
 ### Fixed
