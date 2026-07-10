@@ -560,6 +560,70 @@ describe('ship_product: fill print style (canvas/backpack incident)', () => {
     });
   });
 
+  it('notebook: prints ONLY the outside cover — inside cover + pages are excluded, not solid-filled', async () => {
+    // Printful 1013: outside_cover is back+spine+front (design goes on the front/right half); the
+    // inside cover + 6 page placements must print BLANK, never solid-filled with the design bg.
+    const notebookGarment = {
+      product: {
+        name: 'Softcover Journal with Inside Prints',
+        variants: [
+          {
+            id: 31976,
+            size: 'One size',
+            cost: 12,
+            templates: [
+              { provider_location_ref_id: 'outside_cover', provider_ref_id: 700, area_width: 2968, area_height: 1978 },
+              { provider_location_ref_id: 'inside_cover', provider_ref_id: 701, area_width: 2968, area_height: 1978 },
+              { provider_location_ref_id: 'page1_front', provider_ref_id: 702, area_width: 1400, area_height: 1978 },
+              { provider_location_ref_id: 'page1_back', provider_ref_id: 703, area_width: 1400, area_height: 1978 },
+              { provider_location_ref_id: 'page2_front', provider_ref_id: 704, area_width: 1400, area_height: 1978 },
+            ],
+          },
+        ],
+      },
+    };
+    const solidCalls: unknown[] = [];
+    const { api, calls } = apiFrom([
+      notebookGarment, // fetchGarment
+      { image_uuid: 'd2', url: 'https://cdn.example/d2.png' }, // transform upload (composed cover art)
+      { job_uuid: 'j1' }, // mockup POST
+      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/c.png' }] }, // poll
+      { uuid: 'p1' }, // create
+      {}, // variant POST
+    ]);
+    const res = (await shipProduct.handler(
+      {
+        design_uuid: 'd1',
+        design_url: 'https://cdn.example/d.png',
+        garment: { provider_uuid: 'pf', product_ref_id: '1013' },
+        variants: [{ color: 'Black', sizes: ['One size'] }],
+        pricing: { price: 24.99 },
+        product_meta: { name: 'QC - Journal', description: 'j' },
+      },
+      fakeContext(
+        api,
+        stubImaging({
+          recomposeFill: async () => ({ outputPath: '/tmp/fill.png', mode: 'composited' as const, background: '#101010' }),
+          solidFill: async (...args: unknown[]) => {
+            solidCalls.push(args);
+            return { outputPath: '/tmp/solid.png', mode: 'solid' as const, background: '#101010' };
+          },
+        }),
+      ),
+    )) as any;
+
+    expect(res.print_style).toBe('fill');
+    // ONLY the outside cover is printed — no solid fill on any inside/page surface.
+    expect(res.placements_covered).toEqual(['outside_cover']);
+    expect(solidCalls).toHaveLength(0);
+    const createBody = JSON.parse(calls.find((c) => c.url.endsWith('/product/create'))?.init?.body as string);
+    expect(createBody.print_data).toHaveLength(1);
+    expect(createBody.print_data[0].provider_ref_id).toBe('outside_cover');
+    // the mockup previews only the cover too
+    const mockupBody = JSON.parse(calls.find((c) => c.url.endsWith('/merchandise/product/preview'))?.init?.body as string);
+    expect(mockupBody.templates).toHaveLength(1);
+  });
+
   it('drawstring wrap: art composes into the visible-front face region, never across the fold', async () => {
     const bagGarment = {
       product: {

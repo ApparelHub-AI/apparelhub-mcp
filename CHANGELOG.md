@@ -9,6 +9,40 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.3.13] - 2026-07-10
+
+### Fixed
+
+Four more "print area != visible FACE" garment quirks, found by the proactive **Merch QC discovery
+sweep** (rendering a standardized QC probe on diverse garments and grading each by vision) and each
+grid-calibrated + live-verified clip-free. `faceLayoutFor` (knowledge/garments.ts) gains a branch
+per garment:
+
+- **Tote bags (Printful 274) top-favor the visible front.** The single `default` wrap area is the
+  front + back folded at the bottom, so a subject centered on the area is clipped at the fold. Art
+  now composes into the top ~45%; the pocket sibling gets the solid background.
+- **Softcover journals / notebooks (Printful 1013) print on the FRONT cover, clear of the spine.**
+  The `outside_cover` area is back + spine + front laid flat, so a centered design lands ON the
+  spine and is cut by the crease. Art now composes onto the right half (the front cover).
+- **Bucket hats (Printful 654) confine the design to the flat front crown.** The `outside_front`
+  area is a tightly-curved dome — a full-bleed design wraps over the crown top and down the brim.
+  Art now sits in the small flat front-facing band.
+- **Mugs / steins get a TIGHTER front-arc inset than a tall bottle.** A mug's front-facing arc is
+  only the central ~50% of the print width (horizontal-stripe-probe calibrated), so the general
+  cylinder inset (tuned for a tall water bottle) let a centered design wrap around the mug's sides
+  out of view. `MUG_RE` is checked before `CYLINDER_RE` and insets to the front arc.
+
+### Changed
+
+- **Interior / label surfaces on fill goods now print BLANK, never solid-filled.** `fetchGarment`
+  drops `inside_*`, `page*`, and `label_*` placements from the fill set (new `isInteriorPlacement`),
+  so a journal's inside cover + pages and a reversible bucket hat's inside faces are left unprinted
+  instead of getting inked with the design's background color. Exterior display/structural
+  placements (front/back/top/bottom/pocket, `outside_*`) are unaffected — "outside" never matches
+  "inside".
+
+Tool surface unchanged (internal fill-geometry knowledge only). No schema/description changes.
+
 ## [0.3.12] - 2026-07-10
 
 ### Added
