@@ -162,6 +162,10 @@ function mapProductListItem(raw: unknown): Record<string, unknown> {
     price: num(raw, 'price', 'retail_price'),
     thumbnail_url: str(raw, 'thumbnail_url', 'display_image'),
     status: str(raw, 'status'),
+    // created/updated let a caller reason about recency — e.g. a reconciler deciding whether the
+    // product set has been stable long enough to self-terminate (nothing built/rebuilt recently).
+    created: str(raw, 'created', 'created_at', 'created_on'),
+    updated: str(raw, 'updated', 'updated_at'),
     fulfillment_status: mapFulfillmentStatus(raw),
     channel_statuses: mapChannelStatuses(raw),
   };

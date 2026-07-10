@@ -50,6 +50,8 @@ describe('list_my_products', () => {
           price: 27.99,
           display_image: 'https://cdn.example/p.png',
           status: 'active',
+          created: '2026-07-09T05:35:25',
+          updated: '2026-07-09T06:00:00',
           fulfillment_status: { provider_name: 'Printful', sync_status: 'Synced' },
           channel_statuses: [
             { integration_uuid: 'i1', channel_name: 'Shopify', sync_status: 'Synced', external_id: '999' },
@@ -64,6 +66,8 @@ describe('list_my_products', () => {
       product_uuid: 'p1',
       name: 'Cactus Tee',
       price: 27.99,
+      created: '2026-07-09T05:35:25', // exposed so a reconciler can measure recency/stability
+      updated: '2026-07-09T06:00:00',
       view_url: 'https://apparelhub.ai/merchandise/my-products/p1',
     });
     expect(res.products[0].fulfillment_status).toEqual({ provider: 'Printful', sync_status: 'Synced' });
