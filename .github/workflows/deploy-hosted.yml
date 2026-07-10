@@ -50,7 +50,7 @@ jobs:
           deploy/hosted/build.sh
 
       - name: Configure AWS credentials (OIDC -> Hub IaCProvisioningRole)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           aws-region: us-east-1
           role-to-assume: ${{ secrets.HUB_ROLE_ARN }}
@@ -59,7 +59,7 @@ jobs:
           unset-current-credentials: true
 
       - name: Assume target-account IaCProvisioningRole (role chaining)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           aws-region: us-east-1
           role-to-assume: "arn:aws:iam::${{ secrets.TARGET_ACCOUNT_ID }}:role/IaCProvisioningRole"
