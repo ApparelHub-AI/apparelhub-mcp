@@ -31,7 +31,10 @@ jobs:
           FORBIDDEN_TERMS: ${{ secrets.FORBIDDEN_TERMS }}
         run: |
           set -uo pipefail
-          mapfile -t FILES < <(git ls-files '*.ts' '*.js' '*.mjs' '*.cjs' '*.md' '*.json' '*.yml' '*.yaml' \
+          # Scan EVERY tracked file (python helpers, shell, Dockerfile, toml —
+          # not just an extension allowlist); grep -I skips binaries. Lockfiles
+          # excluded (integrity hashes, no hand-written content).
+          mapfile -t FILES < <(git ls-files \
             | grep -vE '(^|/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$' || true)
           if [ "${#FILES[@]}" -eq 0 ]; then echo "no files to scan"; exit 0; fi
           fail=0
