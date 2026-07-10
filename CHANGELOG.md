@@ -9,6 +9,24 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.3.14] - 2026-07-10
+
+### Changed
+
+**The hosted server now resolves garment print-geometry from the platform at runtime** (Garment
+Intelligence epic, apparelhub-ai#549 Phase 2b). When `MCP_SERVICE_KEY` is configured (the hosted
+deployment only), product composition resolves per-garment **face layouts + print-style routing +
+interior-surface blanking** from the platform's `garment_layouts` store instead of the bundled
+`knowledge/garments.ts` tables. New calibrations reach the hosted server the moment they land as DB
+rows — no npm release, no version skew across surfaces.
+
+- Local `npx` usage is **unchanged**: with no service key it always uses the bundled tables.
+- Graceful degradation: any resolve failure (endpoint unavailable, non-200, malformed body) falls
+  back to the bundled tables, so composition never breaks. Resolved layouts are cached per
+  `(provider, product_ref)` for the process lifetime.
+- **Tool surface is byte-identical** — schemas and descriptions are unchanged; this is a pure
+  internal-resolution swap.
+
 ## [0.3.13] - 2026-07-10
 
 ### Fixed
