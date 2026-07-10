@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   extremeAspectWarning,
   faceLayoutFor,
+  isInteriorPlacement,
   placedStyleFor,
   pricingFloor,
   qualityTier,
@@ -120,8 +121,8 @@ describe('placedStyleFor (collar padding is an APPAREL concept)', () => {
 });
 
 describe('faceLayoutFor — cylindrical drinkware (the MOROCCO water-bottle star-clip)', () => {
-  it('insets art on water bottles / tumblers / mugs / glasses so nothing clips at the shoulder/base/sides', () => {
-    for (const name of ['Slim Water Bottle', 'Stainless Tumbler', 'White Glossy Mug', 'Rocks Glass']) {
+  it('insets art on bottles / tumblers / glasses so nothing clips at the shoulder/base/sides', () => {
+    for (const name of ['Slim Water Bottle', 'Stainless Tumbler', 'Rocks Glass', 'Aluminum Can Cooler']) {
       const l = faceLayoutFor(name, 'front', 2502, 2303);
       expect(l?.faces).toHaveLength(1);
       expect(l?.faces[0]?.w).toBeLessThan(0.8); // inset from the wrapping sides
@@ -129,9 +130,62 @@ describe('faceLayoutFor — cylindrical drinkware (the MOROCCO water-bottle star
       expect(l!.faces[0]!.y + l!.faces[0]!.h).toBeLessThan(0.9); // clear of the base
     }
   });
+  it('gives mugs/steins a TIGHTER front-arc inset than a bottle (the wide Black Glossy Mug 300)', () => {
+    // horizontal-stripe-probe calibrated: the mug front-facing arc is only area x 0.25-0.75.
+    const bottle = faceLayoutFor('Slim Water Bottle', 'default', 2502, 2303)!;
+    for (const name of ['Black Glossy Mug', 'White Glossy Mug', 'Beer Stein']) {
+      const l = faceLayoutFor(name, 'default', 720, 296)!;
+      expect(l.faces).toHaveLength(1);
+      // strictly narrower than the general cylinder inset so it stays on the front arc
+      expect(l.faces[0]!.w).toBeLessThan(bottle.faces[0]!.w);
+      expect(l.faces[0]!.w).toBeCloseTo(0.44, 2);
+      // horizontally centered on the front (x=0.5)
+      expect(l.faces[0]!.x + l.faces[0]!.w / 2).toBeCloseTo(0.5, 2);
+    }
+  });
   it('does not treat apparel/flat goods as cylinders', () => {
     expect(faceLayoutFor('Unisex Staple Tee', 'front', 1800, 2400)).toBeUndefined();
     expect(faceLayoutFor('Stretched Canvas', 'front', 2400, 3000)).toBeUndefined();
+  });
+});
+
+describe('faceLayoutFor — the 4 pilot quirks (Merch QC discovery sweep, 2026-07-10)', () => {
+  it('tote 274: top-favors the visible front, clear of the front+back fold', () => {
+    const l = faceLayoutFor('All-Over Print Large Tote Bag w/ Pocket', 'default', 1701, 3000)!;
+    expect(l.faces).toHaveLength(1);
+    // the whole design sits in the top ~45% (the fold is ~y 0.42)
+    expect(l.faces[0]!.y + l.faces[0]!.h).toBeLessThan(0.42);
+    // the pocket sibling has no layout -> gets the solid background
+    expect(faceLayoutFor('All-Over Print Large Tote Bag w/ Pocket', 'pocket', 1200, 1200)).toBeUndefined();
+    // a square (non-wrap) tote is NOT top-favored
+    expect(faceLayoutFor('Cotton Tote Bag', 'front', 2000, 2000)).toBeUndefined();
+  });
+  it('notebook 1013: composes onto the FRONT cover (right half), clear of the spine at x=0.5', () => {
+    const l = faceLayoutFor('Softcover Journal with Inside Prints', 'outside_cover', 2968, 1978)!;
+    expect(l.faces).toHaveLength(1);
+    expect(l.faces[0]!.x).toBeGreaterThan(0.5); // starts to the RIGHT of the spine
+    // only the outside cover gets a layout; inside/page placements are excluded upstream
+    expect(faceLayoutFor('Softcover Journal with Inside Prints', 'inside_cover', 2968, 1978)).toBeUndefined();
+    expect(faceLayoutFor('Softcover Journal with Inside Prints', 'page1_front', 2968, 1978)).toBeUndefined();
+  });
+  it('bucket hat 654: confines art to the small flat front-crown band', () => {
+    const l = faceLayoutFor('All-Over Print Reversible Bucket Hat', 'outside_front', 2571, 3000)!;
+    expect(l.faces).toHaveLength(1);
+    expect(l.faces[0]!.h).toBeLessThan(0.25); // small flat band, does not wrap the crown/brim
+    expect(l.faces[0]!.x + l.faces[0]!.w / 2).toBeCloseTo(0.5, 1); // centered on the front
+    // the back crown gets no layout (solid); inside/labels are excluded upstream
+    expect(faceLayoutFor('All-Over Print Reversible Bucket Hat', 'outside_back', 2571, 3000)).toBeUndefined();
+  });
+});
+
+describe('isInteriorPlacement (interior/label surfaces print blank, not solid)', () => {
+  it('excludes inside surfaces, pages, and labels', () => {
+    for (const p of ['inside_cover', 'inside_front', 'inside_back', 'page1_front', 'page3_back', 'label_outside', 'label_inside'])
+      expect(isInteriorPlacement(p)).toBe(true);
+  });
+  it('keeps exterior display placements (outside_* never matches "inside")', () => {
+    for (const p of ['front', 'back', 'default', 'pocket', 'top', 'bottom', 'outside_cover', 'outside_front', 'outside_back', 'leg_front_left'])
+      expect(isInteriorPlacement(p)).toBe(false);
   });
 });
 

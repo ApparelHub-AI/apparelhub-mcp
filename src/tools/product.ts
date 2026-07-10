@@ -6,6 +6,7 @@ import { pickDimensions } from '../image/dimensions.js';
 import {
   extremeAspectWarning,
   faceLayoutFor,
+  isInteriorPlacement,
   placedStyleFor,
   pricingFloor,
   printStyleFor,
@@ -147,7 +148,11 @@ async function fetchGarment(
     area_height: num(chosen, 'area_height', 'print_area_height') ?? 2400,
     provider_ref_id: placement,
   };
-  // Every distinct non-embroidery placement, primary first. Fill goods must cover ALL of them.
+  // Every distinct non-embroidery, non-INTERIOR placement, primary first. Fill goods must cover all
+  // EXTERIOR display/structural placements (backpack top/bottom/pocket, both sock legs), but must
+  // NOT touch interior surfaces — notebook inside cover + pages, reversible-hat inside faces, care
+  // labels. Those are dropped here so they print BLANK (default), not solid-filled with the design
+  // background (which would ink every inside page of a journal). See isInteriorPlacement.
   const placements: PrintPlacement[] = [
     { provider_ref_id: placement, area_width: area.area_width, area_height: area.area_height },
   ];
@@ -155,7 +160,8 @@ async function fetchGarment(
     const p = templatePlacement(t);
     const w = num(t, 'area_width', 'print_area_width');
     const h = num(t, 'area_height', 'print_area_height');
-    if (!p || p === placement || isEmbroideryPlacement(p) || !w || !h) continue;
+    if (!p || p === placement || isEmbroideryPlacement(p) || isInteriorPlacement(p) || !w || !h)
+      continue;
     if (placements.some((existing) => existing.provider_ref_id === p)) continue;
     placements.push({ provider_ref_id: p, area_width: w, area_height: h });
   }

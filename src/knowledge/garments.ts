@@ -119,9 +119,28 @@ const DRAWSTRING_RE = /drawstring|cinch/i;
 const WALLET_WRAP_RE = /wallet|passport cover|clutch|purse/i;
 const DUFFLE_RE = /duffle|duffel/i;
 const BACKPACK_RE = /backpack|\bruck ?sack\b|knapsack/i;
-// Cylindrical drinkware: the print area wraps around the tube, so the top maps onto the shoulder,
-// the bottom onto the base, and the left/right onto the sides (out of frontal view).
-const CYLINDER_RE = /bottle|tumbler|\bflask\b|thermos|\bcan\b|\bmug\b|stein|\bcup\b|\bglass\b/i;
+// Small-diameter drinkware (mugs, steins): the front-facing arc is TIGHTER than a tall bottle's.
+// A design filling the width wraps around the sides out of frontal view — the wide Black Glossy
+// Mug 300 wrapped a centered subject off the front. Horizontal-stripe-probe calibrated (2026-07-10):
+// the front-facing arc is area x 0.25-0.75 (stripes 3-6 of 8), so the art must inset MORE than a
+// bottle's. Checked BEFORE CYLINDER_RE so mugs get the tighter inset.
+const MUG_RE = /\bmug\b|\bstein\b/i;
+// Cylindrical drinkware (bottles, tumblers, flasks, cans, glasses): the print area wraps around the
+// tube, so the top maps onto the shoulder, the bottom onto the base, and the left/right onto the
+// sides (out of frontal view). Wider front arc than a mug -> looser inset.
+const CYLINDER_RE = /bottle|tumbler|\bflask\b|thermos|\bcan\b|\bcup\b|\bglass\b/i;
+// Tote bags whose single wrap area is front + back folded at the bottom (tall aspect): the visible
+// front is the TOP ~45%, the rest wraps to the back — a subject centered on the AREA is clipped at
+// the fold (the tote 274 pilot, grid-calibrated 2026-07-10). Top-favor like the drawstring.
+const TOTE_RE = /\btote\b/i;
+// Softcover journals / notebooks: the `outside_cover` area is BACK + spine + FRONT laid flat, so a
+// design centered on the area lands ON the spine, cut by the crease (the notebook 1013 pilot). The
+// front cover is the RIGHT half (area x 0.5-1.0).
+const NOTEBOOK_RE = /notebook|journal|\bdiary\b/i;
+// Bucket hats: the outside_front crown is a small, tightly-curved dome — a full-bleed design wraps
+// over the crown top and down onto the brim (the bucket hat 654 pilot). Confine to the small flat
+// front-crown band.
+const BUCKET_HAT_RE = /bucket hat/i;
 
 export function faceLayoutFor(
   garmentName: string | undefined,
@@ -149,6 +168,16 @@ export function faceLayoutFor(
     return {
       faces: [{ x: 0.06, y: 0.05, w: 0.88, h: 0.38 }],
       note: 'Drawstring bag wrap: the area is front + back folded at the bottom — art composes into the visible front (top half), clear of the drawstring channel and grommet corners.',
+    };
+  }
+  // Tote bag wrap (Printful 274 "All-Over Print Large Tote Bag w/ Pocket", grid-calibrated
+  // 2026-07-10): the single `default` area (1701x3000, aspect 0.567) is the front + back folded at
+  // the bottom — the visible front is the TOP ~45% (a subject centered on the area is clipped at
+  // the fold). Top-favor. The pocket sibling has no layout, so it gets the solid background.
+  if (TOTE_RE.test(garmentName ?? '') && /^(default|front)$/i.test(placement) && aspect < 0.65) {
+    return {
+      faces: [{ x: 0.08, y: 0.06, w: 0.84, h: 0.33 }],
+      note: 'Tote bag wrap: the area is front + back folded at the bottom — art composes into the visible front (top ~45%), clear of the fold; the pocket sibling gets the solid background.',
     };
   }
   // Zipper-wallet / passport-cover wraps (Printify 708 "Zipper Wallet", grid-calibrated
@@ -201,12 +230,48 @@ export function faceLayoutFor(
       note: 'Backpack front: a pocket seam crosses the lower front — the design sits in the upper-body window above it so lettering and subjects are not split; the lower front + panels stay solid.',
     };
   }
-  // Cylindrical drinkware (water bottles, tumblers, mugs — e.g. Printify 646 Slim Water Bottle,
-  // grid-calibrated 2026-07-09): the print area wraps AROUND the tube. Its top maps onto the
-  // shoulder/neck, its bottom onto the base, and its left/right around the sides out of frontal
-  // view — so a design filling the area gets CLIPPED at top + bottom + sides (the MOROCCO bottle:
-  // star clipped at the top, "MOROCCO" clipped at the base). Inset the art into the flat frontal
-  // band with generous margin so no element touches an edge (verified clip-free on the bottle).
+  // Softcover journal / notebook outside cover (Printful 1013 "Softcover Journal with Inside
+  // Prints", grid-calibrated 2026-07-10): the `outside_cover` area (2968x1978) is BACK + spine +
+  // FRONT laid flat, so a design centered on the area lands ON the SPINE and is cut by the crease
+  // (the notebook 1013 pilot). The front cover is the RIGHT half (area x 0.5-1.0) — compose the art
+  // there, clear of the spine at x~0.5. The back cover + spine take the solid background; the inside
+  // cover + pages are excluded upstream (fetchGarment) so they print blank, not solid.
+  if (NOTEBOOK_RE.test(garmentName ?? '') && /^outside_cover$/i.test(placement)) {
+    return {
+      faces: [{ x: 0.54, y: 0.08, w: 0.4, h: 0.84 }],
+      note: 'Notebook/journal outside cover: back + spine + front laid flat — art composes onto the FRONT cover (right half), clear of the spine crease at the center; the back cover + spine get the solid background and the inside pages are left unprinted.',
+    };
+  }
+  // Bucket hat front crown (Printful 654 "All-Over Print Reversible Bucket Hat", grid-calibrated
+  // 2026-07-10): the outside_front area (2571x3000) is a tightly-curved dome — a full-bleed design
+  // wraps over the crown TOP (upper bands foreshortened, facing up) and down onto the BRIM (lower
+  // bands folded down), so only a small central band stays flat-frontal (the bucket hat 654 pilot).
+  // Confine the art to that small flat front-crown band. The back crown gets the solid background;
+  // inside + label surfaces are excluded upstream so they print blank.
+  if (BUCKET_HAT_RE.test(garmentName ?? '') && /^outside_front$/i.test(placement)) {
+    return {
+      faces: [{ x: 0.33, y: 0.42, w: 0.34, h: 0.16 }],
+      note: 'Bucket hat front crown: a tightly-curved dome — art confined to the small flat front-facing band so it does not wrap over the crown top or down the brim.',
+    };
+  }
+  // Small-diameter drinkware — mugs / steins (Printful 300 "Black Glossy Mug", horizontal-stripe
+  // probe calibrated 2026-07-10): the print wraps around the mug and the FRONT-FACING arc is only
+  // the central ~50% of the width (area x 0.25-0.75, stripes 3-6 of 8) — a design filling the width
+  // wraps its edges around the sides out of frontal view. Inset to the front arc (tighter than a
+  // bottle). Checked BEFORE the general cylinder branch so mugs get the tighter inset.
+  if (MUG_RE.test(garmentName ?? '')) {
+    return {
+      faces: [{ x: 0.28, y: 0.12, w: 0.44, h: 0.76 }],
+      note: 'Mug (small-diameter drinkware): the print wraps around the mug — the front-facing arc is only the central ~50% of the width, so art insets to that band (a wider inset wraps the design off the front around the sides).',
+    };
+  }
+  // Cylindrical drinkware (water bottles, tumblers, flasks, cans, glasses — e.g. Printify 646 Slim
+  // Water Bottle, grid-calibrated 2026-07-09): the print area wraps AROUND the tube. Its top maps
+  // onto the shoulder/neck, its bottom onto the base, and its left/right around the sides out of
+  // frontal view — so a design filling the area gets CLIPPED at top + bottom + sides (the MOROCCO
+  // bottle: star clipped at the top, "MOROCCO" clipped at the base). Inset the art into the flat
+  // frontal band with generous margin so no element touches an edge (verified clip-free on the
+  // bottle). Wider front arc than a mug -> looser inset than MUG.
   if (CYLINDER_RE.test(garmentName ?? '')) {
     return {
       faces: [{ x: 0.16, y: 0.13, w: 0.68, h: 0.72 }],
@@ -214,6 +279,17 @@ export function faceLayoutFor(
     };
   }
   return undefined;
+}
+
+/** Interior / non-display placements a fill good must NOT print: inside surfaces (notebook
+ *  inside cover, reversible-hat inside_front/inside_back), individual pages (page1_front...), and
+ *  care/brand labels (label_outside/label_inside). These are EXCLUDED from the fill placement set
+ *  so they print BLANK (default) — never solid-filled with the design's background, which would ink
+ *  every inside page of a journal or the reverse of a reversible hat. Exterior display placements
+ *  (front/back/top/bottom/pocket, outside_cover, outside_front/outside_back) are NOT interior:
+ *  "outside" does not contain "inside", so it never matches. */
+export function isInteriorPlacement(placement: string): boolean {
+  return /inside|label|page\d/i.test(placement);
 }
 
 /** A fill area with an extreme aspect and NO known face layout is likely a wrap/fold template —

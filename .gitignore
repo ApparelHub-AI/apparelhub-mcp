@@ -10,3 +10,4 @@ coverage/
 # Prototype Lambda bundle (built artifact)
 deploy/prototype/build/
 deploy/hosted/build/
+.idea/
