@@ -16,7 +16,6 @@ const MAKE_TRANSPARENT = fileURLToPath(
 );
 const IMAGE_STATS = fileURLToPath(new URL('../../python/image_stats.py', import.meta.url));
 const THREAD_COLORS = fileURLToPath(new URL('../../python/thread_colors.py', import.meta.url));
-const RECOMPOSE_FILL = fileURLToPath(new URL('../../python/recompose_fill.py', import.meta.url));
 const ENSURE_RESOLUTION = fileURLToPath(new URL('../../python/ensure_resolution.py', import.meta.url));
 const PYTHON = process.env.APPARELHUB_MCP_PYTHON || 'python3';
 
@@ -63,17 +62,6 @@ export interface RecomposeFillOptions {
   transparent?: boolean;
 }
 
-export interface RecomposeFillResult {
-  outputPath: string;
-  /** 'composited' = art re-laid on a derived background; 'cover' = photo cover-cropped;
-   *  'solid' = background-only canvas (sibling placements of all-over goods). */
-  mode: 'composited' | 'cover' | 'solid';
-  /** The chosen background hex (composited mode only). */
-  background?: string;
-  width?: number;
-  height?: number;
-}
-
 export interface EnsureResolutionResult {
   outputPath: string;
   /** true when the design was actually upscaled (false = already >= the floor, unchanged). */
@@ -92,25 +80,6 @@ export interface Imaging {
   ocr(imagePath: string): Promise<{ available: boolean; text: string }>;
   /** Dominant design colors mapped to Printful's fixed embroidery thread palette (CIE Lab). */
   threadColors(inputPath: string, max?: number): Promise<string[]>;
-  /**
-   * Recompose a design to FILL a print face edge-to-edge at the given area aspect: keyed/green
-   * art gets centered on an aesthetically matching background; opaque photos get cover-cropped.
-   * `options.face` confines the art to the visible-face rectangle of a wrap-style area;
-   * `options.rotate180` flips the art for placements that render the file inverted.
-   */
-  recomposeFill(
-    inputPath: string,
-    areaWidth: number,
-    areaHeight: number,
-    options?: RecomposeFillOptions,
-  ): Promise<RecomposeFillResult>;
-  /** Background-only canvas for sibling placements of all-over goods (no raw-fabric surfaces). */
-  solidFill(
-    inputPath: string,
-    areaWidth: number,
-    areaHeight: number,
-    background?: string,
-  ): Promise<RecomposeFillResult>;
   /** Upscale a design to a minimum long-side resolution (Lanczos, white-premultiplied) so it
    *  clears the fulfillment platform's low-resolution QC gate. No-op if already large enough. */
   ensureResolution(inputPath: string, minLongSide: number): Promise<EnsureResolutionResult>;
@@ -272,95 +241,6 @@ export class LocalImaging implements Imaging {
         suggestion: 'Pass thread_colors explicitly from the Printful 15-color palette.',
       });
     }
-  }
-
-  async recomposeFill(
-    inputPath: string,
-    areaWidth: number,
-    areaHeight: number,
-    options?: RecomposeFillOptions,
-  ): Promise<RecomposeFillResult> {
-    const out = join(await this.dir(), `fill-${Date.now()}-${Math.floor(Math.random() * 1e6)}.png`);
-    const args = [RECOMPOSE_FILL, inputPath, out, '--aspect', `${areaWidth}:${areaHeight}`];
-    for (const f of options?.faces ?? []) {
-      args.push('--face', `${f.x}:${f.y}:${f.w}:${f.h}${f.rotate180 ? ':1' : ''}`);
-    }
-    if (options?.transparent) args.push('--transparent');
-    let r: RunResult;
-    try {
-      r = await run(PYTHON, args);
-    } catch {
-      throw pythonMissing();
-    }
-    if (r.code !== 0) {
-      if (looksLikeMissingInterpreter(r)) throw pythonMissing();
-      throw new AhError({
-        code: 'recompose_failed',
-        message: `Fill recompose failed: ${r.stderr.trim() || `exit ${r.code}`}`,
-        suggestion:
-          'Retry with print_style: "placed", or verify the design downloads and decodes correctly.',
-      });
-    }
-    let meta: { mode?: string; background?: string | null; width?: number; height?: number } = {};
-    try {
-      meta = JSON.parse(r.stdout.trim()) as typeof meta;
-    } catch {
-      // Metadata is advisory; the output file is the contract.
-    }
-    return {
-      outputPath: out,
-      mode: meta.mode === 'cover' ? 'cover' : meta.mode === 'solid' ? 'solid' : 'composited',
-      background: meta.background ?? undefined,
-      width: meta.width,
-      height: meta.height,
-    };
-  }
-
-  /**
-   * Background-only canvas at the given aspect: the fill file for SIBLING placements of an
-   * all-over product (backpack top/bottom/pocket) so no printable surface is left as raw
-   * fabric. `background` pins the exact hex (from the primary composition); without it the
-   * color is derived from the artwork at `inputPath`.
-   */
-  async solidFill(
-    inputPath: string,
-    areaWidth: number,
-    areaHeight: number,
-    background?: string,
-  ): Promise<RecomposeFillResult> {
-    const out = join(
-      await this.dir(),
-      `solid-${Date.now()}-${Math.floor(Math.random() * 1e6)}.png`,
-    );
-    const args = [RECOMPOSE_FILL, inputPath, out, '--aspect', `${areaWidth}:${areaHeight}`, '--solid'];
-    if (background) args.push('--bg', background);
-    let r: RunResult;
-    try {
-      r = await run(PYTHON, args);
-    } catch {
-      throw pythonMissing();
-    }
-    if (r.code !== 0) {
-      if (looksLikeMissingInterpreter(r)) throw pythonMissing();
-      throw new AhError({
-        code: 'recompose_failed',
-        message: `Solid fill failed: ${r.stderr.trim() || `exit ${r.code}`}`,
-        suggestion: 'Retry with print_style: "placed", or pass a background color.',
-      });
-    }
-    let meta: { background?: string | null; width?: number; height?: number } = {};
-    try {
-      meta = JSON.parse(r.stdout.trim()) as typeof meta;
-    } catch {
-      // Metadata is advisory; the output file is the contract.
-    }
-    return {
-      outputPath: out,
-      mode: 'solid',
-      background: meta.background ?? background,
-      width: meta.width,
-      height: meta.height,
-    };
   }
 
   async ensureResolution(inputPath: string, minLongSide: number): Promise<EnsureResolutionResult> {

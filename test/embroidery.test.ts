@@ -6,7 +6,6 @@ import {
   threadColorsOptionId,
   PRINTFUL_THREAD_PALETTE,
 } from '../src/knowledge/embroidery.js';
-import { printStyleFor } from '../src/knowledge/garments.js';
 
 describe('embroidery knowledge', () => {
   it('maps placements to Printful thread-color option ids (all three shapes live-verified)', () => {
@@ -42,42 +41,5 @@ describe('embroidery knowledge', () => {
   it('rejects off-palette colors, naming the palette', () => {
     expect(() => normalizeThreadColors(['#123456'])).toThrowError(/palette/i);
     expect(() => normalizeThreadColors([])).toThrowError();
-  });
-});
-
-describe('printStyleFor: face goods default to fill, apparel stays placed', () => {
-  it.each([
-    ['Canvas', 'fill'],
-    ['Enhanced Matte Paper Poster', 'fill'],
-    ['Laptop Backpack', 'fill'],
-    ['All-Over Print Duffle Bag', 'fill'],
-    ['Crew Socks', 'fill'],
-    ['Beach Towel', 'fill'],
-    ['Throw Pillow', 'fill'],
-    ['Tough Case for iPhone®', 'fill'],
-    ['Spiral Notebook', 'fill'],
-    ['Drawstring Bag', 'fill'],
-    ['Fleece Blanket', 'fill'],
-  ] as const)('%s -> %s', (name, want) => {
-    expect(printStyleFor(name)).toBe(want);
-  });
-
-  it.each([
-    // Brand collision: "Bella + Canvas" contains "canvas" — apparel MUST win.
-    ['Unisex Staple T-Shirt | Bella + Canvas 3001', 'placed'],
-    ['Unisex Sponge Fleece Hoodie | Bella + Canvas 3719', 'placed'],
-    ['Unisex Tank Top', 'placed'],
-    ['Unisex Long Sleeve Tee', 'placed'],
-    ['Closed-Back Trucker Cap | Flexfit 6511', 'placed'],
-    ['Cuffed Beanie | Yupoong 1501KC', 'placed'],
-    ['White Glossy Mug', 'placed'],
-    ['Stainless Steel Water Bottle', 'placed'],
-    ['Whiskey Rocks Glass', 'placed'],
-  ] as const)('%s -> %s', (name, want) => {
-    expect(printStyleFor(name)).toBe(want);
-  });
-
-  it('defaults to placed when the name is unknown', () => {
-    expect(printStyleFor(undefined)).toBe('placed');
   });
 });
