@@ -9,6 +9,32 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-11
+
+### Changed (major)
+
+**Composition + placement now run on the platform.** `ship_product` / `create_product` send the
+design + garment ref + print style to the platform's print-data preparation service and receive the
+fully-composed per-placement `print_data` (Garment Intelligence epic apparelhub-ai#549 Phase 3 +
+mcp#101). The client no longer holds the per-garment layout knowledge — so new placement
+calibrations reach every client as a platform data update, with no npm release.
+
+- **Removed** the bundled per-garment layout table + the local composition pipeline
+  (`knowledge/garments.ts` face layouts, the layout resolver, `image/dimensions.ts`, the Python
+  `recompose_fill.py`, and the `recomposeFill`/`solidFill` imaging methods). The resolution floor
+  (`ensure_resolution.py`) and chroma keying (`make_transparent`) stay client-side.
+- **Embroidery thread-color derivation stays client-side** (attached to the create payload as
+  before; the mockup stays options-free).
+- **Tool surface is byte-identical** — no schema/description changes, no Always-allow resets for
+  connector users.
+- **Source maps are no longer published** with the package.
+
+### Migration
+
+- `npx @apparelhub/mcp-server` now **requires** the platform print-data service (it is part of the
+  standard agent API your key already uses). Older 0.3.x releases keep composing locally with their
+  bundled tables — they just don't receive new placement improvements.
+
 ## [0.3.14] - 2026-07-10
 
 ### Changed

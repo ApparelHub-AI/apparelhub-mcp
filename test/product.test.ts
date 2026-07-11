@@ -26,12 +26,6 @@ function stubImaging(overrides: Partial<Imaging> = {}): Imaging {
     threadColors: async () => {
       throw new Error('not expected in this test');
     },
-    recomposeFill: async () => {
-      throw new Error('not expected in this test');
-    },
-    solidFill: async () => {
-      throw new Error('not expected in this test');
-    },
     ensureResolution: async () => ({ outputPath: '/tmp/fake-hires.png', upscaled: false }),
     cleanup: async () => {},
     ...overrides,
@@ -60,10 +54,25 @@ const garmentDetail = {
   },
 };
 
+// prepare-print-data mocks (mcp#101 / v0.4.0): the platform composes per-placement print_data.
+const PREP_POST = { status: 'pending', job_uuid: 'pjob' };
+function prepDone(provider_ref_id: string, area_width: number, area_height: number,
+                  extra: Record<string, unknown> = {}) {
+  return {
+    status: 'completed', image_uuid: 'd1', image_url: 'https://cdn.example/d.png',
+    print_style: 'placed', placements_covered: [provider_ref_id], warnings: [],
+    print_data: [{ provider_ref_id, area_width, area_height, width: area_width,
+      height: area_height, top: 0, left: 0, image_url: 'https://cdn.example/d.png', ...extra }],
+  };
+}
+const prepFront = () => prepDone('front', 1800, 2400);
+const prepEmbroidery = () => prepDone('embroidery_front_large', 1888, 640);
+
 describe('ship_product', () => {
   it('runs the full pipeline in order and defaults channel sync to draft', async () => {
     const { api, calls } = apiFrom([
       garmentDetail, // GET garment detail
+      PREP_POST, prepFront(), // prepare-print-data POST + poll
       { job_uuid: 'job1' }, // POST mockup preview
       { status: 'completed', previews: [{ preview_url: 'https://cdn.example/m.png' }] }, // GET job (2-phase)
       { uuid: 'p1' }, // POST product/create
@@ -140,6 +149,7 @@ describe('ship_product', () => {
     };
     const { api, calls } = apiFrom([
       twoColorGarment, // fetchGarment
+      PREP_POST, prepFront(),
       { job_uuid: 'job1' }, // mockup preview POST
       { status: 'completed', previews: [{ preview_url: 'https://cdn.example/m.png' }] }, // job poll
       { uuid: 'p1' }, // create
@@ -217,6 +227,7 @@ describe('ship_product: embroidery garments (cap/beanie incident)', () => {
   it('routes the print to the embroidery placement with real dims and attaches thread colors on create (not on the mockup)', async () => {
     const { api, calls } = apiFrom([
       capGarment, // fetchGarment (raw 596 shape)
+      PREP_POST, prepEmbroidery(),
       { job_uuid: 'j1' }, // mockup POST
       { status: 'completed', previews: [{ preview_url: 'https://cdn.example/cap.png' }] }, // poll
       { uuid: 'p1' }, // create
@@ -267,6 +278,7 @@ describe('ship_product: embroidery garments (cap/beanie incident)', () => {
   it('derives thread colors from the design when none are passed', async () => {
     const { api, calls } = apiFrom([
       capGarment,
+      PREP_POST, prepEmbroidery(),
       { job_uuid: 'j1' },
       { status: 'completed', previews: [{ preview_url: 'https://cdn.example/cap.png' }] },
       { uuid: 'p1' },
@@ -310,6 +322,7 @@ describe('ship_product: embroidery garments (cap/beanie incident)', () => {
     };
     const { api, calls } = apiFrom([
       teeViaVariantTemplates,
+      PREP_POST, prepDone('front', 1010, 1346),
       { job_uuid: 'j1' },
       { status: 'completed', previews: [{ preview_url: 'https://cdn.example/t.png' }] },
       { uuid: 'p1' },
@@ -336,385 +349,11 @@ describe('ship_product: embroidery garments (cap/beanie incident)', () => {
   });
 });
 
-describe('ship_product: fill print style (canvas/backpack incident)', () => {
-  it('auto-fills face goods: recomposes the design, uploads it, and prints edge-to-edge', async () => {
-    const canvasGarment = {
-      product: {
-        name: 'Canvas',
-        variants: [{ id: 91001, color: 'White', size: '12x16', cost: 9 }],
-      },
-    };
-    const { api, calls } = apiFrom([
-      canvasGarment, // fetchGarment
-      { image_uuid: 'd2', url: 'https://cdn.example/d2.png' }, // transform upload (recomposed)
-      { job_uuid: 'j1' }, // mockup POST
-      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/c.png' }] }, // poll
-      { uuid: 'p1' }, // create
-      {}, // variant POST
-    ]);
-    const res = (await shipProduct.handler(
-      {
-        design_uuid: 'd1',
-        design_url: 'https://cdn.example/d.png',
-        garment: { provider_uuid: 'pfy', product_ref_id: '555' },
-        variants: [{ color: 'White', sizes: ['12x16'] }],
-        pricing: { price: 44.99 },
-        product_meta: { name: 'WC26 QF - SPAIN - Canvas', description: 'c' },
-        // no print_style: 'Canvas' must AUTO-classify as fill
-      },
-      fakeContext(
-        api,
-        stubImaging({
-          recomposeFill: async () => ({
-            outputPath: '/tmp/fill.png',
-            mode: 'composited',
-            background: '#0B1E3C',
-          }),
-        }),
-      ),
-    )) as any;
-
-    expect(res.print_style).toBe('fill');
-    expect(res.fill_background).toBe('#0B1E3C');
-
-    // The recomposed design was uploaded as a new revision of the design...
-    const transformCall = calls.find((c) => c.url.includes('/images/generated/d1/transform'));
-    expect(transformCall).toBeDefined();
-
-    // ...and BOTH the mockup and the product use the recomposed image, full-bleed.
-    const mockupCall = calls.find((c) => c.url.endsWith('/merchandise/product/preview'));
-    const mockupBody = JSON.parse(mockupCall?.init?.body as string);
-    expect(mockupBody.generated_image_uuid).toBe('d2');
-    expect(mockupBody.templates[0].image_url).toBe('https://cdn.example/d2.png');
-    expect(mockupBody.templates[0].width).toBe(mockupBody.templates[0].area_width);
-    expect(mockupBody.templates[0].height).toBe(mockupBody.templates[0].area_height);
-    expect(mockupBody.templates[0].top).toBe(0);
-    expect(mockupBody.templates[0].left).toBe(0);
-
-    const createCall = calls.find((c) => c.url.endsWith('/product/create'));
-    const createBody = JSON.parse(createCall?.init?.body as string);
-    expect(createBody.generated_image_uuid).toBe('d2');
-    expect(createBody.print_data[0].image_url).toBe('https://cdn.example/d2.png');
-  });
-
-  it('sock: covers ALL leg placements with the SAME art file, composed rotated in the frontal band', async () => {
-    // Printful 882: templates live per-VARIANT; 4 same-size leg strips; variants have NO color.
-    const sockGarment = {
-      product: {
-        name: 'Cushioned Crew Socks',
-        variants: [
-          {
-            id: 22786,
-            size: 'S',
-            cost: 7.5,
-            templates: [
-              { provider_location_ref_id: 'leg_front_right', provider_ref_id: 905474, area_width: 632, area_height: 2620 },
-              { provider_location_ref_id: 'leg_front_left', provider_ref_id: 905473, area_width: 632, area_height: 2620 },
-              { provider_location_ref_id: 'leg_back_right', provider_ref_id: 905472, area_width: 632, area_height: 2620 },
-              { provider_location_ref_id: 'leg_back_left', provider_ref_id: 905471, area_width: 632, area_height: 2620 },
-            ],
-          },
-        ],
-      },
-    };
-    const recomposeCalls: unknown[] = [];
-    const { api, calls } = apiFrom([
-      sockGarment, // fetchGarment
-      { image_uuid: 'd2', url: 'https://cdn.example/d2.png' }, // transform upload (front art, rotated)
-      { image_uuid: 'd4', url: 'https://cdn.example/d4.png' }, // transform upload (back art, upright)
-      { job_uuid: 'j1' }, // mockup POST
-      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/c.png' }] }, // poll
-      { uuid: 'p1' }, // create
-      {}, // variant POST
-    ]);
-    const res = (await shipProduct.handler(
-      {
-        design_uuid: 'd1',
-        design_url: 'https://cdn.example/d.png',
-        garment: { provider_uuid: 'pf', product_ref_id: '882' },
-        variants: [{ color: 'Navy', sizes: ['S'] }],
-        pricing: { price: 24.99 },
-        product_meta: { name: 'WC26 QF - ENGLAND - Socks', description: 's' },
-      },
-      fakeContext(
-        api,
-        stubImaging({
-          recomposeFill: async (...args: unknown[]) => {
-            recomposeCalls.push(args);
-            return { outputPath: '/tmp/fill.png', mode: 'composited' as const, background: '#0C0C4C' };
-          },
-        }),
-      ),
-    )) as any;
-
-    expect(res.print_style).toBe('fill');
-    // TWO compositions: fronts render the file rotated 180deg (file-top = toe), backs render it
-    // upright (file-top = cuff) — one rotated file on all four prints upside down on the backs.
-    expect(recomposeCalls).toHaveLength(2);
-    const frontOpts = (recomposeCalls[0] as unknown[])[3] as {
-      faces?: { x: number; w: number; rotate180?: boolean }[];
-    };
-    expect(frontOpts?.faces?.[0]?.rotate180).toBe(true);
-    expect(frontOpts?.faces?.[0]?.w).toBeLessThan(0.7);
-    const backOpts = (recomposeCalls[1] as unknown[])[3] as {
-      faces?: { rotate180?: boolean }[];
-    };
-    expect(backOpts?.faces?.[0]?.rotate180).toBeFalsy();
-
-    // ALL 4 placements carry a composed art file — one printed strip out of four is what
-    // shipped the ENGLAND sock with three raw-white surfaces.
-    const createCall = calls.find((c) => c.url.endsWith('/product/create'));
-    const createBody = JSON.parse(createCall?.init?.body as string);
-    expect(createBody.print_data).toHaveLength(4);
-    const byPlacement = Object.fromEntries(
-      createBody.print_data.map((t: any) => [t.provider_ref_id, t.image_url]),
-    );
-    expect(byPlacement).toEqual({
-      leg_front_right: 'https://cdn.example/d2.png',
-      leg_front_left: 'https://cdn.example/d2.png',
-      leg_back_right: 'https://cdn.example/d4.png',
-      leg_back_left: 'https://cdn.example/d4.png',
-    });
-    for (const t of createBody.print_data) {
-      expect(t.width).toBe(632);
-      expect(t.height).toBe(2620);
-    }
-    // Colorless catalog: variants matched by size alone (the phone-case lesson generalized).
-    expect(res.variants_added).toBe(1);
-
-    // The mockup previews the same 4 placements.
-    const mockupCall = calls.find((c) => c.url.endsWith('/merchandise/product/preview'));
-    const mockupBody = JSON.parse(mockupCall?.init?.body as string);
-    expect(mockupBody.templates).toHaveLength(4);
-  });
-
-  it('backpack: differing sibling placements (top/bottom/pocket) get ONE shared solid background file', async () => {
-    const backpackGarment = {
-      product: {
-        name: 'All-Over Print Backpack',
-        variants: [
-          {
-            id: 8279,
-            size: 'One size',
-            cost: 32,
-            templates: [
-              { provider_location_ref_id: 'front', provider_ref_id: 4294, area_width: 1747, area_height: 2468 },
-              { provider_location_ref_id: 'top', provider_ref_id: 4295, area_width: 3000, area_height: 857 },
-              { provider_location_ref_id: 'bottom', provider_ref_id: 4296, area_width: 2999, area_height: 535 },
-              { provider_location_ref_id: 'pocket', provider_ref_id: 4297, area_width: 2060, area_height: 1269 },
-            ],
-          },
-        ],
-      },
-    };
-    const solidCalls: unknown[] = [];
-    const { api, calls } = apiFrom([
-      backpackGarment, // fetchGarment
-      { image_uuid: 'd2', url: 'https://cdn.example/d2.png' }, // transform upload (art)
-      { image_uuid: 'd3', url: 'https://cdn.example/d3-solid.png' }, // transform upload (solid bg)
-      { job_uuid: 'j1' }, // mockup POST
-      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/c.png' }] }, // poll
-      { uuid: 'p1' }, // create
-      {}, // variant POST
-    ]);
-    const res = (await shipProduct.handler(
-      {
-        design_uuid: 'd1',
-        design_url: 'https://cdn.example/d.png',
-        garment: { provider_uuid: 'pf', product_ref_id: '279' },
-        variants: [{ color: 'Black', sizes: ['One size'] }],
-        pricing: { price: 64.99 },
-        product_meta: { name: 'WC26 QF - SPAIN - Backpack', description: 'b' },
-      },
-      fakeContext(
-        api,
-        stubImaging({
-          recomposeFill: async () => ({
-            outputPath: '/tmp/fill.png',
-            mode: 'composited' as const,
-            background: '#0C0C0C',
-          }),
-          solidFill: async (...args: unknown[]) => {
-            solidCalls.push(args);
-            return { outputPath: '/tmp/solid.png', mode: 'solid' as const, background: '#0C0C0C' };
-          },
-        }),
-      ),
-    )) as any;
-
-    expect(res.print_style).toBe('fill');
-    // One solid canvas serves every differing sibling (a solid color stretches losslessly)...
-    expect(solidCalls).toHaveLength(1);
-    expect((solidCalls[0] as unknown[])[3]).toBe('#0C0C0C'); // pinned to the art's background
-    // ...and the print covers all 4 surfaces: art on front, background on top/bottom/pocket.
-    const createCall = calls.find((c) => c.url.endsWith('/product/create'));
-    const createBody = JSON.parse(createCall?.init?.body as string);
-    const byPlacement = Object.fromEntries(
-      createBody.print_data.map((t: any) => [t.provider_ref_id, t.image_url]),
-    );
-    expect(byPlacement).toEqual({
-      front: 'https://cdn.example/d2.png',
-      top: 'https://cdn.example/d3-solid.png',
-      bottom: 'https://cdn.example/d3-solid.png',
-      pocket: 'https://cdn.example/d3-solid.png',
-    });
-  });
-
-  it('notebook: prints ONLY the outside cover — inside cover + pages are excluded, not solid-filled', async () => {
-    // Printful 1013: outside_cover is back+spine+front (design goes on the front/right half); the
-    // inside cover + 6 page placements must print BLANK, never solid-filled with the design bg.
-    const notebookGarment = {
-      product: {
-        name: 'Softcover Journal with Inside Prints',
-        variants: [
-          {
-            id: 31976,
-            size: 'One size',
-            cost: 12,
-            templates: [
-              { provider_location_ref_id: 'outside_cover', provider_ref_id: 700, area_width: 2968, area_height: 1978 },
-              { provider_location_ref_id: 'inside_cover', provider_ref_id: 701, area_width: 2968, area_height: 1978 },
-              { provider_location_ref_id: 'page1_front', provider_ref_id: 702, area_width: 1400, area_height: 1978 },
-              { provider_location_ref_id: 'page1_back', provider_ref_id: 703, area_width: 1400, area_height: 1978 },
-              { provider_location_ref_id: 'page2_front', provider_ref_id: 704, area_width: 1400, area_height: 1978 },
-            ],
-          },
-        ],
-      },
-    };
-    const solidCalls: unknown[] = [];
-    const { api, calls } = apiFrom([
-      notebookGarment, // fetchGarment
-      { image_uuid: 'd2', url: 'https://cdn.example/d2.png' }, // transform upload (composed cover art)
-      { job_uuid: 'j1' }, // mockup POST
-      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/c.png' }] }, // poll
-      { uuid: 'p1' }, // create
-      {}, // variant POST
-    ]);
-    const res = (await shipProduct.handler(
-      {
-        design_uuid: 'd1',
-        design_url: 'https://cdn.example/d.png',
-        garment: { provider_uuid: 'pf', product_ref_id: '1013' },
-        variants: [{ color: 'Black', sizes: ['One size'] }],
-        pricing: { price: 24.99 },
-        product_meta: { name: 'QC - Journal', description: 'j' },
-      },
-      fakeContext(
-        api,
-        stubImaging({
-          recomposeFill: async () => ({ outputPath: '/tmp/fill.png', mode: 'composited' as const, background: '#101010' }),
-          solidFill: async (...args: unknown[]) => {
-            solidCalls.push(args);
-            return { outputPath: '/tmp/solid.png', mode: 'solid' as const, background: '#101010' };
-          },
-        }),
-      ),
-    )) as any;
-
-    expect(res.print_style).toBe('fill');
-    // ONLY the outside cover is printed — no solid fill on any inside/page surface.
-    expect(res.placements_covered).toEqual(['outside_cover']);
-    expect(solidCalls).toHaveLength(0);
-    const createBody = JSON.parse(calls.find((c) => c.url.endsWith('/product/create'))?.init?.body as string);
-    expect(createBody.print_data).toHaveLength(1);
-    expect(createBody.print_data[0].provider_ref_id).toBe('outside_cover');
-    // the mockup previews only the cover too
-    const mockupBody = JSON.parse(calls.find((c) => c.url.endsWith('/merchandise/product/preview'))?.init?.body as string);
-    expect(mockupBody.templates).toHaveLength(1);
-  });
-
-  it('drawstring wrap: art composes into the visible-front face region, never across the fold', async () => {
-    const bagGarment = {
-      product: {
-        name: 'Drawstring Bag',
-        variants: [
-          {
-            provider_ref_id: '61365',
-            size: 'One size',
-            templates: [
-              { provider_location_ref_id: 'front', provider_ref_id: '61365', area_width: 4950, area_height: 11100 },
-            ],
-          },
-        ],
-      },
-    };
-    const recomposeCalls: unknown[] = [];
-    const { api, calls } = apiFrom([
-      bagGarment,
-      { image_uuid: 'd2', url: 'https://cdn.example/d2.png' },
-      { job_uuid: 'j1' },
-      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/c.png' }] },
-      { uuid: 'p1' },
-      {},
-    ]);
-    const res = (await shipProduct.handler(
-      {
-        design_uuid: 'd1',
-        design_url: 'https://cdn.example/d.png',
-        garment: { provider_uuid: 'pfy', product_ref_id: '414' },
-        variants: [{ color: 'Black', sizes: ['One size'] }],
-        pricing: { price: 21.99 },
-        product_meta: { name: 'WC26 QF - ENGLAND - Drawstring Bag', description: 'd' },
-      },
-      fakeContext(
-        api,
-        stubImaging({
-          recomposeFill: async (...args: unknown[]) => {
-            recomposeCalls.push(args);
-            return { outputPath: '/tmp/fill.png', mode: 'composited' as const, background: '#12224C' };
-          },
-        }),
-      ),
-    )) as any;
-
-    expect(res.print_style).toBe('fill');
-    const opts = (recomposeCalls[0] as unknown[])[3] as {
-      faces?: { y: number; h: number; rotate180?: boolean }[];
-    };
-    // The area is front + back folded at the bottom: art stays in the top (visible-front) band.
-    expect(opts?.faces?.[0]).toBeDefined();
-    expect(opts!.faces![0]!.y + opts!.faces![0]!.h).toBeLessThan(0.5);
-    expect(opts?.faces?.[0]?.rotate180).toBeUndefined();
-    const createCall = calls.find((c) => c.url.endsWith('/product/create'));
-    const createBody = JSON.parse(createCall?.init?.body as string);
-    expect(createBody.print_data).toHaveLength(1);
-    expect(createBody.print_data[0].width).toBe(4950); // file still fills the whole area
-    expect(createBody.print_data[0].height).toBe(11100);
-  });
-
-  it('respects an explicit print_style: "placed" on a face good', async () => {
-    const canvasGarment = {
-      product: { name: 'Canvas', variants: [{ id: 91001, color: 'White', size: '12x16', cost: 9 }] },
-    };
-    const { api, calls } = apiFrom([
-      canvasGarment,
-      { job_uuid: 'j1' },
-      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/c.png' }] },
-      { uuid: 'p1' },
-      {},
-    ]);
-    const res = (await shipProduct.handler(
-      {
-        design_uuid: 'd1',
-        design_url: 'https://cdn.example/d.png',
-        garment: { provider_uuid: 'pfy', product_ref_id: '555' },
-        variants: [{ color: 'White', sizes: ['12x16'] }],
-        pricing: { price: 44.99 },
-        product_meta: { name: 'x', description: 'y' },
-        print_style: 'placed',
-      },
-      fakeContext(api), // throwing imaging: placed must never touch the local toolchain
-    )) as any;
-    expect(res.print_style).toBe('placed');
-    expect(calls.some((c) => c.url.includes('/transform'))).toBe(false);
-  });
-});
-
 describe('create_product', () => {
   it('generate_mockup:true renders a mockup by auto-deriving variants from the catalog (no mockup_variant_ids needed)', async () => {
     const { api, calls } = apiFrom([
       garmentDetail, // fetchGarment
+      PREP_POST, prepFront(),
       { job_uuid: 'j1' }, // POST mockup preview
       { status: 'completed', previews: [{ preview_url: 'https://cdn.example/m.png' }] }, // GET job poll
       { uuid: 'p1' }, // POST product/create
@@ -982,318 +621,3 @@ describe('delete_product', () => {
   });
 });
 
-describe('ship_product: placed placement centers on non-apparel (MOROCCO phone-case incident)', () => {
-  it('centers the design on a phone case instead of applying tee collar padding', async () => {
-    const caseGarment = {
-      product: {
-        name: 'Clear Case for iPhone®',
-        variants: [
-          {
-            id: 9181,
-            size: 'iPhone 15',
-            cost: 8.95,
-            templates: [
-              { provider_location_ref_id: 'default', provider_ref_id: 4181, area_width: 1160, area_height: 2414 },
-            ],
-          },
-        ],
-      },
-    };
-    const { api, calls } = apiFrom([
-      caseGarment, // fetchGarment
-      { job_uuid: 'j1' }, // mockup POST
-      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/c.png' }] }, // poll
-      { uuid: 'p1' }, // create
-      {}, // variant POST
-    ]);
-    const res = (await shipProduct.handler(
-      {
-        design_uuid: 'd1',
-        design_url: 'https://cdn.example/d.png',
-        garment: { provider_uuid: 'pf', product_ref_id: '181' },
-        variants: [{ color: 'Clear', sizes: ['iPhone 15'] }],
-        pricing: { price: 19.99 },
-        product_meta: { name: 'WC26 QF - MOROCCO - Phone Case', description: 'c' },
-        print_style: 'placed',
-      },
-      fakeContext(api),
-    )) as any;
-
-    expect(res.print_style).toBe('placed');
-    // Colorless catalog resolves by size alone (see resolveVariants tests).
-    expect(res.variants_added).toBe(1);
-    const createCall = calls.find((c) => c.url.endsWith('/product/create'));
-    const t = JSON.parse(createCall?.init?.body as string).print_data[0];
-    // 88% width, VERTICALLY CENTERED: top = (2414 - 1020) / 2 — not the 13% collar padding
-    // (top=313) that put the crest in the top third of the case.
-    expect(t.width).toBe(1020);
-    expect(t.top).toBe(697);
-    expect(t.left).toBe(70);
-  });
-});
-
-describe('ship_product: multi-face merch — no blank faces (WC26 headphones/wallet/duffle incident)', () => {
-  it('wallet: composes the design onto BOTH faces (front + back) on a transparent canvas', async () => {
-    const walletGarment = {
-      product: {
-        name: 'Zipper Wallet',
-        variants: [
-          {
-            provider_ref_id: '73217',
-            color: 'White',
-            size: 'One size',
-            templates: [
-              { provider_location_ref_id: 'front', provider_ref_id: '73217', area_width: 2482, area_height: 2756 },
-            ],
-          },
-        ],
-      },
-    };
-    const recomposeCalls: unknown[] = [];
-    const { api, calls } = apiFrom([
-      walletGarment,
-      { image_uuid: 'd2', url: 'https://cdn.example/d2.png' }, // transform upload (2-face composed)
-      { job_uuid: 'j1' },
-      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/c.png' }] },
-      { uuid: 'p1' },
-      {},
-    ]);
-    await shipProduct.handler(
-      {
-        design_uuid: 'd1',
-        design_url: 'https://cdn.example/d.png',
-        garment: { provider_uuid: 'pfy', product_ref_id: '708' },
-        variants: [{ color: 'White', sizes: ['One size'] }],
-        pricing: { price: 34.99 },
-        product_meta: { name: 'WC26 QF - BELGIUM - Wallet', description: 'w' },
-        print_style: 'placed', // the task passes placed explicitly; wrap must still per-face compose
-      },
-      fakeContext(
-        api,
-        stubImaging({
-          recomposeFill: async (...args: unknown[]) => {
-            recomposeCalls.push(args);
-            return { outputPath: '/tmp/wallet.png', mode: 'composited' as const };
-          },
-        }),
-      ),
-    );
-
-    // Composed once, transparent, onto TWO faces (front upright + back rotated).
-    expect(recomposeCalls).toHaveLength(1);
-    const opts = (recomposeCalls[0] as unknown[])[3] as {
-      faces?: { rotate180?: boolean }[];
-      transparent?: boolean;
-    };
-    expect(opts?.transparent).toBe(true);
-    expect(opts?.faces).toHaveLength(2);
-    expect(opts?.faces?.[1]?.rotate180).toBe(true);
-    const createBody = JSON.parse(calls.find((c) => c.url.endsWith('/product/create'))?.init?.body as string);
-    expect(createBody.print_data[0].image_url).toBe('https://cdn.example/d2.png');
-  });
-
-  it('headphones: replicates the placed design across BOTH ear cups (Left + Right)', async () => {
-    const phonesGarment = {
-      product: {
-        name: 'AirPods Max Shell Case',
-        variants: [
-          {
-            provider_ref_id: '114956',
-            size: 'AirPods Max 1st / 2nd Gen',
-            templates: [
-              { provider_location_ref_id: 'Left', provider_ref_id: '114956', area_width: 1234, area_height: 1644 },
-              { provider_location_ref_id: 'Right', provider_ref_id: '114957', area_width: 1234, area_height: 1644 },
-            ],
-          },
-        ],
-      },
-    };
-    const { api, calls } = apiFrom([
-      phonesGarment,
-      { image_uuid: 'd2', url: 'https://cdn.example/d2.png' }, // transform (inset composed cup art)
-      { job_uuid: 'j1' },
-      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/c.png' }] },
-      { uuid: 'p1' },
-      {},
-    ]);
-    const res = (await shipProduct.handler(
-      {
-        design_uuid: 'd1',
-        design_url: 'https://cdn.example/d.png',
-        garment: { provider_uuid: 'pfy', product_ref_id: '1666' },
-        variants: [{ color: 'Clear', sizes: ['AirPods Max 1st / 2nd Gen'] }],
-        pricing: { price: 29.99 },
-        product_meta: { name: 'WC26 QF - BELGIUM - Headphones', description: 'h' },
-        print_style: 'placed',
-      },
-      fakeContext(
-        api,
-        stubImaging({
-          recomposeFill: async () => ({ outputPath: '/tmp/cup.png', mode: 'composited' as const }),
-        }),
-      ),
-    )) as any;
-
-    const createBody = JSON.parse(calls.find((c) => c.url.endsWith('/product/create'))?.init?.body as string);
-    const byPlacement = Object.fromEntries(
-      createBody.print_data.map((t: any) => [t.provider_ref_id, t.image_url]),
-    );
-    // BOTH cups carry the composed art — one cup printed and one blank is what shipped BELGIUM.
-    expect(Object.keys(byPlacement).sort()).toEqual(['Left', 'Right']);
-    expect(byPlacement.Left).toBe('https://cdn.example/d2.png');
-    expect(byPlacement.Right).toBe('https://cdn.example/d2.png');
-    expect(res.placements_covered.sort()).toEqual(['Left', 'Right']);
-  });
-
-  it('resolution safety net: upscales a low-res placed design to the print-area floor', async () => {
-    const phoneCase = {
-      product: {
-        name: 'Clear Case for iPhone®',
-        variants: [
-          {
-            id: 9181,
-            size: 'iPhone 15',
-            cost: 8.95,
-            templates: [
-              { provider_location_ref_id: 'default', provider_ref_id: 4181, area_width: 1160, area_height: 2414 },
-            ],
-          },
-        ],
-      },
-    };
-    let ensureFloor = 0;
-    const { api, calls } = apiFrom([
-      phoneCase,
-      { image_uuid: 'hd', url: 'https://cdn.example/hd.png' }, // transform upload (upscaled)
-      { job_uuid: 'j1' },
-      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/c.png' }] },
-      { uuid: 'p1' },
-      {},
-    ]);
-    const res = (await shipProduct.handler(
-      {
-        design_uuid: 'd1',
-        design_url: 'https://cdn.example/d.png',
-        garment: { provider_uuid: 'pf', product_ref_id: '181' },
-        variants: [{ color: 'Clear', sizes: ['iPhone 15'] }],
-        pricing: { price: 19.99 },
-        product_meta: { name: 'WC26 QF - MOROCCO - Phone Case', description: 'c' },
-        print_style: 'placed',
-      },
-      fakeContext(
-        api,
-        stubImaging({
-          ensureResolution: async (_p: string, min: number) => {
-            ensureFloor = min;
-            return { outputPath: '/tmp/hd.png', upscaled: true };
-          },
-        }),
-      ),
-    )) as any;
-
-    expect(ensureFloor).toBe(2414); // floor = the print-area long side, clamped to [2000, 3000]
-    const createBody = JSON.parse(calls.find((c) => c.url.endsWith('/product/create'))?.init?.body as string);
-    expect(createBody.generated_image_uuid).toBe('hd'); // the upscaled revision is used
-    expect(res.warnings.some((w: string) => /upscaled/i.test(w))).toBe(true);
-  });
-
-  it('resolution safety net: no upload when the design already meets the floor', async () => {
-    const { api, calls } = apiFrom([
-      garmentDetail, // tee
-      { job_uuid: 'j1' },
-      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/c.png' }] },
-      { uuid: 'p1' },
-      {},
-    ]);
-    await shipProduct.handler(
-      {
-        design_uuid: 'd1',
-        design_url: 'https://cdn.example/d.png',
-        garment: { provider_uuid: 'pf', product_ref_id: '71' },
-        variants: [{ color: 'Black', sizes: ['S'] }],
-        pricing: { price: 27.99 },
-        product_meta: { name: 'Tee', description: 't' },
-      },
-      fakeContext(api), // default imaging: ensureResolution returns upscaled:false
-    );
-    // No /transform upload happened (design was large enough) — create uses the original design.
-    expect(calls.some((c) => c.url.includes('/transform'))).toBe(false);
-    const createBody = JSON.parse(calls.find((c) => c.url.endsWith('/product/create'))?.init?.body as string);
-    expect(createBody.generated_image_uuid).toBe('d1');
-  });
-});
-
-describe('ship_product: duffle — hero front, solid panels, no white strip (WC26 NORWAY duffle)', () => {
-  it('composes the design on the front window and fills the SAME-SIZE wrap panels with solid, not full-bleed art', async () => {
-    // Printful 465: front + 5 same-size panels (back/sides/top/bottom/pocket, all 3000x1998).
-    const duffleGarment = {
-      product: {
-        name: 'All-Over Print Duffle Bag',
-        variants: [
-          {
-            id: 12021,
-            size: 'One size',
-            cost: 30,
-            templates: [
-              { provider_location_ref_id: 'front', provider_ref_id: 1, area_width: 3000, area_height: 1998 },
-              { provider_location_ref_id: 'back', provider_ref_id: 2, area_width: 3000, area_height: 1998 },
-              { provider_location_ref_id: 'sides', provider_ref_id: 3, area_width: 3000, area_height: 1998 },
-              { provider_location_ref_id: 'top', provider_ref_id: 4, area_width: 3000, area_height: 1998 },
-              { provider_location_ref_id: 'bottom', provider_ref_id: 5, area_width: 3000, area_height: 1998 },
-              { provider_location_ref_id: 'pocket', provider_ref_id: 6, area_width: 3000, area_height: 1998 },
-            ],
-          },
-        ],
-      },
-    };
-    let recomposeCount = 0;
-    let solidCount = 0;
-    const { api, calls } = apiFrom([
-      duffleGarment, // fetchGarment
-      { image_uuid: 'dfront', url: 'https://cdn.example/dfront.png' }, // transform (front composed)
-      { image_uuid: 'dsolid', url: 'https://cdn.example/dsolid.png' }, // transform (solid bg)
-      { job_uuid: 'j1' },
-      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/c.png' }] },
-      { uuid: 'p1' },
-      {},
-    ]);
-    const res = (await shipProduct.handler(
-      {
-        design_uuid: 'd1',
-        design_url: 'https://cdn.example/d.png',
-        garment: { provider_uuid: 'pf', product_ref_id: '465' },
-        variants: [{ color: 'White', sizes: ['One size'] }],
-        pricing: { price: 59.99 },
-        product_meta: { name: 'WC26 QF - NORWAY - Duffle Bag', description: 'd' },
-      },
-      fakeContext(
-        api,
-        stubImaging({
-          recomposeFill: async () => {
-            recomposeCount += 1;
-            return { outputPath: '/tmp/dfront.png', mode: 'composited' as const, background: '#0C0C0C' };
-          },
-          solidFill: async () => {
-            solidCount += 1;
-            return { outputPath: '/tmp/dsolid.png', mode: 'solid' as const, background: '#0C0C0C' };
-          },
-        }),
-      ),
-    )) as any;
-
-    // The design is composed ONCE (front window); ONE solid canvas serves all 5 wrap panels —
-    // NOT the design plastered full-bleed on every same-size panel.
-    expect(recomposeCount).toBe(1);
-    expect(solidCount).toBe(1);
-    const createBody = JSON.parse(calls.find((c) => c.url.endsWith('/product/create'))?.init?.body as string);
-    const byPlacement = Object.fromEntries(
-      createBody.print_data.map((t: any) => [t.provider_ref_id, t.image_url]),
-    );
-    expect(byPlacement.front).toBe('https://cdn.example/dfront.png'); // hero design
-    for (const panel of ['back', 'sides', 'top', 'bottom', 'pocket']) {
-      expect(byPlacement[panel]).toBe('https://cdn.example/dsolid.png'); // solid, no white, no full-bleed art
-    }
-    // Every panel covered — no blank/white face.
-    expect(res.placements_covered.sort()).toEqual(['back', 'bottom', 'front', 'pocket', 'sides', 'top']);
-  });
-});
