@@ -10,6 +10,7 @@ import { issueTools } from './issues.js';
 import { analyticsTools } from './analytics.js';
 import { collectionTools } from './collections.js';
 import { transferTools } from './transfer.js';
+import { workspaceTools } from './workspaces.js';
 import { managementTools } from './management.js';
 import { apiTools } from './apirequest.js';
 
@@ -30,6 +31,8 @@ export function allTools(): ToolDef[] {
     ...analyticsTools,
     ...collectionTools,
     ...transferTools,
+    // Workspace & team management for agency accounts (create/assign/invite).
+    ...workspaceTools,
     ...managementTools,
     ...apiTools,
   ];

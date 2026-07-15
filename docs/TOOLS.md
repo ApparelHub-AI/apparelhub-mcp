@@ -124,6 +124,29 @@ For agency accounts moving assets between client workspaces. Resolve the destina
 | `check_product_move` | Dry-run eligibility: `{eligible, blockers}`. |
 | `copy_design_to_workspace` / `move_design_to_workspace` / `check_design_move` | Same for generated designs. |
 
+## Workspace & team management
+
+Agency (Enterprise) accounts only. These need an **account-wide** API key — a workspace-scoped key gets `account_wide_key_required`, and a tier without the agency feature gets `feature_unavailable`. `accept_invite` is the exception (invitee side, any tier/key). Discover uuids with `list_my_workspaces`, member public_ids / invite uuids with `list_account_members` / `list_invites`. Workspace roles: `director` | `creator` | `merchandiser` | `operator` | `viewer`.
+
+| Tool | Summary |
+|---|---|
+| `create_workspace` | Create a workspace (name unique in the account). |
+| `update_workspace` | Rename or archive/unarchive (Default can't be archived). |
+| `delete_workspace` | Delete a workspace; stores move to Default, assignments revoked. |
+| `check_workspace_deletion` | Dry-run: stores that move + members unassigned. |
+| `assign_workspace_member` | Assign a member to a workspace with a role (or change it). |
+| `unassign_workspace_member` | Revoke a member's workspace assignment. |
+| `move_store_to_workspace` | Move a store into a workspace (owner/admin). |
+| `get_role_matrix` | Workspace roles → capability matrix. |
+| `get_account_overview` | Account name, your role, agency flag, seat accounting. |
+| `list_account_members` | Members + per-workspace assignments (filterable, paginated). |
+| `remove_member` | Remove a member from the account entirely. |
+| `invite_member` | Invite by email, optionally pre-assign a workspace + role. |
+| `list_invites` | Pending invites with target workspace + accept URL. |
+| `revoke_invite` | Revoke a pending invite. |
+| `resend_invite` | Resend a pending invite (same token, +14-day TTL). |
+| `accept_invite` | Accept an invite by token (email must match). |
+
 ## Store & order management
 
 | Tool | Summary |

@@ -91,7 +91,7 @@ Any MCP-capable client uses the same shape: run `npx -y @apparelhub/mcp-server` 
 
 ## Tools
 
-78 tools. See [`docs/TOOLS.md`](./docs/TOOLS.md) for the full reference; call `tools/list` from
+94 tools. See [`docs/TOOLS.md`](./docs/TOOLS.md) for the full reference; call `tools/list` from
 your agent for the live schemas.
 
 - **Read** — `list_my_workspaces`, `list_my_stores`, `list_my_designs`, `list_my_products`,
@@ -115,6 +115,11 @@ your agent for the live schemas.
   `sync_collection`.
 - **Cross-workspace transfer** — `copy_product_to_workspace`, `move_product_to_workspace`,
   `check_product_move`, and the design equivalents.
+- **Workspace & team management** (agency / Enterprise, account-wide key) — workspaces
+  (`create_workspace`, `update_workspace`, `delete_workspace`, `check_workspace_deletion`,
+  `assign_workspace_member`, `unassign_workspace_member`, `move_store_to_workspace`,
+  `get_role_matrix`) and team (`get_account_overview`, `list_account_members`, `remove_member`,
+  `invite_member`, `list_invites`, `revoke_invite`, `resend_invite`, `accept_invite`).
 - **Store & order management** — store settings/lifecycle (`get_store_settings`,
   `update_store_settings`, `create_store`, `archive_store`, `unarchive_store`, `activate_store`),
   order payment/ops (`record_order_payment`, `mark_order_no_payment`, `set_order_payment_method`,
