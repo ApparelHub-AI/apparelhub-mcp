@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { defineTool, type ToolDef } from './registry.js';
 import { AhError } from '../errors.js';
-import { asArray, str } from '../util/shape.js';
+import { asArray, isRecord, str } from '../util/shape.js';
 import { runGenerationWithFallback } from '../image/generate.js';
 import {
   augmentPromptForTransparency,
@@ -203,7 +203,11 @@ export const generateImage = defineTool({
       .string()
       .optional()
       .describe('Explicit model name, or omit to auto-pick (Nano Banana; OpenAI for abstract).'),
-    size: sizeEnum.optional(),
+    size: sizeEnum
+      .optional()
+      .describe(
+        'Output shape. 1024x1024 = square; 1024x1792 = tall/portrait (phone cases, posters, banners); 1792x1024 = wide/landscape (mugs, laptop sleeves, wide banners). Pick to match the product\'s print area — full-bleed goods like phone cases want a tall design that fills the whole area, or the mockup pads/crops it. To re-shape an EXISTING design without spending another generation, use fit_aspect instead.',
+      ),
     style: styleEnum.optional(),
     augment_prompt_for_transparency: z
       .boolean()
@@ -442,10 +446,66 @@ export const iterateDesign = defineTool({
   },
 });
 
+// Common aspect ratios for print-on-demand goods. A plain string is also accepted (the platform
+// validates "W:H"), but the enum steers the agent to the shapes real products need.
+const aspectEnum = z.enum(['1:1', '9:16', '16:9', '4:5', '3:4', '4:3', '2:3', '3:2']);
+
+export const fitAspect = defineTool({
+  name: 'fit_aspect',
+  description:
+    'Fit an EXISTING design image to a target aspect ratio without generating a new one. mode="pad" letterboxes it onto a background (keeps the whole design, nothing cropped); mode="crop" center-crops (trims the edges to fill the shape). QUOTA-FREE: this reshapes an existing image and does NOT consume an image-generation credit. Use to adapt a square design to a product\'s print area (e.g. a tall 9:16 for a phone case or poster, a wide 16:9 for a mug or banner). Returns a NEW design (image uuid + url). Note: for an AI-generated EXTENSION of the borders (outpainting) instead of a flat pad/crop, generate a new image with generate_image at the target size — that DOES use the image-generation quota.',
+  inputSchema: z.object({
+    image_uuid: z.string().min(1).describe('The uuid of an existing design to reshape (from generate_image / list_my_designs).'),
+    aspect: z
+      .union([aspectEnum, z.string().regex(/^\d+:\d+$/, 'Use "W:H", e.g. "9:16".')])
+      .describe('Target aspect ratio as "W:H". Common: 9:16 tall (phone cases, posters), 16:9 wide (mugs, banners), 1:1 square, 4:5 portrait.'),
+    mode: z
+      .enum(['pad', 'crop'])
+      .default('pad')
+      .describe('pad (default): letterbox onto a background, keeping the whole design (nothing lost). crop: center-crop to fill the shape, trimming the edges.'),
+    background: z
+      .string()
+      .regex(/^#[0-9a-fA-F]{6}$/, 'Use a #RRGGBB hex color, e.g. "#FFFFFF".')
+      .optional()
+      .describe('Fill color for the padded bars as #RRGGBB (pad mode only; ignored for crop). Defaults to transparent/white on the platform when omitted.'),
+    workspace: z.string().optional(),
+  }),
+  annotations: { openWorldHint: true },
+  handler: async (input, ctx) => {
+    // Default in the handler body (not only via the zod .default) so the mode is correct whether
+    // called through the registry's safeParse dispatch or directly — matches the repo's pattern of
+    // resolving defaults in-handler (e.g. augment_prompt_for_transparency ?? true).
+    const mode = input.mode ?? 'pad';
+    const res = await ctx.api.post(
+      `images/generated/${encodeURIComponent(input.image_uuid)}/fit-aspect`,
+      {
+        body: {
+          aspect: input.aspect,
+          mode,
+          ...(input.background ? { background: input.background } : {}),
+        },
+        workspace: input.workspace,
+        signal: ctx.signal,
+      },
+    );
+    // The route returns { image: { uuid, url, title, created }, source_image_uuid, aspect, mode, dimensions }.
+    const image = isRecord(res) && isRecord(res.image) ? res.image : res;
+    return {
+      image_uuid: str(image, 'uuid', 'image_uuid', 'id'),
+      image_url: str(image, 'url', 'image_url', 'full_url'),
+      source_image_uuid: str(res, 'source_image_uuid') ?? input.image_uuid,
+      aspect: str(res, 'aspect') ?? input.aspect,
+      mode: str(res, 'mode') ?? mode,
+      dimensions: isRecord(res) ? res.dimensions : undefined,
+    };
+  },
+});
+
 export const designTools: ToolDef[] = [
   generateImage,
   processTransparency,
   verifyDesignText,
   designApparel,
   iterateDesign,
+  fitAspect,
 ];
