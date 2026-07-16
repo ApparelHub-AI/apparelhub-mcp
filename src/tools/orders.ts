@@ -192,6 +192,68 @@ export const submitOrderToFulfillment = defineTool({
   },
 });
 
+// ---------------------------------------------------------------------------
+// Draft-order item edit (apparelhub-ai#643)
+// ---------------------------------------------------------------------------
+
+/** Relay the edit_method envelope so the caller knows if the order was re-created. */
+function editResult(orderUuid: string, raw: unknown): Record<string, unknown> {
+  const out = actionResult(orderUuid, raw);
+  if (isRecord(raw)) {
+    if (raw.edit_method !== undefined) out.edit_method = raw.edit_method;
+    if (raw.in_place !== undefined) out.in_place = raw.in_place;
+    if (raw.fulfillment_external_id !== undefined) out.fulfillment_external_id = raw.fulfillment_external_id;
+    if (raw.previous_external_id !== undefined) out.previous_external_id = raw.previous_external_id;
+  }
+  return out;
+}
+
+export const addOrderItem = defineTool({
+  name: 'add_order_item',
+  description:
+    'Add an item (e.g. another variant of the same product) to a DRAFT order, before it is confirmed to production. ' +
+    'Only works while the order is in "draft" status. Printful and Gelato edit the existing provider draft IN PLACE; ' +
+    'Printify has no edit API, so it CANCELS + RE-CREATES the order — the result then carries edit_method="recreated" ' +
+    'and a new fulfillment_external_id. Nothing is charged on a draft, so re-creation is safe. Returns 409 ' +
+    '"order_not_editable" if the order was already confirmed/submitted to production.',
+  inputSchema: z.object({
+    order_uuid: z.string().min(1).describe('The DRAFT order uuid (from list_my_orders / get_order_details).'),
+    variant_uuid: z.string().min(1).describe('The product variant to add (e.g. another color/size of the same product).'),
+    quantity: z.number().int().min(1).optional().describe('Quantity to add (default 1).'),
+    workspace: z.string().optional().describe('Workspace uuid (agency accounts). Omit for Default.'),
+  }),
+  annotations: { openWorldHint: true },
+  handler: async (input, ctx) => {
+    const raw = await ctx.api.post(`orders/${enc(input.order_uuid)}/items`, {
+      body: { variant_uuid: input.variant_uuid, quantity: input.quantity ?? 1 },
+      workspace: input.workspace,
+      signal: ctx.signal,
+    });
+    return editResult(input.order_uuid, raw);
+  },
+});
+
+export const removeOrderItem = defineTool({
+  name: 'remove_order_item',
+  description:
+    'Remove a line item from a DRAFT order (the order must keep at least one item). Same provider semantics as ' +
+    'add_order_item: Printful/Gelato edit in place, Printify cancels + re-creates. Only works while the order is a ' +
+    'draft. Get the order_item_id from get_order_details (each item carries an id).',
+  inputSchema: z.object({
+    order_uuid: z.string().min(1).describe('The DRAFT order uuid.'),
+    order_item_id: z.number().int().describe('The order item id to remove (from get_order_details items[].id).'),
+    workspace: z.string().optional().describe('Workspace uuid (agency accounts).'),
+  }),
+  annotations: { openWorldHint: true },
+  handler: async (input, ctx) => {
+    const raw = await ctx.api.del(`orders/${enc(input.order_uuid)}/items/${input.order_item_id}`, {
+      workspace: input.workspace,
+      signal: ctx.signal,
+    });
+    return editResult(input.order_uuid, raw);
+  },
+});
+
 export const checkOrderStatus = defineTool({
   name: 'check_order_status',
   description:
@@ -342,6 +404,8 @@ export const orderTools: ToolDef[] = [
   cancelOrder,
   confirmOrder,
   submitOrderToFulfillment,
+  addOrderItem,
+  removeOrderItem,
   checkOrderStatus,
   reconcileOrder,
   listOrderHolds,
