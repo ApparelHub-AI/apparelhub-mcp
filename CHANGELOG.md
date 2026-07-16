@@ -419,7 +419,7 @@ Tool surface unchanged (internal fill-geometry knowledge only). No schema/descri
   and channels under `active_integrations`. So every store came back "no fulfillment provider
   connected", which is impossible by design (a store always has one). Now reads the correct fields
   (old names kept as fallbacks). Sales channels also require the platform's store-list serializer to
-  include `active_integrations` (apparelhub-ai#502).
+  include `active_integrations` (an internal platform ticket).
 
 ## [0.2.2] - 2026-07-05
 

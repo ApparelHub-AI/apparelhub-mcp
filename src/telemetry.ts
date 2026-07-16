@@ -7,7 +7,7 @@
 //    scalars), and the caller pre-filters via a per-tool allowlist.
 //  - Off entirely when APPARELHUB_MCP_TELEMETRY=off.
 //
-// Backend dependency: the ingest endpoint (POST /agents/v1/telemetry) is a separate apparelhub-ai
+// Backend dependency: the ingest endpoint (POST /agents/v1/telemetry) is a separate platform-backend
 // workstream. Until it ships, batched sends simply fail silently (fire-and-forget), which is the
 // intended behavior — the client is correct and the backend catches up.
 

@@ -7,7 +7,7 @@ import { asArray, bool, isRecord, num, str, total, viewUrl } from '../util/shape
 // variants defensively so a minor live-API shape difference degrades to a missing field
 // rather than a crash.
 //
-// Contracts validated against apparelhub-ai (api/store.py, api/orders.py, api/product.py, and
+// Contracts validated against the platform backend (api/store.py, api/orders.py, api/product.py, and
 // the /agents/v1 delegations in api/agents.py):
 //   - update_store_settings PATCH store/{s}/settings accepts a partial body; the server updates
 //     only the keys present. The fulfillment-workflow fields are: fulfillment_mode
