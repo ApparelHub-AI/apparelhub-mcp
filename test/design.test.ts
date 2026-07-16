@@ -5,6 +5,7 @@ import {
   verifyDesignText,
   designApparel,
   iterateDesign,
+  fitAspect,
 } from '../src/tools/design.js';
 import { runGeneration } from '../src/image/generate.js';
 import { ApiClient } from '../src/http/client.js';
@@ -335,6 +336,58 @@ describe('iterate_design', () => {
     expect(res).toMatchObject({ design_uuid: 'g9', design_url: 'https://cdn.example/v.png' });
     const body = JSON.parse(calls[0]?.init?.body as string);
     expect(body.source_image_uuid).toBe('g1');
+  });
+});
+
+describe('fit_aspect', () => {
+  it('pads an existing design to a target aspect and maps the nested image result', async () => {
+    // The route returns the new image nested under `image`, plus echoes source/aspect/mode/dimensions.
+    const { api, calls } = apiFrom([
+      jsonResponse(200, {
+        image: { uuid: 'fa1', url: 'https://cdn.example/tall.png', title: 'tall', created: '2026-07-15' },
+        source_image_uuid: 'g1',
+        aspect: '9:16',
+        mode: 'pad',
+        dimensions: { width: 1024, height: 1820 },
+      }),
+    ]);
+    const res = (await fitAspect.handler(
+      { image_uuid: 'g1', aspect: '9:16' }, // mode defaults to 'pad'
+      fakeContext(api),
+    )) as any;
+    expect(res).toMatchObject({
+      image_uuid: 'fa1',
+      image_url: 'https://cdn.example/tall.png',
+      source_image_uuid: 'g1',
+      aspect: '9:16',
+      mode: 'pad',
+      dimensions: { width: 1024, height: 1820 },
+    });
+    // Hits the fit-aspect route with the JSON body; background omitted when not given.
+    expect(calls[0]?.url).toContain('/images/generated/g1/fit-aspect');
+    const body = JSON.parse(calls[0]?.init?.body as string);
+    expect(body).toEqual({ aspect: '9:16', mode: 'pad' });
+  });
+
+  it('forwards a background only in pad mode when provided', async () => {
+    const { api, calls } = apiFrom([
+      jsonResponse(200, { image: { uuid: 'fa2', url: 'https://cdn.example/w.png' }, aspect: '16:9', mode: 'pad' }),
+    ]);
+    await fitAspect.handler(
+      { image_uuid: 'g1', aspect: '16:9', mode: 'pad', background: '#FFFFFF' },
+      fakeContext(api),
+    );
+    const body = JSON.parse(calls[0]?.init?.body as string);
+    expect(body).toEqual({ aspect: '16:9', mode: 'pad', background: '#FFFFFF' });
+  });
+
+  it('rejects a malformed aspect and a bad background hex without calling the API', async () => {
+    const { calls } = apiFrom([]);
+    const bad = fitAspect.inputSchema.safeParse({ image_uuid: 'g1', aspect: '9x16' });
+    expect(bad.success).toBe(false);
+    const badBg = fitAspect.inputSchema.safeParse({ image_uuid: 'g1', aspect: '9:16', background: 'white' });
+    expect(badBg.success).toBe(false);
+    expect(calls.length).toBe(0);
   });
 });
 
