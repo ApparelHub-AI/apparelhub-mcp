@@ -212,6 +212,8 @@ export const addOrderItem = defineTool({
   name: 'add_order_item',
   description:
     'Add an item (e.g. another variant of the same product) to a DRAFT order, before it is confirmed to production. ' +
+    'Optionally set custom_price (the new item\'s per-unit retail price) and/or shipping_cost (the order-level retail ' +
+    'shipping the customer pays — NOT the provider\'s cost); omit them and the variant price / existing shipping are kept. ' +
     'Only works while the order is in "draft" status. Printful and Gelato edit the existing provider draft IN PLACE; ' +
     'Printify has no edit API, so it CANCELS + RE-CREATES the order — the result then carries edit_method="recreated" ' +
     'and a new fulfillment_external_id. Nothing is charged on a draft, so re-creation is safe. Returns 409 ' +
@@ -220,12 +222,17 @@ export const addOrderItem = defineTool({
     order_uuid: z.string().min(1).describe('The DRAFT order uuid (from list_my_orders / get_order_details).'),
     variant_uuid: z.string().min(1).describe('The product variant to add (e.g. another color/size of the same product).'),
     quantity: z.number().int().min(1).optional().describe('Quantity to add (default 1).'),
+    custom_price: z.number().min(0).optional().describe('Per-unit retail price for the new item. Omit to use the variant\'s own price.'),
+    shipping_cost: z.number().min(0).optional().describe('Order-level retail shipping price (what the customer pays, not the provider cost). Omit to keep the order\'s current shipping.'),
     workspace: z.string().optional().describe('Workspace uuid (agency accounts). Omit for Default.'),
   }),
   annotations: { openWorldHint: true },
   handler: async (input, ctx) => {
+    const body: Record<string, unknown> = { variant_uuid: input.variant_uuid, quantity: input.quantity ?? 1 };
+    if (input.custom_price !== undefined) body.custom_price = input.custom_price;
+    if (input.shipping_cost !== undefined) body.shipping_cost = input.shipping_cost;
     const raw = await ctx.api.post(`orders/${enc(input.order_uuid)}/items`, {
-      body: { variant_uuid: input.variant_uuid, quantity: input.quantity ?? 1 },
+      body,
       workspace: input.workspace,
       signal: ctx.signal,
     });
