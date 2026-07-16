@@ -10,6 +10,9 @@ name: Forbidden patterns (public-repo hygiene)
 # here. Every check runs with `grep -q` (no output) so a matched value can never
 # be echoed into the public build logs; the error just names the category and
 # tells you to grep locally.
+#
+# SECURITY: keep this on `pull_request` (never `pull_request_target`) and never add
+# `id-token: write` or cloud credentials — fork PRs execute untrusted code here.
 
 on:
   push:
@@ -22,13 +25,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Scan tracked source + docs
         env:
           FORBIDDEN_TERMS: ${{ secrets.FORBIDDEN_TERMS }}
+          FORBIDDEN_REFS: ${{ secrets.FORBIDDEN_REFS }}
         run: |
           set -uo pipefail
-          mapfile -t FILES < <(git ls-files '*.ts' '*.js' '*.mjs' '*.cjs' '*.md' '*.json' '*.yml' '*.yaml' \
+          # Scan EVERY tracked file (python helpers, shell, Dockerfile, toml —
+          # not just an extension allowlist); grep -I skips binaries. Lockfiles
+          # excluded (integrity hashes, no hand-written content).
+          mapfile -t FILES < <(git ls-files \
             | grep -vE '(^|/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$' || true)
           if [ "${#FILES[@]}" -eq 0 ]; then echo "no files to scan"; exit 0; fi
           fail=0
@@ -58,5 +67,51 @@ jobs:
             fail=1
           fi
 
+          # 4) Private-repo references: internal (non-public) repo names, internal
+          #    ticket refs, internal filesystem paths, and maintainer identifiers
+          #    must never appear on any public surface. The pattern list is the
+          #    FORBIDDEN_REFS repo secret (never in this public file); quiet grep
+          #    so a matched value is never echoed into public logs. Refer to
+          #    internal work generically ("an internal platform ticket").
+          if [ -n "${FORBIDDEN_REFS:-}" ]; then
+            if grep -IlqE "$FORBIDDEN_REFS" "${FILES[@]}" >/dev/null 2>&1; then
+              echo "::error::A private-repo reference (internal repo name / ticket ref / internal path) is present in a tracked file. Replace it with a generic phrase like 'an internal platform ticket'. The pattern list is the FORBIDDEN_REFS repo secret — grep your tree against your own copy to find it."
+              fail=1
+            fi
+          fi
+
           if [ "$fail" -ne 0 ]; then exit 1; fi
           echo "Rule 13 hygiene: clean."
+
+      - name: Scan commit messages + PR text (private references)
+        if: github.event_name == 'pull_request'
+        env:
+          FORBIDDEN_TERMS: ${{ secrets.FORBIDDEN_TERMS }}
+          FORBIDDEN_REFS: ${{ secrets.FORBIDDEN_REFS }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -uo pipefail
+          # Commit messages, PR titles, and PR bodies are PUBLIC surfaces too —
+          # the same no-private-references rule applies. PR text is read via env
+          # (never shell interpolation) so a malicious title can't inject.
+          fail=0
+          MSGS=$(git log --format='%s%n%b' "$BASE_SHA".."$HEAD_SHA" 2>/dev/null || true)
+          for PAT_NAME in FORBIDDEN_REFS FORBIDDEN_TERMS; do
+            PAT=""
+            [ "$PAT_NAME" = "FORBIDDEN_REFS" ] && PAT="${FORBIDDEN_REFS:-}"
+            [ "$PAT_NAME" = "FORBIDDEN_TERMS" ] && PAT="${FORBIDDEN_TERMS:-}"
+            [ -z "$PAT" ] && continue
+            if printf '%s' "$MSGS" | grep -qE "$PAT"; then
+              echo "::error::A $PAT_NAME pattern appears in a COMMIT MESSAGE in this PR. Commit messages are public: reword (rebase) before merging."
+              fail=1
+            fi
+            if printf '%s\n%s' "${PR_TITLE:-}" "${PR_BODY:-}" | grep -qE "$PAT"; then
+              echo "::error::A $PAT_NAME pattern appears in the PR title or body. Edit the PR text — it is a public surface."
+              fail=1
+            fi
+          done
+          if [ "$fail" -ne 0 ]; then exit 1; fi
+          echo "Commit messages + PR text: clean."

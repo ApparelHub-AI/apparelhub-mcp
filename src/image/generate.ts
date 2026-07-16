@@ -198,7 +198,7 @@ async function pollGeneration(
 
     if (status === 'failed') {
       // Async models report a provider rate limit as a structured error string (platform
-      // contract, apparelhub-ai#506): "model_rate_limited: {source} throttled by provider
+      // contract, an internal platform ticket): "model_rate_limited: {source} throttled by provider
       // (retry_after={n}s)". Parse it into the precise model_rate_limited code so the fallback
       // ladder triggers on the code (not a message heuristic) and attribution stays honest.
       if (error && /^model_rate_limited:/.test(error)) {
