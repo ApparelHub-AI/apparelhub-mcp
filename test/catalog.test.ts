@@ -105,6 +105,52 @@ describe('get_garment_details', () => {
     expect(res.print_templates[0]).toMatchObject({ placement: 'front', area_width: 1800 });
     expect(res.warnings[0]).toContain('AQUA');
   });
+
+  // #111 follow-up: Gelato's top-level template_details lists placements with NO dims;
+  // the real dims live on variants[].templates. print_templates must carry those dims,
+  // not an empty recommended_image_size.
+  it('falls back to variant templates when the top-level list is dimensionless (Gelato)', async () => {
+    const merchandise = { providers: [{ uuid: 'ge-uuid', name: 'Gelato' }] };
+    const detail = {
+      name: 'Iphone 16 Phone Case',
+      provider_ref_id: 'cGhv',
+      template_details: [
+        { detail_type: 'Location', name: 'Default', provider_ref_id: 'default', value: 'default' },
+      ],
+      variants: [
+        {
+          color: 'White',
+          color_code: '#ffffff',
+          price: 10.4,
+          provider_ref_id: 'phonecase_apple_iphone-16_tough_white_glossy',
+          size: '',
+          templates: [
+            {
+              provider_location_ref_id: 'default',
+              area_width: 1000,
+              area_height: 2000,
+              template_width: 1150,
+              template_height: 2300,
+              left: 75,
+              top: 0,
+            },
+          ],
+        },
+      ],
+    };
+    const { api } = apiSequence([merchandise, detail]);
+    const res = (await getGarmentDetails.handler(
+      { provider: 'Gelato', product_ref_id: 'cGhv' },
+      fakeContext(api),
+    )) as any;
+    expect(res.print_templates[0]).toMatchObject({
+      placement: 'default',
+      area_width: 1000,
+      area_height: 2000,
+    });
+    expect(res.print_templates[0].recommended_image_size).toEqual({ width: 1150, height: 2300 });
+    expect(res.variants[0]).toMatchObject({ color: 'White', cost: 10.4 });
+  });
 });
 
 describe('recommend_garment', () => {

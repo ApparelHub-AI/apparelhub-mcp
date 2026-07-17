@@ -156,10 +156,21 @@ export const getGarmentDetails = defineTool({
     let templatesRaw = isRecord(g)
       ? (g.templates ?? g.template_details ?? g.print_templates ?? g.print_areas)
       : undefined;
-    if (!asArray(templatesRaw).length) {
-      // Printful details often carry templates per-variant rather than at the top level.
+    // Fall back to the variant's templates when the top-level list is empty OR
+    // dimensionless. Printful carries templates per-variant; Gelato's top-level
+    // template_details lists placements with NO area/template dims (the real dims live on
+    // variants[].templates), so without this the print_templates come back with an empty
+    // recommended_image_size for Gelato (apparelhub-mcp#111 follow-up).
+    const topHasDims = asArray(templatesRaw).some(
+      (t) =>
+        isRecord(t) &&
+        (num(t, 'area_width', 'print_area_width') || num(t, 'width', 'template_width')),
+    );
+    if (!topHasDims) {
       const firstVariant = asArray(variantsRaw)[0];
-      if (isRecord(firstVariant)) templatesRaw = firstVariant.templates;
+      if (isRecord(firstVariant) && asArray(firstVariant.templates).length) {
+        templatesRaw = firstVariant.templates;
+      }
     }
 
     return {
