@@ -13,9 +13,26 @@ import type { ToolContext } from './context.js';
 // Catalog tools (tool spec §4). Wrap the fulfillment-provider catalog endpoints and add the
 // garment-selection knowledge (pricing floors, quality tiers, variant traps).
 
-const providerEnum = z.enum(['Printful', 'Printify']);
+// Provider selection is discovery-driven, NOT a hardcoded enum. Which fulfillment providers an
+// account can use is an auth/entitlement decision that lives on the platform — GET /merchandise/providers
+// is account-scoped and feature-flag-gated, so it returns exactly the providers THIS caller is entitled
+// to. A stateless MCP can't know the caller's entitlement when tools/list is served, so a closed enum
+// would be an authorization decision frozen into a JSON schema (and would silently reject any provider
+// the account gains beyond the hardcoded set). We accept any name and validate it against the account's
+// LIVE provider list, surfacing the real available names on no-match. See apparelhub-mcp#110.
+const providerInput = z
+  .string()
+  .min(1)
+  .describe(
+    'The fulfillment provider to browse, by name (case-insensitive). Must be a provider this account has access to; an unrecognized name returns the list of providers available to the account.',
+  );
 
-/** Resolve a provider NAME ("Printful"/"Printify") to its provider_uuid via GET /merchandise. */
+/**
+ * Resolve a provider NAME to its provider_uuid via the account's LIVE GET /merchandise/providers list.
+ * That endpoint is account-scoped and auth-gated, so it is the single source of truth for which
+ * providers this caller may use. On no-match we enumerate the actual available names so the caller
+ * can self-correct in one retry.
+ */
 async function resolveProviderUuid(
   ctx: ToolContext,
   providerName: string,
@@ -31,11 +48,17 @@ async function resolveProviderUuid(
       if (uuid) return uuid;
     }
   }
+  const available = providers
+    .map((p) => str(p, 'name', 'provider_name'))
+    .filter((n): n is string => Boolean(n));
   throw new AhError({
     code: 'not_found',
-    message: `No connected ${providerName} provider was found on this account.`,
-    suggestion:
-      'Connect the provider in ApparelHub first, or check list_my_stores for the fulfillment providers available.',
+    message: available.length
+      ? `No fulfillment provider matching "${providerName}" is available to this account. Available providers: ${available.join(', ')}.`
+      : 'No fulfillment providers are available to this account.',
+    suggestion: available.length
+      ? 'Use one of the listed provider names (case-insensitive). Provider availability is account-specific and set by the platform.'
+      : 'Connect a fulfillment provider in ApparelHub first (see list_my_stores).',
   });
 }
 
@@ -55,9 +78,9 @@ function mapGarment(raw: unknown): Record<string, unknown> {
 export const browseCatalog = defineTool({
   name: 'browse_catalog',
   description:
-    'Browse a fulfillment provider catalog (Printful/Printify) for garments to print on. Returns minimal listing fields. Read-only.',
+    "Browse a fulfillment provider's catalog for garments to print on. The provider can be any fulfillment provider available to this account. Returns minimal listing fields. Read-only.",
   inputSchema: z.object({
-    provider: providerEnum,
+    provider: providerInput,
     category: z.string().optional().describe('e.g. "t-shirts", "hoodies", "mugs".'),
     keyword: z.string().optional(),
     has_aop: z.boolean().optional().describe('All-over-print garments only.'),
@@ -111,8 +134,11 @@ export const getGarmentDetails = defineTool({
   description:
     'Full detail for one garment: the variant matrix (colors/sizes/costs), print templates, ApparelHub pricing floor, and quality tier. Read-only.',
   inputSchema: z.object({
-    provider: providerEnum,
-    product_ref_id: z.string().min(1).describe('The garment ref id from browse_catalog (a string).'),
+    provider: providerInput,
+    product_ref_id: z
+      .string()
+      .min(1)
+      .describe('The garment ref id from browse_catalog (a string).'),
     workspace: z.string().optional(),
   }),
   annotations: { readOnlyHint: true, openWorldHint: true },
@@ -157,7 +183,7 @@ export const getGarmentDetails = defineTool({
 export const recommendGarmentTool = defineTool({
   name: 'recommend_garment',
   description:
-    'Recommend a garment type for a design/use-case, encoding ApparelHub\'s garment trade-offs (BC 3001 vs Comfort Colors, budget vs premium, pricing floors). Returns a pick + rationale + alternatives. Advisory / knowledge-based.',
+    "Recommend a garment type for a design/use-case, encoding ApparelHub's garment trade-offs (BC 3001 vs Comfort Colors, budget vs premium, pricing floors). Returns a pick + rationale + alternatives. Advisory / knowledge-based.",
   inputSchema: z.object({
     design_uuid: z
       .string()
@@ -165,9 +191,7 @@ export const recommendGarmentTool = defineTool({
       .describe(
         'Optional design for context. Design-content-based ranking is a future enhancement; not required today.',
       ),
-    target_audience: z
-      .enum(['young_adult', 'mom_dad', 'athleisure', 'premium', 'auto'])
-      .optional(),
+    target_audience: z.enum(['young_adult', 'mom_dad', 'athleisure', 'premium', 'auto']).optional(),
     budget_tier: z.enum(['budget', 'standard', 'premium', 'auto']).optional(),
   }),
   annotations: { readOnlyHint: true, openWorldHint: false },

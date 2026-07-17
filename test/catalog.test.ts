@@ -42,6 +42,41 @@ describe('browse_catalog', () => {
       browseCatalog.handler({ provider: 'Printful' }, fakeContext(api)),
     ).rejects.toMatchObject({ code: 'not_found' });
   });
+
+  // #110: provider access is auth-gated per account, so the tool must accept ANY provider the
+  // live /merchandise/providers list returns — never a hardcoded Printful/Printify enum.
+  it('accepts any provider the account is entitled to (no hardcoded enum)', async () => {
+    const merchandise = {
+      providers: [
+        { uuid: 'pf-uuid', name: 'Printful' },
+        { uuid: 'py-uuid', name: 'Printify' },
+        { uuid: 'ge-uuid', name: 'Gelato' },
+      ],
+    };
+    const products = { products: [{ ref_id: 'abc', name: 'Phone Case', variant_count: 1 }] };
+    const { api, calls } = apiSequence([merchandise, products]);
+    const res = (await browseCatalog.handler({ provider: 'Gelato' }, fakeContext(api))) as any;
+    expect(calls[0]?.url).toContain('/agents/v1/merchandise/providers');
+    expect(calls[1]?.url).toContain('/merchandise/ge-uuid/products');
+    expect(res.provider).toBe('Gelato');
+    expect(res.garments[0]).toMatchObject({ provider_ref_id: 'abc', name: 'Phone Case' });
+  });
+
+  it("unknown provider error enumerates the account's actual available providers", async () => {
+    const merchandise = {
+      providers: [
+        { uuid: 'pf-uuid', name: 'Printful' },
+        { uuid: 'py-uuid', name: 'Printify' },
+      ],
+    };
+    const { api } = apiSequence([merchandise]);
+    await expect(
+      browseCatalog.handler({ provider: 'Nope' }, fakeContext(api)),
+    ).rejects.toMatchObject({
+      code: 'not_found',
+      message: expect.stringContaining('Printful, Printify'),
+    });
+  });
 });
 
 describe('get_garment_details', () => {

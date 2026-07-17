@@ -2,7 +2,7 @@ export const SERVER_NAME = '@apparelhub/mcp-server';
 
 // npm package version. Pre-1.0 during private beta; kept in sync with package.json
 // (a unit test asserts they match so they can't drift).
-export const SERVER_VERSION = '0.5.3';
+export const SERVER_VERSION = '0.5.4';
 
 // The agent-facing tool-surface contract version (spec §10). Independent of the
 // package semver: the surface is "v1", the package matures separately.
