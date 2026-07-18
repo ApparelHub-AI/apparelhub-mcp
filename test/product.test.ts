@@ -56,13 +56,32 @@ const garmentDetail = {
 
 // prepare-print-data mocks (mcp#101 / v0.4.0): the platform composes per-placement print_data.
 const PREP_POST = { status: 'pending', job_uuid: 'pjob' };
-function prepDone(provider_ref_id: string, area_width: number, area_height: number,
-                  extra: Record<string, unknown> = {}) {
+function prepDone(
+  provider_ref_id: string,
+  area_width: number,
+  area_height: number,
+  extra: Record<string, unknown> = {},
+) {
   return {
-    status: 'completed', image_uuid: 'd1', image_url: 'https://cdn.example/d.png',
-    print_style: 'placed', placements_covered: [provider_ref_id], warnings: [],
-    print_data: [{ provider_ref_id, area_width, area_height, width: area_width,
-      height: area_height, top: 0, left: 0, image_url: 'https://cdn.example/d.png', ...extra }],
+    status: 'completed',
+    image_uuid: 'd1',
+    image_url: 'https://cdn.example/d.png',
+    print_style: 'placed',
+    placements_covered: [provider_ref_id],
+    warnings: [],
+    print_data: [
+      {
+        provider_ref_id,
+        area_width,
+        area_height,
+        width: area_width,
+        height: area_height,
+        top: 0,
+        left: 0,
+        image_url: 'https://cdn.example/d.png',
+        ...extra,
+      },
+    ],
   };
 }
 const prepFront = () => prepDone('front', 1800, 2400);
@@ -72,7 +91,8 @@ describe('ship_product', () => {
   it('runs the full pipeline in order and defaults channel sync to draft', async () => {
     const { api, calls } = apiFrom([
       garmentDetail, // GET garment detail
-      PREP_POST, prepFront(), // prepare-print-data POST + poll
+      PREP_POST,
+      prepFront(), // prepare-print-data POST + poll
       { job_uuid: 'job1' }, // POST mockup preview
       { status: 'completed', previews: [{ preview_url: 'https://cdn.example/m.png' }] }, // GET job (2-phase)
       { uuid: 'p1' }, // POST product/create
@@ -101,7 +121,10 @@ describe('ship_product', () => {
       fulfillment_status: 'synced',
       variants_added: 1,
     });
-    expect(res.channel_sync_results[0]).toMatchObject({ integration_uuid: 'i1', status: 'synced_as_draft' });
+    expect(res.channel_sync_results[0]).toMatchObject({
+      integration_uuid: 'i1',
+      status: 'synced_as_draft',
+    });
 
     // Correct field names on create (Lesson 2), and correct ordering.
     const createCall = calls.find((c) => c.url.endsWith('/product/create'));
@@ -149,11 +172,15 @@ describe('ship_product', () => {
     };
     const { api, calls } = apiFrom([
       twoColorGarment, // fetchGarment
-      PREP_POST, prepFront(),
+      PREP_POST,
+      prepFront(),
       { job_uuid: 'job1' }, // mockup preview POST
       { status: 'completed', previews: [{ preview_url: 'https://cdn.example/m.png' }] }, // job poll
       { uuid: 'p1' }, // create
-      {}, {}, {}, {}, // 4 variant POSTs
+      {},
+      {},
+      {},
+      {}, // 4 variant POSTs
     ]);
     await shipProduct.handler(
       {
@@ -227,11 +254,13 @@ describe('ship_product: embroidery garments (cap/beanie incident)', () => {
   it('routes the print to the embroidery placement with real dims and attaches thread colors on create (not on the mockup)', async () => {
     const { api, calls } = apiFrom([
       capGarment, // fetchGarment (raw 596 shape)
-      PREP_POST, prepEmbroidery(),
+      PREP_POST,
+      prepEmbroidery(),
       { job_uuid: 'j1' }, // mockup POST
       { status: 'completed', previews: [{ preview_url: 'https://cdn.example/cap.png' }] }, // poll
       { uuid: 'p1' }, // create
-      {}, {}, // 2 variant POSTs
+      {},
+      {}, // 2 variant POSTs
       {}, // associate
       {}, // merchandise sync
     ]);
@@ -278,7 +307,8 @@ describe('ship_product: embroidery garments (cap/beanie incident)', () => {
   it('derives thread colors from the design when none are passed', async () => {
     const { api, calls } = apiFrom([
       capGarment,
-      PREP_POST, prepEmbroidery(),
+      PREP_POST,
+      prepEmbroidery(),
       { job_uuid: 'j1' },
       { status: 'completed', previews: [{ preview_url: 'https://cdn.example/cap.png' }] },
       { uuid: 'p1' },
@@ -313,8 +343,18 @@ describe('ship_product: embroidery garments (cap/beanie incident)', () => {
             cost: 11.69,
             templates: [
               // back first on purpose: the chooser must still pick 'front'.
-              { area_height: 1346, area_width: 1010, provider_location_ref_id: 'back', provider_ref_id: 150552 },
-              { area_height: 1346, area_width: 1010, provider_location_ref_id: 'front', provider_ref_id: 150551 },
+              {
+                area_height: 1346,
+                area_width: 1010,
+                provider_location_ref_id: 'back',
+                provider_ref_id: 150552,
+              },
+              {
+                area_height: 1346,
+                area_width: 1010,
+                provider_location_ref_id: 'front',
+                provider_ref_id: 150551,
+              },
             ],
           },
         ],
@@ -322,7 +362,8 @@ describe('ship_product: embroidery garments (cap/beanie incident)', () => {
     };
     const { api, calls } = apiFrom([
       teeViaVariantTemplates,
-      PREP_POST, prepDone('front', 1010, 1346),
+      PREP_POST,
+      prepDone('front', 1010, 1346),
       { job_uuid: 'j1' },
       { status: 'completed', previews: [{ preview_url: 'https://cdn.example/t.png' }] },
       { uuid: 'p1' },
@@ -353,7 +394,8 @@ describe('create_product', () => {
   it('generate_mockup:true renders a mockup by auto-deriving variants from the catalog (no mockup_variant_ids needed)', async () => {
     const { api, calls } = apiFrom([
       garmentDetail, // fetchGarment
-      PREP_POST, prepFront(),
+      PREP_POST,
+      prepFront(),
       { job_uuid: 'j1' }, // POST mockup preview
       { status: 'completed', previews: [{ preview_url: 'https://cdn.example/m.png' }] }, // GET job poll
       { uuid: 'p1' }, // POST product/create
@@ -375,6 +417,52 @@ describe('create_product', () => {
     const createCall = calls.find((c) => c.url.endsWith('/product/create'));
     const body = JSON.parse(createCall?.init?.body as string);
     expect(body.preview_job_uuid).toBe('j1');
+  });
+
+  // Regression: Gelato variant ids are STRING productUids, not numbers. mapMatrix used to coerce
+  // them to 0, so mockupIdsCoveringColors derived nothing and the mockup was silently skipped —
+  // the product ended up with the raw design as its display image instead of a rendered mockup.
+  it('generates a mockup for a Gelato garment using its STRING productUid variant id (not skipped)', async () => {
+    const gelatoPhoneCase = {
+      product: {
+        name: 'Iphone 16 Phone Case',
+        base_cost: 10.4,
+        variants: [
+          {
+            provider_ref_id: 'phonecase_apple_iphone-16_tough_white_glossy',
+            color: 'White',
+            size: '',
+            cost: 10.4,
+          },
+        ],
+        print_templates: [{ placement: 'default', area_width: 1000, area_height: 2000 }],
+      },
+    };
+    const { api, calls } = apiFrom([
+      gelatoPhoneCase, // fetchGarment
+      PREP_POST,
+      prepDone('default', 1000, 2000),
+      { job_uuid: 'jg' }, // POST mockup preview
+      { status: 'completed', previews: [{ preview_url: 'https://cdn.example/case.png' }] }, // job poll
+      { uuid: 'pg' }, // POST product/create
+    ]);
+    const res = (await createProduct.handler(
+      {
+        design_uuid: 'd1',
+        design_url: 'https://cdn.example/d.png',
+        garment: { provider_uuid: 'ge', product_ref_id: 'cGhv' },
+        pricing: { price: 39.99 },
+        product_meta: { name: 'Nebula Phone Case', description: 'cosmic' },
+        generate_mockup: true,
+      },
+      fakeContext(api),
+    )) as any;
+    // Mockup GENERATED, not skipped.
+    expect(res.mockup_status).toBe('generated');
+    // The mockup preview POST carried the STRING productUid as the variant id (not 0/dropped).
+    const mockupCall = calls.find((c) => c.url.endsWith('/merchandise/product/preview'));
+    const mbody = JSON.parse(mockupCall?.init?.body as string);
+    expect(mbody.variant_ids).toContain('phonecase_apple_iphone-16_tough_white_glossy');
   });
 });
 
@@ -487,10 +575,14 @@ describe('sync_to_fulfillment: thread-colors self-heal', () => {
     const { fetchImpl, calls } = queueFetch([
       jsonResponse(200, {}), // associate
       jsonResponse(400, {
-        message: '{"code":400,"result":"thread_colors option is missing or incorrect! Allowed values: #FFFFFF"}',
+        message:
+          '{"code":400,"result":"thread_colors option is missing or incorrect! Allowed values: #FFFFFF"}',
       }), // sync fails
       jsonResponse(200, {
-        product: { uuid: 'p1', print_files: [{ provider_ref_id: 'front', image_url: 'https://x/y.png' }] },
+        product: {
+          uuid: 'p1',
+          print_files: [{ provider_ref_id: 'front', image_url: 'https://x/y.png' }],
+        },
       }), // GET product: pre-fix product, no options to rewrite
     ]);
     const api = new ApiClient({
@@ -620,4 +712,3 @@ describe('delete_product', () => {
     expect(calls[0]?.init?.method).toBe('PATCH');
   });
 });
-
