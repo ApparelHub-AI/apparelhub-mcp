@@ -160,6 +160,102 @@ export const cascadePriceChange = defineTool({
   },
 });
 
+export const setPricesByMargin = defineTool({
+  name: 'set_prices_by_margin',
+  description:
+    "Set each variant's price to hit a target profit margin off its OWN cost: price = cost / (1 - margin). Reads per-variant production cost (populated after the fulfillment sync), applies a per-variant price, then re-syncs connected channels. Use this instead of one flat price when costs tier by size (larger sizes cost more, so a single price gives a different margin per size — and can go negative on the biggest). Requires store_uuid (cost lives on the store-products list, not product detail).",
+  inputSchema: z.object({
+    product_uuid: z.string().min(1),
+    store_uuid: z.string().min(1).describe('The store the product is in — needed to read per-variant cost and to re-sync channels.'),
+    margin: z.number().min(0).max(0.95).describe('Target profit margin as a fraction of the selling price, e.g. 0.15 = 15%.'),
+    also_update_channels: z.boolean().optional().describe('Default true.'),
+    workspace: z.string().optional(),
+  }),
+  annotations: { openWorldHint: true },
+  handler: async (input, ctx) => {
+    const ws = input.workspace;
+    // Per-variant cost lives on the store-products list (variants[].cost), populated by the
+    // fulfillment sync. Product-detail omits it, so read the list and find this product.
+    const list = await ctx.api.get(`store/${enc(input.store_uuid)}/products`, {
+      workspace: ws,
+      signal: ctx.signal,
+    });
+    const products = asArray(isRecord(list) ? (list.products ?? list.items) : list);
+    const product = products.find((p) => isRecord(p) && p.uuid === input.product_uuid);
+    if (!isRecord(product)) {
+      throw new Error(`Product ${input.product_uuid} not found in store ${input.store_uuid}.`);
+    }
+    const variants = asArray(product.variants);
+    if (!variants.length) {
+      throw new Error('Product has no variants to price (add variants and sync to fulfillment first).');
+    }
+
+    const factor = 1 - input.margin;
+    const variantUpdates: Record<string, unknown>[] = [];
+    const missingCost: string[] = [];
+    for (const v of variants) {
+      if (!isRecord(v)) continue;
+      const vuuid = str(v, 'uuid');
+      if (!vuuid) continue;
+      const cost = num(v, 'cost');
+      if (cost === undefined || !(cost > 0)) {
+        missingCost.push(str(v, 'name') ?? vuuid);
+        continue;
+      }
+      const price = Math.round((cost / factor) * 100) / 100;
+      try {
+        await ctx.api.put(`product/${enc(input.product_uuid)}/variants/${enc(vuuid)}`, {
+          body: { name: str(v, 'name'), color: str(v, 'color'), size: str(v, 'size'), price },
+          workspace: ws,
+          signal: ctx.signal,
+        });
+        variantUpdates.push({ variant_uuid: vuuid, name: str(v, 'name'), cost, price });
+      } catch (err) {
+        variantUpdates.push({
+          variant_uuid: vuuid,
+          status: 'failed',
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    const channelUpdates: Record<string, unknown>[] = [];
+    const channels = asArray(product.channel_statuses ?? product.ecommerce_statuses);
+    if ((input.also_update_channels ?? true) && channels.length) {
+      for (const ch of channels) {
+        const integ = str(ch, 'integration_uuid', 'uuid');
+        if (!integ) continue;
+        try {
+          await ctx.api.post(`store/${enc(input.store_uuid)}/products/${enc(input.product_uuid)}/sync`, {
+            query: { target: 'ecommerce', integration_uuid: integ },
+            workspace: ws,
+            signal: ctx.signal,
+          });
+          channelUpdates.push({ integration_uuid: integ, status: 'updated' });
+        } catch (err) {
+          channelUpdates.push({
+            integration_uuid: integ,
+            status: 'failed',
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+
+    return {
+      product_uuid: input.product_uuid,
+      margin: input.margin,
+      variant_updates: variantUpdates,
+      variants_missing_cost: missingCost.length ? missingCost : undefined,
+      channel_updates: channelUpdates,
+      product_url: viewUrl.product(input.product_uuid),
+      note: missingCost.length
+        ? 'Some variants had no cost (not yet synced to fulfillment) and were skipped — sync to fulfillment, then re-run.'
+        : undefined,
+    };
+  },
+});
+
 export const recoverFromOutage = defineTool({
   name: 'recover_from_outage',
   description:
@@ -240,5 +336,6 @@ export const systemsTools: ToolDef[] = [
   analyzeWhatWorks,
   autoOptimizeListings,
   cascadePriceChange,
+  setPricesByMargin,
   recoverFromOutage,
 ];
