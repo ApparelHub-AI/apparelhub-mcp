@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { defineTool, type ToolDef } from './registry.js';
 import { AhError } from '../errors.js';
-import { asArray, isRecord, num, str, total } from '../util/shape.js';
+import { asArray, isRecord, num, str, total, variantRef } from '../util/shape.js';
 import {
   garmentWarnings,
   pricingFloor,
@@ -109,7 +109,13 @@ export const browseCatalog = defineTool({
 
 function mapVariant(raw: unknown): Record<string, unknown> {
   return {
-    provider_variant_id: num(raw, 'id', 'variant_id', 'provider_variant_id', 'provider_ref_id'),
+    provider_variant_id: variantRef(
+      raw,
+      'id',
+      'variant_id',
+      'provider_variant_id',
+      'provider_ref_id',
+    ),
     color: str(raw, 'color', 'color_name'),
     color_hex: str(raw, 'color_hex', 'hex', 'color_code'),
     size: str(raw, 'size'),

@@ -16,7 +16,7 @@ export interface MockupParams {
   generated_image_uuid: string;
   provider_product_ref_id: string;
   templates: Record<string, unknown>[];
-  variant_ids: number[];
+  variant_ids: (number | string)[];
 }
 
 export interface MockupResult {
@@ -75,7 +75,11 @@ export async function runMockup(
     const previewUrl = firstPreviewUrl(previews);
 
     if (status === 'failed') {
-      throw new AhError({ code: 'mockup_failed', message: 'Mockup generation failed.', suggestion: 'Retry, or verify the design + garment.' });
+      throw new AhError({
+        code: 'mockup_failed',
+        message: 'Mockup generation failed.',
+        suggestion: 'Retry, or verify the design + garment.',
+      });
     }
     // BOTH gates: status completed AND a preview_url actually populated.
     if (status === 'completed' && previewUrl) {

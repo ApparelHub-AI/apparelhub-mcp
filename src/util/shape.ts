@@ -37,6 +37,24 @@ export function num(obj: unknown, ...keys: string[]): number | undefined {
   return undefined;
 }
 
+/** Read a provider VARIANT id, which is numeric on Printful/Printify but a STRING productUid on
+ *  Gelato (e.g. "phonecase_apple_iphone-16_tough_white_glossy"). Returns a number for all-digit
+ *  values, otherwise the raw string — NEVER coerces a non-numeric id to 0 (which silently drops
+ *  Gelato variants and skips their mockup). The platform's preview/create/variant endpoints compare
+ *  variant ids AS STRINGS, so passing the string through works for every provider. */
+export function variantRef(obj: unknown, ...keys: string[]): number | string | undefined {
+  if (!isRecord(obj)) return undefined;
+  for (const k of keys) {
+    const v = obj[k];
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+    if (typeof v === 'string' && v.trim()) {
+      const t = v.trim();
+      return /^\d+$/.test(t) ? Number(t) : t;
+    }
+  }
+  return undefined;
+}
+
 /** Read the first present boolean among candidate keys. */
 export function bool(obj: unknown, ...keys: string[]): boolean | undefined {
   if (!isRecord(obj)) return undefined;

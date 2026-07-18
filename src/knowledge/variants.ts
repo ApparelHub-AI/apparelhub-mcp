@@ -1,8 +1,11 @@
 // Variant resolution: map requested (color, size) pairs to provider_variant_ids from a
 // garment's variant matrix, and guard the BC 3001 AQUA-vs-Navy trap (Lesson 7).
 
+/** A provider variant id: numeric on Printful/Printify, a string productUid on Gelato. */
+export type VariantId = number | string;
+
 export interface MatrixVariant {
-  provider_variant_id: number;
+  provider_variant_id: VariantId;
   color?: string;
   size?: string;
   cost?: number;
@@ -13,14 +16,14 @@ export interface RequestedVariant {
   sizes: string[];
   price?: number;
   /** Explicit ids (zipped with sizes) — overrides name resolution. */
-  provider_variant_ids?: number[];
+  provider_variant_ids?: VariantId[];
 }
 
 export interface ResolvedVariant {
   name: string;
   color: string;
   size: string;
-  provider_variant_id: number;
+  provider_variant_id: VariantId;
   price?: number;
 }
 
@@ -78,7 +81,7 @@ export function resolveVariants(
   for (const req of requested) {
     const price = req.price ?? defaultPrice;
     req.sizes.forEach((size, i) => {
-      let vid: number | undefined;
+      let vid: VariantId | undefined;
       if (req.provider_variant_ids && req.provider_variant_ids[i] !== undefined) {
         vid = req.provider_variant_ids[i];
       } else {
@@ -93,7 +96,12 @@ export function resolveVariants(
         unresolved.push({ color: req.color, size });
         return;
       }
-      if (productRefId === '71' && BC3001_AQUA_IDS.has(vid) && /navy/i.test(req.color)) {
+      if (
+        productRefId === '71' &&
+        typeof vid === 'number' &&
+        BC3001_AQUA_IDS.has(vid) &&
+        /navy/i.test(req.color)
+      ) {
         warnings.push(
           `Requested "${req.color}" ${size} resolved to variant ${vid}, which is AQUA on BC 3001, not Navy. ` +
             `Use Heather Midnight Navy (8495-8499) instead.`,

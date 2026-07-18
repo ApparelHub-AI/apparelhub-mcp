@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { defineTool, type ToolDef } from './registry.js';
 import { AhError } from '../errors.js';
-import { asArray, isRecord, num, str, viewUrl } from '../util/shape.js';
+import { asArray, isRecord, num, str, variantRef, viewUrl } from '../util/shape.js';
 import { pricingFloor, type PrintStyle } from '../knowledge/garments.js';
 import {
   expectedThreadColorsIdFromError,
@@ -9,7 +9,7 @@ import {
   normalizeThreadColors,
   threadColorsOptionId,
 } from '../knowledge/embroidery.js';
-import { resolveVariants, type MatrixVariant } from '../knowledge/variants.js';
+import { resolveVariants, type MatrixVariant, type VariantId } from '../knowledge/variants.js';
 import { runMockup } from '../image/mockup.js';
 import { resolveImageUrl } from './design.js';
 import type { ToolContext } from './context.js';
@@ -43,7 +43,8 @@ function mapMatrix(raw: unknown): MatrixVariant[] {
     // variant resolves to 0 and the platform rejects it ("No valid variants found matching the
     // selection"). Mirrors catalog.ts's mapVariant (get_garment_details). Printful is unaffected
     // (it has `id`, read first). num() coerces the numeric string.
-    provider_variant_id: num(v, 'id', 'variant_id', 'provider_variant_id', 'provider_ref_id') ?? 0,
+    provider_variant_id:
+      variantRef(v, 'id', 'variant_id', 'provider_variant_id', 'provider_ref_id') ?? 0,
     color: str(v, 'color', 'color_name'),
     size: str(v, 'size'),
     cost: num(v, 'cost', 'price'),
@@ -58,15 +59,18 @@ function mapMatrix(raw: unknown): MatrixVariant[] {
  * so the product's gallery has a mockup for each variant color (not just the first).
  */
 function mockupIdsCoveringColors(
-  variants: { color?: string; provider_variant_id: number }[],
+  variants: { color?: string; provider_variant_id: VariantId }[],
   cap = 5,
-): number[] {
+): VariantId[] {
   const seen = new Set<string>();
-  const ids: number[] = [];
+  const ids: VariantId[] = [];
   for (const v of variants) {
     const id = v.provider_variant_id;
+    // Valid = a positive number (Printful/Printify) OR a non-empty string (Gelato productUid).
+    // Zeroing/dropping a string id here is what silently skipped Gelato mockups.
+    const valid = (typeof id === 'number' && id > 0) || (typeof id === 'string' && id.length > 0);
     const color = (v.color ?? '').toLowerCase().trim();
-    if (typeof id === 'number' && id > 0 && !seen.has(color)) {
+    if (valid && !seen.has(color)) {
       seen.add(color);
       ids.push(id);
       if (ids.length >= cap) break;
@@ -106,10 +110,10 @@ async function fetchGarment(
   productRefId: string,
   workspace?: string,
 ): Promise<GarmentInfo> {
-  const raw = await ctx.api.get(
-    `merchandise/${enc(providerUuid)}/product/${enc(productRefId)}`,
-    { workspace, signal: ctx.signal },
-  );
+  const raw = await ctx.api.get(`merchandise/${enc(providerUuid)}/product/${enc(productRefId)}`, {
+    workspace,
+    signal: ctx.signal,
+  });
   const g = isRecord(raw) && isRecord(raw.product) ? raw.product : raw;
   const matrix = mapMatrix(isRecord(g) ? g.variants : undefined);
   let templates = asArray(
@@ -143,7 +147,6 @@ async function fetchGarment(
     name: str(g, 'name', 'title'),
   };
 }
-
 
 interface PreparedPrintData {
   print_data: Record<string, unknown>[];
@@ -187,14 +190,11 @@ async function preparePrintData(
   printStyle: 'auto' | PrintStyle,
   workspace?: string,
 ): Promise<PreparedPrintData> {
-  const start = await ctx.api.post(
-    `images/generated/${enc(designUuid)}/prepare-print-data`,
-    {
-      body: { provider_uuid: providerUuid, product_ref: productRef, print_style: printStyle },
-      workspace,
-      signal: ctx.signal,
-    },
-  );
+  const start = await ctx.api.post(`images/generated/${enc(designUuid)}/prepare-print-data`, {
+    body: { provider_uuid: providerUuid, product_ref: productRef, print_style: printStyle },
+    workspace,
+    signal: ctx.signal,
+  });
   const jobUuid = str(start, 'job_uuid');
   if (!jobUuid) {
     // Defensive: a completed-synchronously body.
@@ -389,7 +389,7 @@ const variantSchema = z.object({
   color: z.string().min(1),
   sizes: z.array(z.string().min(1)).min(1),
   price: z.number().positive().optional(),
-  provider_variant_ids: z.array(z.number()).optional(),
+  provider_variant_ids: z.array(z.union([z.number(), z.string()])).optional(),
 });
 
 export const shipProduct = defineTool({
@@ -402,9 +402,14 @@ export const shipProduct = defineTool({
     variants: z.array(variantSchema).min(1),
     pricing: z.object({ price: z.number().positive(), shipping_price: z.number().optional() }),
     product_meta: z.object({ name: z.string().min(1), description: z.string() }),
-    store_uuid: z.string().optional().describe('Omit to create a standalone (unassociated) product.'),
+    store_uuid: z
+      .string()
+      .optional()
+      .describe('Omit to create a standalone (unassociated) product.'),
     sync_to_channels: z
-      .array(z.object({ integration_uuid: z.string(), state: z.enum(['draft', 'live']).optional() }))
+      .array(
+        z.object({ integration_uuid: z.string(), state: z.enum(['draft', 'live']).optional() }),
+      )
       .optional(),
     generate_mockup: z.boolean().optional().describe('Default true.'),
     print_style: z
@@ -430,7 +435,12 @@ export const shipProduct = defineTool({
     const warnings: string[] = [];
 
     await ctx.progress.report(5, 'Resolving garment + variants...');
-    const garment = await fetchGarment(ctx, input.garment.provider_uuid, input.garment.product_ref_id, ws);
+    const garment = await fetchGarment(
+      ctx,
+      input.garment.provider_uuid,
+      input.garment.product_ref_id,
+      ws,
+    );
     enforcePricingFloor(garment.baseCost, input.pricing.price);
 
     const resolvedR = resolveVariants(
@@ -472,8 +482,14 @@ export const shipProduct = defineTool({
 
     await ctx.progress.report(12, 'Composing print files...');
     const prep = await preparePrintData(
-      ctx, designUuid, designUrl, input.garment.provider_uuid, input.garment.product_ref_id,
-      input.print_style ?? 'auto', ws);
+      ctx,
+      designUuid,
+      designUrl,
+      input.garment.provider_uuid,
+      input.garment.product_ref_id,
+      input.print_style ?? 'auto',
+      ws,
+    );
     designUuid = prep.image_uuid;
     designUrl = prep.image_url;
     warnings.push(...prep.warnings);
@@ -522,7 +538,10 @@ export const shipProduct = defineTool({
     });
     const productUuid = str(created, 'uuid', 'product_uuid') ?? '';
     if (!productUuid) {
-      throw new AhError({ code: 'internal_error', message: 'Product create did not return a uuid.' });
+      throw new AhError({
+        code: 'internal_error',
+        message: 'Product create did not return a uuid.',
+      });
     }
 
     await ctx.progress.report(70, `Adding ${resolvedR.resolved.length} variants...`);
@@ -552,7 +571,12 @@ export const shipProduct = defineTool({
       });
       await ctx.progress.report(85, 'Syncing to fulfillment...');
       try {
-        const healed = await syncFulfillmentHealingThreadColors(ctx, input.store_uuid, productUuid, ws);
+        const healed = await syncFulfillmentHealingThreadColors(
+          ctx,
+          input.store_uuid,
+          productUuid,
+          ws,
+        );
         fulfillmentStatus = 'synced';
         if (healed.healedOptionId) {
           warnings.push(
@@ -561,18 +585,27 @@ export const shipProduct = defineTool({
         }
       } catch (err) {
         fulfillmentStatus = 'failed';
-        warnings.push(`Fulfillment sync failed: ${err instanceof AhError ? err.message : String(err)}`);
+        warnings.push(
+          `Fulfillment sync failed: ${err instanceof AhError ? err.message : String(err)}`,
+        );
       }
 
       // Only sync to sales channels AFTER fulfillment (lifecycle ordering).
       for (const ch of input.sync_to_channels ?? []) {
         const state = ch.state ?? 'draft';
         try {
-          const r = await ctx.api.post(`store/${enc(input.store_uuid)}/products/${enc(productUuid)}/sync`, {
-            query: { target: 'ecommerce', integration_uuid: ch.integration_uuid, listing_state: state },
-            workspace: ws,
-            signal: ctx.signal,
-          });
+          const r = await ctx.api.post(
+            `store/${enc(input.store_uuid)}/products/${enc(productUuid)}/sync`,
+            {
+              query: {
+                target: 'ecommerce',
+                integration_uuid: ch.integration_uuid,
+                listing_state: state,
+              },
+              workspace: ws,
+              signal: ctx.signal,
+            },
+          );
           channelResults.push({
             integration_uuid: ch.integration_uuid,
             status: state === 'live' ? 'synced_as_live' : 'synced_as_draft',
@@ -616,7 +649,12 @@ export const createProduct = defineTool({
     pricing: z.object({ price: z.number().positive(), shipping_price: z.number().optional() }),
     product_meta: z.object({ name: z.string().min(1), description: z.string() }),
     generate_mockup: z.boolean().optional(),
-    mockup_variant_ids: z.array(z.number()).optional().describe('Representative variant ids for the mockup preview.'),
+    mockup_variant_ids: z
+      .array(z.union([z.number(), z.string()]))
+      .optional()
+      .describe(
+        'Representative variant ids for the mockup preview (numeric on Printful/Printify, string productUids on Gelato).',
+      ),
     print_style: z
       .enum(['auto', 'placed', 'fill'])
       .optional()
@@ -637,15 +675,26 @@ export const createProduct = defineTool({
   annotations: { openWorldHint: true },
   handler: async (input, ctx) => {
     const ws = input.workspace;
-    const garment = await fetchGarment(ctx, input.garment.provider_uuid, input.garment.product_ref_id, ws);
+    const garment = await fetchGarment(
+      ctx,
+      input.garment.provider_uuid,
+      input.garment.product_ref_id,
+      ws,
+    );
     enforcePricingFloor(garment.baseCost, input.pricing.price);
     let designUuid = input.design_uuid;
     let designUrl = input.design_url ?? (await resolveImageUrl(ctx, input.design_uuid, ws));
 
     const warnings: string[] = [];
     const prep = await preparePrintData(
-      ctx, designUuid, designUrl, input.garment.provider_uuid, input.garment.product_ref_id,
-      input.print_style ?? 'auto', ws);
+      ctx,
+      designUuid,
+      designUrl,
+      input.garment.provider_uuid,
+      input.garment.product_ref_id,
+      input.print_style ?? 'auto',
+      ws,
+    );
     designUuid = prep.image_uuid;
     designUrl = prep.image_url;
     warnings.push(...prep.warnings);
@@ -724,11 +773,14 @@ export const createProduct = defineTool({
 export const addVariants = defineTool({
   name: 'add_variants',
   description:
-    'Add variants to an existing product (split primitive). Resolves provider_variant_ids by color+size from the product\'s provider options (or pass them explicitly). Warns on the AQUA-vs-Navy trap. Variants must exist before syncing.',
+    "Add variants to an existing product (split primitive). Resolves provider_variant_ids by color+size from the product's provider options (or pass them explicitly). Warns on the AQUA-vs-Navy trap. Variants must exist before syncing.",
   inputSchema: z.object({
     product_uuid: z.string().min(1),
     variants: z.array(variantSchema).min(1),
-    product_ref_id: z.string().optional().describe('Enables the AQUA-vs-Navy guard for BC 3001 ("71").'),
+    product_ref_id: z
+      .string()
+      .optional()
+      .describe('Enables the AQUA-vs-Navy guard for BC 3001 ("71").'),
     workspace: z.string().optional(),
   }),
   annotations: { openWorldHint: true },
@@ -759,7 +811,9 @@ export const addVariants = defineTool({
       // Fail LOUDLY instead of silently creating a 0-variant product. The usual cause is assuming
       // apparel sizes (S/M/L/XL/2XL) for a garment that uses different labels — caps/beanies/phone
       // cases/bottles are often one-size. Sizes are matched exactly, so a mismatch resolves nothing.
-      const colors = [...new Set(matrix.map((m) => m.color).filter((c): c is string => Boolean(c)))];
+      const colors = [
+        ...new Set(matrix.map((m) => m.color).filter((c): c is string => Boolean(c))),
+      ];
       const sizes = [...new Set(matrix.map((m) => m.size).filter((s): s is string => Boolean(s)))];
       throw new AhError({
         code: 'bad_request',
@@ -773,7 +827,13 @@ export const addVariants = defineTool({
     let added = 0;
     for (const v of resolvedR.resolved) {
       await ctx.api.post(`product/${enc(input.product_uuid)}/variants`, {
-        body: { name: v.color, price: v.price, color: v.color, size: v.size, provider_variant_id: v.provider_variant_id },
+        body: {
+          name: v.color,
+          price: v.price,
+          color: v.color,
+          size: v.size,
+          provider_variant_id: v.provider_variant_id,
+        },
         workspace: ws,
         signal: ctx.signal,
       });
@@ -803,7 +863,12 @@ export const syncToFulfillment = defineTool({
     // Associate with the store (idempotent) THEN sync to the fulfillment provider. The association
     // was previously missing here, so a product created by create_product (standalone) could not
     // be fulfillment-synced without a separate association call the split-primitive path never made.
-    const healed = await associateAndSyncFulfillment(ctx, input.store_uuid, input.product_uuid, input.workspace);
+    const healed = await associateAndSyncFulfillment(
+      ctx,
+      input.store_uuid,
+      input.product_uuid,
+      input.workspace,
+    );
     return {
       product_uuid: input.product_uuid,
       store_uuid: input.store_uuid,
@@ -836,7 +901,11 @@ export const syncToChannel = defineTool({
 
     const channelSync = () =>
       ctx.api.post(`store/${enc(input.store_uuid)}/products/${enc(input.product_uuid)}/sync`, {
-        query: { target: 'ecommerce', integration_uuid: input.integration_uuid, listing_state: state },
+        query: {
+          target: 'ecommerce',
+          integration_uuid: input.integration_uuid,
+          listing_state: state,
+        },
         workspace: ws,
         signal: ctx.signal,
       });
@@ -876,7 +945,8 @@ export const syncToChannel = defineTool({
 
 export const updateProduct = defineTool({
   name: 'update_product',
-  description: 'Update a product (name, description, price). For a price change that must propagate to synced channels, prefer cascade_price_change.',
+  description:
+    'Update a product (name, description, price). For a price change that must propagate to synced channels, prefer cascade_price_change.',
   inputSchema: z.object({
     product_uuid: z.string().min(1),
     changes: z.object({
