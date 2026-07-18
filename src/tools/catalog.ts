@@ -24,7 +24,7 @@ const providerInput = z
   .string()
   .min(1)
   .describe(
-    'The fulfillment provider to browse, by name (case-insensitive). Must be a provider this account has access to; an unrecognized name returns the list of providers available to the account.',
+    'The fulfillment provider to browse, by name (case-insensitive). Must be a provider this account has access to — call list_catalog_providers to see valid values (the set is account-specific). An unrecognized name returns the list of providers available to the account.',
   );
 
 /**
@@ -211,4 +211,34 @@ export const recommendGarmentTool = defineTool({
   },
 });
 
-export const catalogTools: ToolDef[] = [browseCatalog, getGarmentDetails, recommendGarmentTool];
+export const listCatalogProviders = defineTool({
+  name: 'list_catalog_providers',
+  description:
+    'List the fulfillment providers this account can browse catalogs from. Use this to discover valid `provider` values for browse_catalog / get_garment_details — the set is account-specific and auth-gated on the platform (a provider only appears if this account is entitled to it), so never assume a fixed list. Read-only.',
+  inputSchema: z.object({
+    workspace: z.string().optional(),
+  }),
+  annotations: { readOnlyHint: true, openWorldHint: true },
+  handler: async (input, ctx) => {
+    const raw = await ctx.api.get('merchandise/providers', {
+      workspace: input.workspace,
+      signal: ctx.signal,
+    });
+    const providers = asArray(raw, 'providers', 'merchandise_providers')
+      .map((p) => ({
+        name: str(p, 'name', 'provider_name'),
+        uuid: str(p, 'uuid', 'provider_uuid'),
+        active: isRecord(p) ? Boolean(p.active) : undefined,
+        auth_mode: str(p, 'user_auth_mode'),
+      }))
+      .filter((p) => p.name);
+    return { providers, total: providers.length };
+  },
+});
+
+export const catalogTools: ToolDef[] = [
+  browseCatalog,
+  getGarmentDetails,
+  recommendGarmentTool,
+  listCatalogProviders,
+];

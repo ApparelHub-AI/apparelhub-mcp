@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { browseCatalog, getGarmentDetails, recommendGarmentTool } from '../src/tools/catalog.js';
+import {
+  browseCatalog,
+  getGarmentDetails,
+  recommendGarmentTool,
+  listCatalogProviders,
+} from '../src/tools/catalog.js';
 import { fakeContext } from './helpers/ctx.js';
 import { apiSequence } from './helpers/fakeFetch.js';
 
@@ -224,5 +229,28 @@ describe('catalog mapping against live platform shapes', () => {
     expect(res.variants[0]).toMatchObject({ provider_variant_id: 23889, cost: 13.2 });
     expect(res.print_templates[0]).toMatchObject({ placement: 'default', area_width: 1622 });
     expect(res.print_templates[0].recommended_image_size).toEqual({ width: 3000, height: 3000 });
+  });
+});
+
+describe('list_catalog_providers', () => {
+  it("returns the account's entitled providers (incl. gated ones like Gelato)", async () => {
+    const merchandise = {
+      providers: [
+        { uuid: 'pf-uuid', name: 'Printful', active: true, user_auth_mode: 'oauth' },
+        { uuid: 'py-uuid', name: 'Printify', active: true, user_auth_mode: 'pat' },
+        { uuid: 'ge-uuid', name: 'Gelato', active: true, user_auth_mode: 'pat' },
+      ],
+    };
+    const { api, calls } = apiSequence([merchandise]);
+    const res = (await listCatalogProviders.handler({}, fakeContext(api))) as any;
+    expect(calls[0]?.url).toContain('/agents/v1/merchandise/providers');
+    expect(res.total).toBe(3);
+    expect(res.providers.map((p: any) => p.name)).toEqual(['Printful', 'Printify', 'Gelato']);
+    expect(res.providers[2]).toMatchObject({
+      name: 'Gelato',
+      uuid: 'ge-uuid',
+      active: true,
+      auth_mode: 'pat',
+    });
   });
 });
