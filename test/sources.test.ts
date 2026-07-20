@@ -61,11 +61,14 @@ describe('buildIterationPrompt', () => {
 });
 
 describe('EDIT_CAPABLE_SOURCES', () => {
-  it('is Nano Banana + the OpenAI-backed sources (GPT Image 2 is native/edit-capable now)', () => {
-    expect(EDIT_CAPABLE_SOURCES.has('Nano Banana')).toBe(true);
-    expect(EDIT_CAPABLE_SOURCES.has('OpenAI')).toBe(true);
-    expect(EDIT_CAPABLE_SOURCES.has('GPT Image 2')).toBe(true);
-    expect(EDIT_CAPABLE_SOURCES.has('Seedream 4.0')).toBe(false);
+  it('is almost every source now (only Google Imagen 4 is text-to-image only) — #705', () => {
+    for (const s of [
+      'Nano Banana', 'OpenAI', 'GPT Image 2', 'Seedream 4.0', 'Seedream 4.5',
+      'Flux 1.1 Pro', 'Flux 2 Pro', 'Grok Imagine', 'Wan 2.7',
+    ]) {
+      expect(EDIT_CAPABLE_SOURCES.has(s)).toBe(true);
+    }
+    expect(EDIT_CAPABLE_SOURCES.has('Google Imagen 4')).toBe(false);
   });
 });
 
@@ -89,17 +92,18 @@ describe('fallbackLadder', () => {
     expect(fallbackLadder({ source: 'Nano Banana' })).toEqual(['Nano Banana', 'Flux 1.1 Pro', 'OpenAI']);
   });
 
-  it('filters an explicit non-edit source out of the edit ladder', () => {
-    // A pinned Replicate source cannot edit, so it is dropped and the edit ladder stands.
-    expect(fallbackLadder({ source: 'Flux 1.1 Pro', edit: true })).toEqual(['Nano Banana', 'OpenAI']);
+  it('filters a text-to-image-only source out of the edit ladder', () => {
+    // Google Imagen 4 is the ONLY text-only source now -> dropped from an edit ladder.
+    expect(fallbackLadder({ source: 'Google Imagen 4', edit: true })).toEqual(['Nano Banana', 'OpenAI']);
     // A pinned edit-capable source still leads.
     expect(fallbackLadder({ source: 'OpenAI', edit: true })).toEqual(['OpenAI', 'Nano Banana']);
   });
 
-  it('honors an explicit GPT Image 2 edit (now edit-capable), but keeps it out of the auto ladder', () => {
-    // GPT Image 2 became native (gpt-image-2) in apparelhub-ai#702 -> edit-capable.
+  it('honors an explicit edit on any edit-capable source, but keeps the auto ladder conservative', () => {
+    // Replicate + GPT Image 2 edits are now honored (apparelhub-ai#705/#702).
+    expect(fallbackLadder({ source: 'Seedream 4.5', edit: true })).toEqual(['Seedream 4.5', 'Nano Banana', 'OpenAI']);
     expect(fallbackLadder({ source: 'GPT Image 2', edit: true })).toEqual(['GPT Image 2', 'Nano Banana', 'OpenAI']);
-    // ...but it shares the OpenAI account, so the DEFAULT edit ladder still omits it (no provider diversity).
+    // ...but the DEFAULT edit ladder stays the two reliable, provider-diverse models.
     expect(fallbackLadder({ edit: true })).toEqual(['Nano Banana', 'OpenAI']);
   });
 });

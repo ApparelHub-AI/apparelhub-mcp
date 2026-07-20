@@ -294,10 +294,10 @@ describe('iterate_design fallback wiring', () => {
     expect(sources).toEqual(['Nano Banana', 'OpenAI']);
   });
 
-  it('still hard-rejects a pinned non-edit-capable source', async () => {
+  it('still hard-rejects a text-to-image-only source (Google Imagen 4)', async () => {
     await expect(
       iterateDesign.handler(
-        { source_design_uuid: 'g1', change_description: 'blue', source: 'Seedream 4.0' },
+        { source_design_uuid: 'g1', change_description: 'blue', source: 'Google Imagen 4' },
         fakeContext(),
       ),
     ).rejects.toMatchObject({ code: 'unprocessable' });

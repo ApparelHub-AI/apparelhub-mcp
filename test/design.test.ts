@@ -318,10 +318,10 @@ describe('design_apparel', () => {
 });
 
 describe('iterate_design', () => {
-  it('rejects a source that cannot edit', async () => {
+  it('rejects a text-to-image-only source (Google Imagen 4) for editing', async () => {
     await expect(
       iterateDesign.handler(
-        { source_design_uuid: 'g1', change_description: 'blue', source: 'Seedream 4.0' },
+        { source_design_uuid: 'g1', change_description: 'blue', source: 'Google Imagen 4' },
         fakeContext(),
       ),
     ).rejects.toMatchObject({ code: 'unprocessable' });

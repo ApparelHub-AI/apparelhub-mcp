@@ -395,7 +395,7 @@ export const designApparel = defineTool({
 export const iterateDesign = defineTool({
   name: 'iterate_design',
   description:
-    'Generate a variation of an existing design via img2img (e.g. "make the cactus blue"). Only Nano Banana and OpenAI support editing; other sources are rejected by the API.',
+    'Generate a variation of an existing design via img2img (e.g. "make the cactus blue"). Almost every source supports editing; only Google Imagen 4 is text-to-image-only (rejected). Multi-reference edits (several source images) work on Seedream, Flux 2 Pro, and Wan; slow-model edits return 202 and are polled automatically.',
   inputSchema: z.object({
     source_design_uuid: z.string().min(1),
     change_description: z.string().min(1),
@@ -405,7 +405,7 @@ export const iterateDesign = defineTool({
       .boolean()
       .optional()
       .describe(
-        'Disable the model-fallback ladder. By default a rate-limited/transient editing model transparently retries with the other edit-capable model (see fallback_trail); set true to fail on the chosen source alone.',
+        'Disable the model-fallback ladder. By default a rate-limited/transient editing model transparently retries with another edit-capable model (see fallback_trail); set true to fail on the chosen source alone.',
       ),
     workspace: z.string().optional(),
   }),
@@ -413,12 +413,12 @@ export const iterateDesign = defineTool({
   handler: async (input, ctx) => {
     // Normalize a near-miss source (case/spelling) to its canonical name, or reject it clearly (#70).
     const source = normalizeSource(input.source ?? 'Nano Banana');
-    // Only Nano Banana / OpenAI can edit; a pinned Replicate source is a hard error, not a silent
-    // switch, so the user learns their choice is invalid for editing.
+    // Almost every source can edit; only a text-to-image-only source (Google Imagen 4) is a hard
+    // error, not a silent switch, so the user learns their choice is invalid for editing.
     if (!EDIT_CAPABLE_SOURCES.has(source)) {
       throw new AhError({
         code: 'unprocessable',
-        message: `Source "${source}" does not support editing. Use Nano Banana or OpenAI.`,
+        message: `Source "${source}" is text-to-image only and cannot edit. Pick any other source (e.g. Nano Banana, Seedream, Flux).`,
       });
     }
     const preserve = input.preserve ?? ['composition', 'subject'];
