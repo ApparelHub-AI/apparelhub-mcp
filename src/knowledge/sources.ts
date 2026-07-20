@@ -47,10 +47,14 @@ export function normalizeSource(source: string): string {
   });
 }
 
-// Nano Banana + the OpenAI-backed sources (OpenAI = gpt-image, GPT Image 2 = gpt-image-2) support
-// the img2img edit endpoint; Replicate-backed sources 422. GPT Image 2 became native (openai
-// module) in apparelhub-ai#702, so it is now edit-capable (was a Replicate proxy → 422).
-export const EDIT_CAPABLE_SOURCES = new Set<string>(['Nano Banana', 'OpenAI', 'GPT Image 2']);
+// Almost every source supports the img2img edit endpoint now (apparelhub-ai#705 enabled per-model
+// Replicate editing). The ONLY text-to-image-only source is Google Imagen 4 (edit → clean 400).
+// Multi-reference (several source images) works on the array-input models — see the platform's
+// per-source `supports_multi_image`.
+export const EDIT_CAPABLE_SOURCES = new Set<string>([
+  'Nano Banana', 'OpenAI', 'GPT Image 2',
+  'Seedream 4.0', 'Seedream 4.5', 'Flux 1.1 Pro', 'Flux 2 Pro', 'Grok Imagine', 'Wan 2.7',
+]);
 
 /** Pick a source. Nano Banana is the best all-rounder (photoreal + text + abstract). OpenAI is
  *  deliberately NEVER preferred (operator directive: it's the least-preferred model — its account
@@ -64,17 +68,18 @@ export function pickSource(_opts: { style?: DesignStyle; hasText?: boolean } = {
 // Replicate model, and OpenAI ALWAYS LAST (operator directive: OpenAI is the least-preferred
 // model — try everything else first). Each rung is on a DIFFERENT provider, so a per-provider
 // rate limit / account limit on the first is escaped. Edit (img2img) runs on the edit-capable
-// sources (Nano Banana + the OpenAI-backed OpenAI / GPT Image 2); the auto EDIT_LADDER keeps just
-// Nano Banana + OpenAI because GPT Image 2 shares the same OpenAI account (no provider diversity as
-// a fallback rung). An explicit GPT Image 2 edit is still honored via EDIT_CAPABLE_SOURCES.
+// sources (almost everything now — only Google Imagen 4 is text-only). The auto EDIT_LADDER keeps
+// the two most reliable, provider-diverse edit models (Nano Banana + OpenAI); an explicit edit on
+// any other edit-capable source (Seedream, Flux, Grok, Wan, GPT Image 2) is honored via
+// EDIT_CAPABLE_SOURCES.
 const DEFAULT_LADDER = ['Nano Banana', 'Flux 1.1 Pro', 'OpenAI'];
 const ABSTRACT_LADDER = ['Nano Banana', 'Flux 2 Pro', 'OpenAI'];
 const EDIT_LADDER = ['Nano Banana', 'OpenAI'];
 
 /** Build the ordered, de-duplicated list of sources to try for one generation. When an explicit
  *  `source` is given it goes FIRST, then the appropriate ladder is appended (deduped). When
- *  `edit` is true the list is restricted to the edit-capable sources (img2img); Replicate-backed
- *  sources 422 on the edit endpoint, so they can never be a valid edit fallback. */
+ *  `edit` is true the list is restricted to the edit-capable sources (img2img); a text-to-image-only
+ *  source (only Google Imagen 4) can never be a valid edit fallback. */
 export function fallbackLadder(
   opts: { style?: DesignStyle; source?: string; edit?: boolean } = {},
 ): string[] {
