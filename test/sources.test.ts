@@ -11,9 +11,9 @@ import {
 import { AhError } from '../src/errors.js';
 
 describe('pickSource', () => {
-  it('defaults to Nano Banana and picks OpenAI for abstract', () => {
+  it('defaults to Nano Banana and never prefers OpenAI (operator directive)', () => {
     expect(pickSource({})).toBe('Nano Banana');
-    expect(pickSource({ style: 'abstract' })).toBe('OpenAI');
+    expect(pickSource({ style: 'abstract' })).toBe('Nano Banana');
   });
 });
 
@@ -74,8 +74,8 @@ describe('fallbackLadder', () => {
     expect(fallbackLadder({ style: 'photoreal' })).toEqual(['Nano Banana', 'Flux 1.1 Pro', 'OpenAI']);
   });
 
-  it('uses the abstract ladder (OpenAI first) for abstract art', () => {
-    expect(fallbackLadder({ style: 'abstract' })).toEqual(['OpenAI', 'Nano Banana']);
+  it('uses the abstract ladder (OpenAI last) for abstract art', () => {
+    expect(fallbackLadder({ style: 'abstract' })).toEqual(['Nano Banana', 'Flux 2 Pro', 'OpenAI']);
   });
 
   it('restricts to the two edit-capable models for edits', () => {

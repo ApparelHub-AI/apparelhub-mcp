@@ -50,20 +50,22 @@ export function normalizeSource(source: string): string {
 // Only Nano Banana and OpenAI support the img2img edit endpoint; Replicate-backed sources 422.
 export const EDIT_CAPABLE_SOURCES = new Set<string>(['Nano Banana', 'OpenAI']);
 
-/** Pick a source. Nano Banana is the best all-rounder (photoreal + text); OpenAI is the pick
- *  for purely abstract art. The user can always override with an explicit source. */
-export function pickSource(opts: { style?: DesignStyle; hasText?: boolean } = {}): string {
-  if (opts.style === 'abstract') return 'OpenAI';
+/** Pick a source. Nano Banana is the best all-rounder (photoreal + text + abstract). OpenAI is
+ *  deliberately NEVER preferred (operator directive: it's the least-preferred model — its account
+ *  is a shared billing surface and it only wins on nothing today). The user can always override
+ *  with an explicit source. */
+export function pickSource(_opts: { style?: DesignStyle; hasText?: boolean } = {}): string {
   return 'Nano Banana';
 }
 
-// The default fallback ladder (spec §Phase 1). Nano Banana first (best all-rounder), then
-// Flux 1.1 Pro (Replicate) and OpenAI (OpenAI). Each rung is on a DIFFERENT provider, so a
-// per-provider rate limit on the first is escaped; the fallbacks are also fast (OpenAI is
-// synchronous, Flux 1.1 Pro is quick), so the time cost of falling back is small. Abstract art
-// prefers OpenAI. Edit (img2img) can only run on the two edit-capable sources.
+// The default fallback ladder (spec §Phase 1). Nano Banana first (best all-rounder), then a
+// Replicate model, and OpenAI ALWAYS LAST (operator directive: OpenAI is the least-preferred
+// model — try everything else first). Each rung is on a DIFFERENT provider, so a per-provider
+// rate limit / account limit on the first is escaped. Edit (img2img) can only run on the two
+// edit-capable sources, so OpenAI is the sole edit fallback (unavoidable — no other model
+// supports the edit endpoint).
 const DEFAULT_LADDER = ['Nano Banana', 'Flux 1.1 Pro', 'OpenAI'];
-const ABSTRACT_LADDER = ['OpenAI', 'Nano Banana'];
+const ABSTRACT_LADDER = ['Nano Banana', 'Flux 2 Pro', 'OpenAI'];
 const EDIT_LADDER = ['Nano Banana', 'OpenAI'];
 
 /** Build the ordered, de-duplicated list of sources to try for one generation. When an explicit
