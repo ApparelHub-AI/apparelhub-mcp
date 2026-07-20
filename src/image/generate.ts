@@ -72,8 +72,8 @@ export async function runGeneration(
     signal: deps.signal,
   });
 
-  // A SYNCHRONOUS success (a model that isn't on the platform's async slow-list, e.g. OpenAI /
-  // Grok Imagine, or a slow model that slipped to the sync path) returns 200 with the image nested
+  // A SYNCHRONOUS success (a model that isn't on the platform's async slow-list, e.g. Grok Imagine
+  // — the only fast/sync source now — or a slow model that slipped to the sync path) returns 200 with the image nested
   // under `generated_image`, NOT top-level like the async 202 does. Read both shapes so a synchronous
   // success isn't misreported as generation_failed even though it saved (ApparelHub-AI/apparelhub-mcp#70).
   const gi = isRecord(res) && isRecord(res.generated_image) ? res.generated_image : undefined;
@@ -231,7 +231,7 @@ async function pollGeneration(
       throw new AhError({
         code: 'generation_timeout',
         message: `Generation did not complete within ${Math.round(timeoutMs / 1000)}s.`,
-        suggestion: 'Retry, or use a faster model (OpenAI, Grok Imagine, Flux 1.1 Pro).',
+        suggestion: 'Retry, or use the fast synchronous model (Grok Imagine).',
       });
     }
     poll += 1;

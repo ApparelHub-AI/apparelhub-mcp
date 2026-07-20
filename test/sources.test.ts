@@ -61,9 +61,10 @@ describe('buildIterationPrompt', () => {
 });
 
 describe('EDIT_CAPABLE_SOURCES', () => {
-  it('is Nano Banana + OpenAI only', () => {
+  it('is Nano Banana + the OpenAI-backed sources (GPT Image 2 is native/edit-capable now)', () => {
     expect(EDIT_CAPABLE_SOURCES.has('Nano Banana')).toBe(true);
     expect(EDIT_CAPABLE_SOURCES.has('OpenAI')).toBe(true);
+    expect(EDIT_CAPABLE_SOURCES.has('GPT Image 2')).toBe(true);
     expect(EDIT_CAPABLE_SOURCES.has('Seedream 4.0')).toBe(false);
   });
 });
@@ -93,6 +94,13 @@ describe('fallbackLadder', () => {
     expect(fallbackLadder({ source: 'Flux 1.1 Pro', edit: true })).toEqual(['Nano Banana', 'OpenAI']);
     // A pinned edit-capable source still leads.
     expect(fallbackLadder({ source: 'OpenAI', edit: true })).toEqual(['OpenAI', 'Nano Banana']);
+  });
+
+  it('honors an explicit GPT Image 2 edit (now edit-capable), but keeps it out of the auto ladder', () => {
+    // GPT Image 2 became native (gpt-image-2) in apparelhub-ai#702 -> edit-capable.
+    expect(fallbackLadder({ source: 'GPT Image 2', edit: true })).toEqual(['GPT Image 2', 'Nano Banana', 'OpenAI']);
+    // ...but it shares the OpenAI account, so the DEFAULT edit ladder still omits it (no provider diversity).
+    expect(fallbackLadder({ edit: true })).toEqual(['Nano Banana', 'OpenAI']);
   });
 });
 

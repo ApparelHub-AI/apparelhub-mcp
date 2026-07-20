@@ -47,8 +47,10 @@ export function normalizeSource(source: string): string {
   });
 }
 
-// Only Nano Banana and OpenAI support the img2img edit endpoint; Replicate-backed sources 422.
-export const EDIT_CAPABLE_SOURCES = new Set<string>(['Nano Banana', 'OpenAI']);
+// Nano Banana + the OpenAI-backed sources (OpenAI = gpt-image, GPT Image 2 = gpt-image-2) support
+// the img2img edit endpoint; Replicate-backed sources 422. GPT Image 2 became native (openai
+// module) in apparelhub-ai#702, so it is now edit-capable (was a Replicate proxy → 422).
+export const EDIT_CAPABLE_SOURCES = new Set<string>(['Nano Banana', 'OpenAI', 'GPT Image 2']);
 
 /** Pick a source. Nano Banana is the best all-rounder (photoreal + text + abstract). OpenAI is
  *  deliberately NEVER preferred (operator directive: it's the least-preferred model — its account
@@ -61,9 +63,10 @@ export function pickSource(_opts: { style?: DesignStyle; hasText?: boolean } = {
 // The default fallback ladder (spec §Phase 1). Nano Banana first (best all-rounder), then a
 // Replicate model, and OpenAI ALWAYS LAST (operator directive: OpenAI is the least-preferred
 // model — try everything else first). Each rung is on a DIFFERENT provider, so a per-provider
-// rate limit / account limit on the first is escaped. Edit (img2img) can only run on the two
-// edit-capable sources, so OpenAI is the sole edit fallback (unavoidable — no other model
-// supports the edit endpoint).
+// rate limit / account limit on the first is escaped. Edit (img2img) runs on the edit-capable
+// sources (Nano Banana + the OpenAI-backed OpenAI / GPT Image 2); the auto EDIT_LADDER keeps just
+// Nano Banana + OpenAI because GPT Image 2 shares the same OpenAI account (no provider diversity as
+// a fallback rung). An explicit GPT Image 2 edit is still honored via EDIT_CAPABLE_SOURCES.
 const DEFAULT_LADDER = ['Nano Banana', 'Flux 1.1 Pro', 'OpenAI'];
 const ABSTRACT_LADDER = ['Nano Banana', 'Flux 2 Pro', 'OpenAI'];
 const EDIT_LADDER = ['Nano Banana', 'OpenAI'];
