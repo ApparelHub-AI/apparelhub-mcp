@@ -61,14 +61,15 @@ describe('buildIterationPrompt', () => {
 });
 
 describe('EDIT_CAPABLE_SOURCES', () => {
-  it('is almost every source now (only Google Imagen 4 is text-to-image only) — #705', () => {
+  it('is most sources; NOT Google Imagen 4 (text-only) or Flux 1.1 Pro (Redux)', () => {
     for (const s of [
       'Nano Banana', 'OpenAI', 'GPT Image 2', 'Seedream 4.0', 'Seedream 4.5',
-      'Flux 1.1 Pro', 'Flux 2 Pro', 'Grok Imagine', 'Wan 2.7',
+      'Flux 2 Pro', 'Grok Imagine', 'Wan 2.7',
     ]) {
       expect(EDIT_CAPABLE_SOURCES.has(s)).toBe(true);
     }
     expect(EDIT_CAPABLE_SOURCES.has('Google Imagen 4')).toBe(false);
+    expect(EDIT_CAPABLE_SOURCES.has('Flux 1.1 Pro')).toBe(false); // Flux Redux != editing
   });
 });
 

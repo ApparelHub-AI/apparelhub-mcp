@@ -47,13 +47,14 @@ export function normalizeSource(source: string): string {
   });
 }
 
-// Almost every source supports the img2img edit endpoint now (apparelhub-ai#705 enabled per-model
-// Replicate editing). The ONLY text-to-image-only source is Google Imagen 4 (edit → clean 400).
-// Multi-reference (several source images) works on the array-input models — see the platform's
-// per-source `supports_multi_image`.
+// Most sources support the img2img edit endpoint now (per-model Replicate editing). TWO do NOT:
+// Google Imagen 4 (text-to-image only) and Flux 1.1 Pro (its img2img is Flux Redux — a
+// composition/style VARIATION, not an instruction-editor, so it's not offered for editing). An
+// edit on either returns a clean 400. Multi-reference (several source images) works on the
+// array-input models — see the platform's per-source `supports_multi_image`.
 export const EDIT_CAPABLE_SOURCES = new Set<string>([
   'Nano Banana', 'OpenAI', 'GPT Image 2',
-  'Seedream 4.0', 'Seedream 4.5', 'Flux 1.1 Pro', 'Flux 2 Pro', 'Grok Imagine', 'Wan 2.7',
+  'Seedream 4.0', 'Seedream 4.5', 'Flux 2 Pro', 'Grok Imagine', 'Wan 2.7',
 ]);
 
 /** Pick a source. Nano Banana is the best all-rounder (photoreal + text + abstract). OpenAI is
