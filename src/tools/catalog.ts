@@ -78,12 +78,17 @@ function mapGarment(raw: unknown): Record<string, unknown> {
 export const browseCatalog = defineTool({
   name: 'browse_catalog',
   description:
-    "Browse a fulfillment provider's catalog for garments to print on. The provider can be any fulfillment provider available to this account. Returns minimal listing fields. Read-only.",
+    "Browse a fulfillment provider's catalog for garments to print on. The provider can be any fulfillment provider available to this account. `category` is resolved against THAT provider's own taxonomy (providers use different vocabularies for the same idea) and an unknown category is rejected with the valid list rather than quietly returning everything. `keyword` matches product names across the whole catalog. ALWAYS read `warnings` in the response: they tell you when your results are narrower than you asked for -- e.g. a category that only exists inside one department. Returns minimal listing fields. Read-only.",
   inputSchema: z.object({
     provider: providerInput,
     category: z.string().optional().describe('e.g. "t-shirts", "hoodies", "mugs".'),
     keyword: z.string().optional(),
-    has_aop: z.boolean().optional().describe('All-over-print garments only.'),
+    has_aop: z
+      .boolean()
+      .optional()
+      .describe(
+        'NOT CURRENTLY HONOURED by the platform -- the catalog listing carries no all-over-print flag, so this is ignored and the response says so. To find all-over-print garments, try keyword="all-over" (Printful names them that way; Printify does not) or inspect print areas with get_garment_details.',
+      ),
     page: z.number().int().positive().optional(),
     per_page: z.number().int().positive().max(100).optional(),
     workspace: z.string().optional(),
@@ -103,7 +108,23 @@ export const browseCatalog = defineTool({
       signal: ctx.signal,
     });
     const garments = asArray(raw, 'products', 'garments').map(mapGarment);
-    return { provider: input.provider, garments, total: total(raw, garments.length) };
+    // Surface the platform's `warnings` verbatim. They carry the one thing a
+    // filtered browse cannot convey on its own: that the result set is NARROWER
+    // than asked for. e.g. Printful's only node named "Hats" lives under kids,
+    // so category=hats returns a single product -- without the warning an agent
+    // concludes "only one hat exists", which is the failure this whole area is
+    // about. Dropping them here would strand the fix inside the API.
+    const warnings = isRecord(raw) && Array.isArray(raw.warnings)
+      ? (raw.warnings as unknown[]).filter((w): w is string => typeof w === 'string')
+      : [];
+    const applied = isRecord(raw) && isRecord(raw.filters_applied) ? raw.filters_applied : undefined;
+    return {
+      provider: input.provider,
+      garments,
+      total: total(raw, garments.length),
+      ...(applied ? { filters_applied: applied } : {}),
+      ...(warnings.length ? { warnings } : {}),
+    };
   },
 });
 

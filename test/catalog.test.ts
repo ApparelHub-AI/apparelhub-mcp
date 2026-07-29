@@ -173,6 +173,40 @@ describe('recommend_garment', () => {
 // numeric provider_ref_id, string prices, variant-level templates) — the fields the first
 // remote-surface test (#38) caught the mappers missing. Generic placeholder values only.
 describe('catalog mapping against live platform shapes', () => {
+  it('surfaces platform warnings so a narrowed result set announces itself', async () => {
+    // The reason this matters: Printful's only category node named "Hats"
+    // sits under KIDS, so category=hats legitimately returns one product.
+    // Without the warning an agent concludes "only one hat exists" -- the
+    // failure this whole area exists to prevent. Dropping warnings here would
+    // strand the platform-side fix inside the API.
+    const merchandise = { providers: [{ uuid: 'pf-uuid', name: 'Printful' }] };
+    const products = {
+      garments: [{ ref_id: '194', name: 'Kids Hat' }],
+      total: 1,
+      filters_applied: { category: 'hats', category_ref: 194, category_matched: 'kids / Hats' },
+      warnings: ["category='hats' matched the 'Hats' type inside 'kids' only"],
+    };
+    const { api } = apiSequence([merchandise, products]);
+    const res = (await browseCatalog.handler(
+      { provider: 'Printful', category: 'hats' },
+      fakeContext(api),
+    )) as any;
+    expect(res.warnings).toEqual([
+      "category='hats' matched the 'Hats' type inside 'kids' only",
+    ]);
+    expect(res.filters_applied).toMatchObject({ category_matched: 'kids / Hats' });
+    expect(res.total).toBe(1);
+  });
+
+  it('omits warnings/filters_applied entirely on an unfiltered browse', async () => {
+    const merchandise = { providers: [{ uuid: 'pf-uuid', name: 'Printful' }] };
+    const { api } = apiSequence([merchandise, [{ ref_id: '71', name: 'Tee' }]]);
+    const res = (await browseCatalog.handler({ provider: 'Printful' }, fakeContext(api))) as any;
+    expect(res).not.toHaveProperty('warnings');
+    expect(res).not.toHaveProperty('filters_applied');
+    expect(res.garments).toHaveLength(1);
+  });
+
   it('browse_catalog maps a bare-array listing with numeric provider_ref_id', async () => {
     const merchandise = { providers: [{ uuid: 'pf-uuid', name: 'Printful' }] };
     const products = [
