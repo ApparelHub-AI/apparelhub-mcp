@@ -101,7 +101,10 @@ function mapDesign(raw: unknown): Record<string, unknown> {
 export const listMyDesigns = defineTool({
   name: 'list_my_designs',
   description:
-    "List the merchant's generated design images (newest first). Read-only. Use these design_uuids with the design/product tools.",
+    "List the merchant's generated design images (newest first). Read-only. Use these design_uuids with the design/product tools. " +
+    'Pass on_products=false to find orphan designs (designs not used by any live product), the ' +
+    'supported way to audit a workspace for unused designs before archiving them. Pass ' +
+    'archived=true to list already-archived designs.',
   inputSchema: z.object({
     limit: z.number().int().positive().max(100).optional().describe('Max results (default 20).'),
     sort: z.enum(['newest', 'oldest']).optional().describe('Sort order (default newest).'),
@@ -110,6 +113,17 @@ export const listMyDesigns = defineTool({
       .optional()
       .describe('Filter by AI source name where supported (e.g. "Nano Banana").'),
     search: z.string().optional().describe('Match title/prompt where supported.'),
+    on_products: z
+      .boolean()
+      .optional()
+      .describe(
+        'false returns only designs NOT used by any live product (orphans, safe to archive). ' +
+          'true returns only designs in use. Omit for no filter.',
+      ),
+    archived: z
+      .boolean()
+      .optional()
+      .describe('true returns archived designs instead of active ones (default false).'),
     workspace: z.string().optional().describe('Workspace uuid (agency accounts).'),
   }),
   annotations: { readOnlyHint: true, openWorldHint: true },
@@ -120,6 +134,8 @@ export const listMyDesigns = defineTool({
         sort: input.sort ?? 'newest',
         source: input.source,
         search: input.search,
+        on_products: input.on_products,
+        archived: input.archived,
       },
       workspace: input.workspace,
       signal: ctx.signal,

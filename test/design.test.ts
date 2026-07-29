@@ -6,6 +6,10 @@ import {
   designApparel,
   iterateDesign,
   fitAspect,
+  archiveDesign,
+  restoreDesign,
+  deleteDesign,
+  designTools,
 } from '../src/tools/design.js';
 import { runGeneration } from '../src/image/generate.js';
 import { ApiClient } from '../src/http/client.js';
@@ -437,5 +441,80 @@ describe('process_transparency: resolution floor (NORWAY passport-wallet QC-skip
     );
     // upscaled:false -> the ORIGINAL keyed file is uploaded, not a new one.
     expect(readPaths).toEqual(['/tmp/keyed-big.png']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Design lifecycle: archive / restore / delete
+// Generic placeholders only (public repo, Rule 13): short ids like d1.
+// ---------------------------------------------------------------------------
+
+describe('archive_design / restore_design', () => {
+  it('archive PATCHes the design with archived:true', async () => {
+    const { api, calls } = apiFrom([jsonResponse(200, { uuid: 'd1', title: 'Cactus', archived: true })]);
+    const res = (await archiveDesign.handler({ design_uuid: 'd1' }, fakeContext(api))) as any;
+    expect(calls[0]!.init!.method).toBe('PATCH');
+    expect(calls[0]!.url).toContain('/images/generated/d1');
+    expect(JSON.parse(String(calls[0]!.init!.body))).toEqual({ archived: true });
+    expect(res).toMatchObject({ design_uuid: 'd1', archived: true, title: 'Cactus' });
+  });
+
+  it('restore PATCHes the design with archived:false', async () => {
+    const { api, calls } = apiFrom([jsonResponse(200, { uuid: 'd1', archived: false })]);
+    const res = (await restoreDesign.handler({ design_uuid: 'd1' }, fakeContext(api))) as any;
+    expect(calls[0]!.init!.method).toBe('PATCH');
+    expect(JSON.parse(String(calls[0]!.init!.body))).toEqual({ archived: false });
+    expect(res).toMatchObject({ design_uuid: 'd1', archived: false });
+  });
+
+  it('archive is idempotent-hinted and not flagged destructive', () => {
+    expect(archiveDesign.annotations?.idempotentHint).toBe(true);
+    expect(archiveDesign.annotations?.destructiveHint).toBeUndefined();
+  });
+});
+
+describe('delete_design', () => {
+  it('DELETEs the design and surfaces freed_bytes', async () => {
+    const { api, calls } = apiFrom([
+      jsonResponse(200, { message: 'Image deleted successfully', freed_bytes: 2048 }),
+    ]);
+    const res = (await deleteDesign.handler({ design_uuid: 'd1' }, fakeContext(api))) as any;
+    expect(calls[0]!.init!.method).toBe('DELETE');
+    expect(calls[0]!.url).toContain('/images/generated/d1');
+    expect(res).toMatchObject({ design_uuid: 'd1', deleted: true, freed_bytes: 2048 });
+  });
+
+  it('re-codes the in-use 409 to design_in_use and points at archive_design', async () => {
+    const { api } = apiFrom([
+      jsonResponse(409, {
+        message: 'This image is in use by one or more products and cannot be deleted.',
+        code: 'image_in_use',
+        products: [{ uuid: 'p1', name: 'Acme Tee' }],
+      }),
+    ]);
+    await expect(deleteDesign.handler({ design_uuid: 'd1' }, fakeContext(api))).rejects.toMatchObject({
+      code: 'design_in_use',
+      httpStatus: 409,
+    });
+    // The remedy has to name the safe alternative, or the agent just gives up.
+    try {
+      await deleteDesign.handler({ design_uuid: 'd1' }, fakeContext(apiFrom([
+        jsonResponse(409, { message: 'in use', code: 'image_in_use' }),
+      ]).api));
+    } catch (err) {
+      expect((err as AhError).suggestion).toContain('archive_design');
+    }
+  });
+
+  it('is flagged destructive', () => {
+    expect(deleteDesign.annotations?.destructiveHint).toBe(true);
+  });
+});
+
+describe('designTools surface', () => {
+  it('exports the lifecycle trio with unique names', () => {
+    const names = designTools.map((t) => t.name);
+    expect(new Set(names).size).toBe(names.length);
+    expect(names).toEqual(expect.arrayContaining(['archive_design', 'restore_design', 'delete_design']));
   });
 });
