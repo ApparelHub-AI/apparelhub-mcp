@@ -501,6 +501,104 @@ export const fitAspect = defineTool({
   },
 });
 
+// ---------------------------------------------------------------------------
+// Design lifecycle: archive / restore / delete
+//
+// Parity with the product lifecycle (archive_product / restore_product / delete_product).
+// Archiving is a PATCH with {archived: bool}; deletion is refused with 409 while any live
+// product still uses the design, so archive is the safe default for retiring one.
+// ---------------------------------------------------------------------------
+
+const enc = encodeURIComponent;
+
+async function setDesignArchived(
+  ctx: ToolContext,
+  designUuid: string,
+  archived: boolean,
+  workspace?: string,
+): Promise<Record<string, unknown>> {
+  const raw = await ctx.api.patch(`images/generated/${enc(designUuid)}`, {
+    body: { archived },
+    workspace,
+    signal: ctx.signal,
+  });
+  const image = isRecord(raw) && isRecord(raw.image) ? raw.image : raw;
+  return {
+    design_uuid: str(image, 'uuid', 'image_uuid', 'id') ?? designUuid,
+    archived,
+    title: str(image, 'title'),
+  };
+}
+
+export const archiveDesign = defineTool({
+  name: 'archive_design',
+  description:
+    'Archive a design so it stops showing in the default gallery listing. Reversible with ' +
+    'restore_design, and safe: it never touches products that already use the design. This is ' +
+    'the right way to retire an unwanted or orphan design. Prefer it over delete_design unless ' +
+    'the design must be removed permanently. Find orphan designs first with ' +
+    'list_my_designs(on_products=false).',
+  inputSchema: z.object({
+    design_uuid: z.string().min(1).describe('The design uuid to archive.'),
+    workspace: z.string().optional().describe('Workspace uuid (agency accounts).'),
+  }),
+  annotations: { idempotentHint: true, openWorldHint: true },
+  handler: async (input, ctx) => setDesignArchived(ctx, input.design_uuid, true, input.workspace),
+});
+
+export const restoreDesign = defineTool({
+  name: 'restore_design',
+  description:
+    'Restore a previously archived design so it appears in the default gallery listing again. ' +
+    'List archived designs with list_my_designs(archived=true).',
+  inputSchema: z.object({
+    design_uuid: z.string().min(1).describe('The design uuid to restore.'),
+    workspace: z.string().optional().describe('Workspace uuid (agency accounts).'),
+  }),
+  annotations: { idempotentHint: true, openWorldHint: true },
+  handler: async (input, ctx) => setDesignArchived(ctx, input.design_uuid, false, input.workspace),
+});
+
+export const deleteDesign = defineTool({
+  name: 'delete_design',
+  description:
+    'Permanently delete a design and its stored files. Irreversible. Refused with ' +
+    'design_in_use if any live product still uses the design, in which case archive_design is ' +
+    'the safe alternative. Use archive_design unless the design genuinely must be erased.',
+  inputSchema: z.object({
+    design_uuid: z.string().min(1).describe('The design uuid to delete permanently.'),
+    workspace: z.string().optional().describe('Workspace uuid (agency accounts).'),
+  }),
+  annotations: { destructiveHint: true, openWorldHint: true },
+  handler: async (input, ctx) => {
+    let raw: unknown;
+    try {
+      raw = await ctx.api.del(`images/generated/${enc(input.design_uuid)}`, {
+        workspace: input.workspace,
+        signal: ctx.signal,
+      });
+    } catch (err) {
+      // The platform refuses the delete (409) while a live product references the design.
+      // Re-code it so the agent gets the actionable remedy instead of a generic conflict.
+      if (err instanceof AhError && err.httpStatus === 409) {
+        throw new AhError({
+          httpStatus: 409,
+          code: 'design_in_use',
+          message: err.message,
+          suggestion:
+            'A live product still uses this design, so it was not deleted. Call ' +
+            'archive_design to retire it safely, or remove it from those products first.',
+        });
+      }
+      throw err;
+    }
+    const out: Record<string, unknown> = { design_uuid: input.design_uuid, deleted: true };
+    const freed = isRecord(raw) ? raw.freed_bytes : undefined;
+    if (typeof freed === 'number') out.freed_bytes = freed;
+    return out;
+  },
+});
+
 export const designTools: ToolDef[] = [
   generateImage,
   processTransparency,
@@ -508,4 +606,7 @@ export const designTools: ToolDef[] = [
   designApparel,
   iterateDesign,
   fitAspect,
+  archiveDesign,
+  restoreDesign,
+  deleteDesign,
 ];

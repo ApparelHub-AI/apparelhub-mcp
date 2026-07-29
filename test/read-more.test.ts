@@ -37,6 +37,22 @@ describe('list_my_designs', () => {
     const url = calls[0]?.url ?? '';
     expect(url).toContain('limit=20');
     expect(url).toContain('sort=newest');
+    // No filter unless asked for: omitted booleans must not appear at all.
+    expect(url).not.toContain('on_products');
+    expect(url).not.toContain('archived');
+  });
+
+  it('passes on_products=false so orphan designs are discoverable', async () => {
+    const { api, calls } = apiRecording({ images: [], total: 0 });
+    await listMyDesigns.handler({ on_products: false }, fakeContext(api));
+    // The backend compares the raw string, so it must serialize as "false", not "0"/"".
+    expect(calls[0]?.url ?? '').toContain('on_products=false');
+  });
+
+  it('passes archived=true to list archived designs', async () => {
+    const { api, calls } = apiRecording({ images: [], total: 0 });
+    await listMyDesigns.handler({ archived: true }, fakeContext(api));
+    expect(calls[0]?.url ?? '').toContain('archived=true');
   });
 });
 
