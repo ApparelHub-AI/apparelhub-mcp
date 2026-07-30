@@ -147,7 +147,8 @@ async function processTransparencyImpl(
 }
 
 interface TextOutcome {
-  has_text: boolean;
+  /** `null` = UNKNOWN (OCR could not run), not "no text". See verifyTextImpl (#764). */
+  has_text: boolean | null;
   detected_text: string;
   spelled_correctly: boolean | null;
   confidence: number;
@@ -173,12 +174,17 @@ async function verifyTextImpl(
   const hasText = normalizeText(detected).length > 0;
 
   if (!ocr.available) {
+    // UNKNOWN, not false (#764). When tesseract is missing, `detected` is '' and the
+    // old code derived has_text=false from it — asserting "this design contains no
+    // text" when we never looked. An agent then skipped spell-checking a design
+    // that plainly had text on it, which is worse than saying nothing: a confident
+    // wrong answer is acted on, an honest null is checked.
     return {
-      has_text: hasText,
-      detected_text: detected,
+      has_text: null,
+      detected_text: '',
       spelled_correctly: null,
       confidence: 0,
-      note: 'Local OCR (tesseract) is not installed, so text could not be read here. Install tesseract, or have the calling agent visually verify the spelling from the design image.',
+      note: 'Local OCR (tesseract) is not available here, so it is UNKNOWN whether this design contains text — this is not a "no text" result. Install tesseract, or have the calling agent read the design image directly to verify any spelling.',
     };
   }
   let spelledCorrectly: boolean | null = null;
@@ -278,7 +284,7 @@ export const processTransparency = defineTool({
 export const verifyDesignText = defineTool({
   name: 'verify_design_text',
   description:
-    'Read the text in a design with local OCR (tesseract) when available, so the agent can confirm spelling. Advisory: pass expected_text to get a match verdict, otherwise the detected text is returned for visual review.',
+    'Read the text in a design with local OCR (tesseract) when available, so the agent can confirm spelling. Advisory: pass expected_text to get a match verdict, otherwise the detected text is returned for visual review. has_text is null when OCR is unavailable, meaning UNKNOWN — not "no text"; read the design image yourself in that case.',
   inputSchema: z.object({
     image_uuid: z.string().min(1),
     image_url: z.string().url().optional(),
@@ -324,7 +330,16 @@ export const designApparel = defineTool({
 
     for (let i = 0; i < count; i += 1) {
       await ctx.progress.report(Math.round((i / count) * 100), `Design ${i + 1} of ${count}...`);
-      const prompt = augmentPromptForTransparency(input.prompt);
+      // Ask for the green background ONLY when we are going to key it out.
+      // This was unconditional (#765), so `needs_transparency: false` — the
+      // all-over-print case the tool description explicitly tells you to use —
+      // produced a green-framed image that nothing then keyed, and the merchant
+      // got a design with a green border printed edge to edge. It also made our
+      // own boilerplate the bulk of the prompt for designs that never needed it,
+      // which is half of #766.
+      const prompt = needsTransparency
+        ? augmentPromptForTransparency(input.prompt)
+        : input.prompt.trim();
       const gen = await runGenerationWithFallback(
         ctx.api,
         { prompt, source: sources[0]!, sources, workspace: input.workspace, noFallback: input.no_fallback },

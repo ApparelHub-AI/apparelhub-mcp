@@ -73,6 +73,42 @@ export function scoreQuality(
     }
   }
 
+  // --- Visible artifacts (#763) ---
+  // verify_design_quality graded 100/100 on designs carrying a solid-black box and
+  // a green chroma halo, because nothing measured either: the scorer only knew
+  // about alpha, resolution and premultiply. A quality check that cannot see the
+  // two most common visible defects is worse than no check, because the agent
+  // ships on the strength of it.
+  //
+  // Both are `block`, unlike the resolution WARN below: the pipeline upscales a
+  // small design, but nothing downstream removes a halo or a slab — they print
+  // exactly as they look. Both signals are rectangularity/saturation-gated in
+  // python/image_stats.py so legitimate black silhouettes, black linework and
+  // green artwork read zero.
+  const halo = stats.chroma_halo_ratio;
+  if (typeof halo === 'number' && halo > 0.005) {
+    issues.push({
+      severity: 'block',
+      category: 'transparency',
+      finding: `Chroma-key green survives on ${(halo * 100).toFixed(1)}% of the visible design — a fringe left by keying, which prints as a green outline.`,
+      suggested_fix:
+        'Re-run process_transparency, or regenerate the design. Do not ship a design with a green halo.',
+    });
+    score -= 35;
+  }
+
+  const blackBox = stats.black_box_ratio;
+  if (typeof blackBox === 'number' && blackBox > 0.05) {
+    issues.push({
+      severity: 'block',
+      category: 'contrast',
+      finding: `A solid black rectangle covers ${(blackBox * 100).toFixed(0)}% of the visible design — a generation artifact, which prints as a filled black slab.`,
+      suggested_fix:
+        'Regenerate the design. If it persists, iterate with a prompt that names the artifact so the model removes it.',
+    });
+    score -= 35;
+  }
+
   const minDim = Math.min(stats.width, stats.height);
   if (minDim < 1000) {
     // Low resolution is a WARN, never a hard BLOCK: the build pipeline auto-upscales a low-res

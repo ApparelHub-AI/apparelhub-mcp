@@ -28,6 +28,14 @@ export interface ImageStats {
   transparent_ratio: number;
   corner_alpha: number[];
   premultiplied_white: boolean;
+  /** Fraction of OPAQUE pixels still chroma-key green — a keying fringe that
+   *  prints as a green outline on the garment (#763). Optional so an older
+   *  image_stats.py that does not emit it degrades to "not measured". */
+  chroma_halo_ratio?: number;
+  /** Fraction of the opaque design occupied by a solid near-black RECTANGLE — the
+   *  slab artifact some models emit (#763). Rectangularity-gated, so a black
+   *  silhouette or black linework reads 0. */
+  black_box_ratio?: number;
 }
 
 /** Measurements of a rendered product MOCKUP (not a design). See
