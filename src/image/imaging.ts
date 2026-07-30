@@ -15,6 +15,7 @@ const MAKE_TRANSPARENT = fileURLToPath(
   new URL('../../python/make_transparent.py', import.meta.url),
 );
 const IMAGE_STATS = fileURLToPath(new URL('../../python/image_stats.py', import.meta.url));
+const MOCKUP_STATS = fileURLToPath(new URL('../../python/mockup_stats.py', import.meta.url));
 const THREAD_COLORS = fileURLToPath(new URL('../../python/thread_colors.py', import.meta.url));
 const ENSURE_RESOLUTION = fileURLToPath(new URL('../../python/ensure_resolution.py', import.meta.url));
 const PYTHON = process.env.APPARELHUB_MCP_PYTHON || 'python3';
@@ -27,6 +28,21 @@ export interface ImageStats {
   transparent_ratio: number;
   corner_alpha: number[];
   premultiplied_white: boolean;
+}
+
+/** Measurements of a rendered product MOCKUP (not a design). See
+ *  python/mockup_stats.py for what each field means and why it exists. */
+export interface MockupStats {
+  width: number;
+  height: number;
+  min_dimension: number;
+  garment_ratio: number;
+  design_coverage: number;
+  largest_flat_run: number;
+  chroma_green_ratio: number;
+  dominant_share: number;
+  distinct_colors: number;
+  empty: boolean;
 }
 
 export interface TransparencyResult {
@@ -77,6 +93,8 @@ export interface Imaging {
   imageSize(path: string): Promise<{ width: number; height: number } | undefined>;
   /** Full quality stats (alpha, transparency, premultiply). Undefined if Python/Pillow missing. */
   imageStats(path: string): Promise<ImageStats | undefined>;
+  /** Measure a rendered product mockup (chroma leak, blankness, resolution). */
+  mockupStats(path: string): Promise<MockupStats | undefined>;
   ocr(imagePath: string): Promise<{ available: boolean; text: string }>;
   /** Dominant design colors mapped to Printful's fixed embroidery thread palette (CIE Lab). */
   threadColors(inputPath: string, max?: number): Promise<string[]>;
@@ -197,6 +215,21 @@ export class LocalImaging implements Imaging {
       return undefined;
     }
     return undefined;
+  }
+
+  async mockupStats(path: string): Promise<MockupStats | undefined> {
+    let r: RunResult;
+    try {
+      r = await run(PYTHON, [MOCKUP_STATS, path]);
+    } catch {
+      return undefined;
+    }
+    if (r.code !== 0) return undefined;
+    try {
+      return JSON.parse(r.stdout.trim()) as MockupStats;
+    } catch {
+      return undefined;
+    }
   }
 
   async imageStats(path: string): Promise<ImageStats | undefined> {

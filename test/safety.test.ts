@@ -1,5 +1,14 @@
 import { describe, it, expect } from 'vitest';
-import { scoreQuality, verifyDesignQuality, checkDesignCompliance } from '../src/tools/safety.js';
+import {
+  scoreQuality,
+  verifyDesignQuality,
+  checkDesignCompliance,
+  scoreMockup,
+  verifyMockupQuality,
+  safetyTools,
+  MOCKUP_VISUAL_CHECKLIST,
+} from '../src/tools/safety.js';
+import type { MockupStats } from '../src/image/imaging.js';
 import type { Imaging, ImageStats } from '../src/image/imaging.js';
 import { fakeContext } from './helpers/ctx.js';
 
@@ -86,5 +95,77 @@ describe('check_design_compliance', () => {
     expect(res.recommendation).toBe('review_required');
     expect(res.flags.some((f: any) => f.category === 'trademark')).toBe(true);
     expect(res.disclaimer).toContain('not legal advice');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// verify_mockup_quality (epic phase 5)
+// ---------------------------------------------------------------------------
+
+function mockup(over: Partial<MockupStats> = {}): MockupStats {
+  return {
+    width: 1000, height: 1000, min_dimension: 1000,
+    garment_ratio: 0.45, design_coverage: 0.4, largest_flat_run: 0.3,
+    chroma_green_ratio: 0, dominant_share: 0.6, distinct_colors: 40,
+    empty: false, ...over,
+  };
+}
+
+describe('scoreMockup', () => {
+  it('passes a clean render with no hard defect', () => {
+    const { quality_score, issues } = scoreMockup(mockup());
+    expect(quality_score).toBe(100);
+    expect(issues).toHaveLength(0);
+  });
+
+  it('blocks an un-keyed chroma-green background', () => {
+    // Measured 0.19 on a real green-screen leak vs 0.00 on a normal print.
+    const { issues, quality_score } = scoreMockup(mockup({ chroma_green_ratio: 0.19 }));
+    const i = issues.find((x) => x.category === 'background');
+    expect(i?.severity).toBe('block');
+    expect(quality_score).toBeLessThan(50);
+  });
+
+  it('does not flag an ordinary print as chroma green', () => {
+    expect(scoreMockup(mockup({ chroma_green_ratio: 0 })).issues).toHaveLength(0);
+  });
+
+  it('blocks an empty render and short-circuits', () => {
+    const { quality_score, issues } = scoreMockup(mockup({ empty: true, garment_ratio: 0 }));
+    expect(quality_score).toBe(0);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.category).toBe('render');
+  });
+
+  it('warns on a render too small to judge', () => {
+    const { issues } = scoreMockup(mockup({ width: 200, height: 200, min_dimension: 200 }));
+    expect(issues.find((x) => x.category === 'resolution')?.severity).toBe('warn');
+  });
+
+  it('does NOT grade design coverage', () => {
+    // Deliberate. Validation: the all-over-print tee that shipped with bare
+    // sleeves scored 0.55, a CORRECT chest print scored 0.62. The metric does
+    // not separate them, so it must never become a verdict. If someone adds a
+    // coverage threshold later, this fails and explains why.
+    const brokenAop = scoreMockup(mockup({ design_coverage: 0.55 }));
+    const correctPrint = scoreMockup(mockup({ design_coverage: 0.62 }));
+    expect(brokenAop.issues).toHaveLength(0);
+    expect(correctPrint.issues).toHaveLength(0);
+    expect(brokenAop.quality_score).toBe(correctPrint.quality_score);
+  });
+});
+
+describe('verify_mockup_quality tool', () => {
+  it('returns the fixed visual checklist and names the sleeves-and-hem case', () => {
+    expect(MOCKUP_VISUAL_CHECKLIST.length).toBeGreaterThanOrEqual(5);
+    const joined = MOCKUP_VISUAL_CHECKLIST.join(' ').toLowerCase();
+    expect(joined).toContain('sleeves');
+    expect(joined).toContain('hem');
+    expect(joined).toContain('upright');
+  });
+
+  it('is exported as a read-only tool', () => {
+    expect(verifyMockupQuality.annotations?.readOnlyHint).toBe(true);
+    expect(safetyTools.map((t) => t.name)).toContain('verify_mockup_quality');
   });
 });
