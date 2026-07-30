@@ -108,10 +108,17 @@ export const listMyDesigns = defineTool({
   inputSchema: z.object({
     limit: z.number().int().positive().max(100).optional().describe('Max results (default 20).'),
     sort: z.enum(['newest', 'oldest']).optional().describe('Sort order (default newest).'),
+    // The description no longer hedges with "where supported": the platform now
+    // reads this param, and an unrecognised value is refused rather than dropped.
+    // Previously nothing read it, so a filtered-looking result was the full list.
     source: z
       .string()
       .optional()
-      .describe('Filter by AI source name where supported (e.g. "Nano Banana").'),
+      .describe(
+        'Filter by AI source name, e.g. "Nano Banana". Comma-separated for several; ' +
+          'case-insensitive. An unrecognised name is rejected with the list of valid ' +
+          'sources, so a result set that comes back is genuinely filtered.',
+      ),
     search: z.string().optional().describe('Match title/prompt where supported.'),
     on_products: z
       .boolean()

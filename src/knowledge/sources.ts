@@ -127,22 +127,52 @@ const RATE_LIMIT_MESSAGE_RE = /rate.?limit|quota|429|resource.?exhausted|too man
 export function isFallbackableError(err: unknown): boolean {
   if (!(err instanceof AhError)) return false;
   if (FALLBACKABLE_CODES.has(err.code)) return true;
+  // A prompt-length rejection is model-SPECIFIC: the identical prompt succeeds on a
+  // model with a longer limit, which is exactly what fallback is for. Without this
+  // the whole generation died on the first rung even though five other models
+  // would have accepted it (#766). Checked before the message heuristic below
+  // because these arrive as an http_error/generation_failed, not a rate limit.
+  if (isPromptTooLongError(err)) return true;
   if (err.code === 'generation_failed') return RATE_LIMIT_MESSAGE_RE.test(err.message);
   return false;
 }
 
+// Lesson 9b in as few characters as it can be said. The previous wording ran 331
+// characters, so our own boilerplate was the majority of a typical design prompt
+// and pushed it past Nano Banana's limit — five other models accepted the same
+// request, which made it read as "Nano Banana is broken" (#766).
+//
+// Every clause that remains is load-bearing: flat and uniform (models otherwise
+// shade or vignette it), the exact hex (a lime/sage green will not key cleanly),
+// edge to edge (a partial background leaves a frame), and the two negatives
+// (models asked for green still return checkerboards or real alpha). Trimmed to
+// ~160 characters, not removed.
 const GREEN_BG_HINT =
-  'Render the design on a solid, flat, fully-saturated pure chroma-key green background ' +
-  '(exactly RGB 0,255,0 / #00FF00) that fills the entire canvas edge to edge behind the subject. ' +
-  'The green must be one uniform color with NO gradient, NO shading, NO vignette, and NO yellow, ' +
-  'lime, olive, or sage tint. Do NOT make the background transparent and do NOT draw a ' +
-  'checkerboard pattern.';
+  'Background: one flat uniform #00FF00 (RGB 0,255,0) chroma-key green, edge to edge, ' +
+  'no gradient or shading, no lime/sage tint. Not transparent, no checkerboard.';
 
 /** Lesson 9b: never ask a model for a "transparent background" — request a solid green one and
- *  key it out afterward. Idempotent (skips if the prompt already asks for a green background). */
+ *  key it out afterward. Idempotent (skips if the prompt already asks for a green background).
+ *
+ *  ⚠️ Only call this when the design will actually be keyed. Appending it for an
+ *  all-over print produced a green-framed image that nothing then keyed out (#765). */
 export function augmentPromptForTransparency(prompt: string): string {
   if (/#?00ff00|(solid|bright) green background/i.test(prompt)) return prompt.trim();
   return `${prompt.trim()} ${GREEN_BG_HINT}`;
+}
+
+/** TRUE when a provider rejected the request for prompt LENGTH.
+ *
+ *  Distinct from a rate limit or a transient 5xx: retrying the same prompt on the
+ *  same model can never succeed, but the same prompt on a model with a longer limit
+ *  will. So it IS fallbackable — and it must never be reported to the agent as "the
+ *  model is rate limiting" or "the model is down", because neither is true and both
+ *  send the agent to the wrong remedy (#766). */
+export function isPromptTooLongError(err: unknown): boolean {
+  if (!(err instanceof AhError)) return false;
+  return /request too long|prompt (is )?too long|too many tokens|maximum context/i.test(
+    err.message ?? '',
+  );
 }
 
 /** Build an img2img edit prompt from a change description + a list of aspects to preserve. */
