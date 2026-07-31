@@ -14,10 +14,13 @@ import { transferTools } from './transfer.js';
 import { workspaceTools } from './workspaces.js';
 import { managementTools } from './management.js';
 import { apiTools } from './apirequest.js';
+import { setupTools } from './setup.js';
 
 // The complete tool surface, assembled from each group.
 export function allTools(): ToolDef[] {
   return [
+    // First-time account setup: the only stage an agent could not drive.
+    ...setupTools,
     ...readTools,
     ...catalogTools,
     ...designTools,
