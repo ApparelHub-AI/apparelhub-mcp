@@ -14,4 +14,12 @@ export interface ToolContext {
   /** Local image toolchain (download/transparency/OCR). Used by the design tools. */
   imaging: Imaging;
   signal?: AbortSignal;
+  /** Raw fetch for endpoints OUTSIDE the ApparelHub API — fetching a caller's
+   *  source_url and PUTting to a presigned storage URL (upload_design). Never
+   *  carries our API key. Injectable so tests never touch the network. */
+  fetchImpl?: typeof fetch;
+  /** Injectable so tests do not actually wait between status polls. */
+  sleepImpl?: (ms: number) => Promise<void>;
+  /** Injectable clock, so poll-timeout behaviour is testable. */
+  nowImpl?: () => number;
 }
