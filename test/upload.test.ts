@@ -55,9 +55,11 @@ describe('format sniffing', () => {
     expect(__test.sniffContentType(new Uint8Array(Buffer.from('not an image')))).toBeUndefined();
   });
 
-  it('recognises SVG so the error can say what to do about it', () => {
+  it('recognises SVG, which has no magic bytes to sniff', () => {
     expect(__test.looksLikeSvg(new Uint8Array(SVG))).toBe(true);
+    expect(__test.looksLikeSvg(new Uint8Array(Buffer.from('<?xml version="1.0"?>\n' + SVG.toString())))).toBe(true);
     expect(__test.looksLikeSvg(new Uint8Array(PNG))).toBe(false);
+    expect(__test.looksLikeSvg(new Uint8Array(Buffer.from('<html><body>nope</body></html>')))).toBe(false);
   });
 });
 
@@ -219,20 +221,48 @@ describe('upload_design', () => {
 // --- guardrails --------------------------------------------------------------
 
 describe('upload_design guardrails', () => {
-  it('tells the caller to rasterize an SVG rather than just refusing it', async () => {
-    const { api } = apiSequence([]);
-    await expect(
-      uploadDesign.handler({ image_base64: SVG.toString('base64') }, ctxWith(api)),
-    ).rejects.toMatchObject({ code: 'unsupported_format' });
+  it('uploads an SVG as vector rather than refusing it', async () => {
+    // SVG has no magic bytes, so it is sniffed from the document head; the
+    // platform renders it at print resolution.
+    const { api, calls } = apiSequence([
+      INITIATE,
+      { message: 'ok' },
+      {
+        image_uuid: 'design-1',
+        processing_status: 'completed',
+        url: 'https://cdn.example.test/d.png',
+        rasterized_from_svg: { width: 4096, height: 2048, source_bytes: 812 },
+      },
+    ]);
+    const put = rawFetch([jsonResponse(200)]);
+    const res = (await uploadDesign.handler(
+      { image_base64: SVG.toString('base64'), filename: 'mark.svg' },
+      ctxWith(api, put.impl),
+    )) as Record<string, unknown>;
 
-    await uploadDesign
-      .handler({ image_base64: SVG.toString('base64') }, ctxWith(api))
-      .catch((err: AhError) => {
-        expect(err.message).toContain('SVG');
-        expect(err.suggestion).toContain('Rasterize');
-        // Never suggest recreating the mark.
-        expect(err.suggestion?.toLowerCase()).toContain('do not redraw');
-      });
+    expect(res.status).toBe('completed');
+    expect(JSON.parse(String(calls[0].init?.body))).toMatchObject({ content_type: 'image/svg+xml' });
+    expect((put.calls[0].init?.headers as Record<string, string>)['Content-Type']).toBe('image/svg+xml');
+    expect((res.warnings as string[]).join(' ')).toContain('4096x2048');
+  });
+
+  it('names the export step for a format that must be converted first', async () => {
+    const { api } = apiSequence([]);
+    const pdf = Buffer.from('%PDF-1.7\n%âãÏÓ\n', 'latin1');
+    await uploadDesign.handler({ image_base64: pdf.toString('base64') }, ctxWith(api)).catch((err: AhError) => {
+      expect(err.code).toBe('unsupported_format');
+      expect(err.message).toContain('PDF');
+      // Never suggest recreating the mark.
+      expect(err.suggestion?.toLowerCase()).toContain('do not redraw');
+    });
+
+    const junk = Buffer.from('this is not an image at all');
+    await uploadDesign.handler({ image_base64: junk.toString('base64') }, ctxWith(api)).catch((err: AhError) => {
+      expect(err.code).toBe('unsupported_format');
+      expect(err.suggestion).toContain('SVG');
+      expect(err.suggestion?.toLowerCase()).toContain('do not redraw');
+    });
+    expect.assertions(6);
   });
 
   it('caps inline base64 and points at the cheaper transports', async () => {
