@@ -38,12 +38,13 @@ const MAX_REDIRECTS = 3;
 const PROCESS_TIMEOUT_MS = 90_000;
 const POLL_INTERVAL_MS = 2_000;
 
-type ContentType = 'image/png' | 'image/jpeg' | 'image/webp';
+type ContentType = 'image/png' | 'image/jpeg' | 'image/webp' | 'image/svg+xml';
 
 const EXT_FOR: Record<ContentType, string> = {
   'image/png': 'png',
   'image/jpeg': 'jpg',
   'image/webp': 'webp',
+  'image/svg+xml': 'svg',
 };
 
 // --- format sniffing ---------------------------------------------------------
@@ -73,30 +74,38 @@ export function sniffContentType(bytes: Uint8Array): ContentType | undefined {
   return undefined;
 }
 
-/** True when the payload looks like SVG/XML, so we can say so instead of "unsupported". */
+/**
+ * True when the payload is an SVG document.
+ *
+ * SVG has no magic-byte signature — it is XML — so it is sniffed from the head of
+ * the document instead, tolerating a BOM, an XML declaration and a DOCTYPE.
+ */
 export function looksLikeSvg(bytes: Uint8Array): boolean {
   const head = new TextDecoder('utf-8', { fatal: false })
-    .decode(bytes.subarray(0, 512))
+    .decode(bytes.subarray(0, 2048))
+    .replace(/^\uFEFF/, '')
     .trimStart()
     .toLowerCase();
-  return head.startsWith('<svg') || (head.startsWith('<?xml') && head.includes('<svg'));
+  if (!head.startsWith('<')) return false;
+  return /<\s*(?:\w+:)?svg[\s/>]/.test(head);
 }
 
 function rejectUnsupportedFormat(bytes: Uint8Array): never {
-  if (looksLikeSvg(bytes)) {
+  const head = new TextDecoder('utf-8', { fatal: false }).decode(bytes.subarray(0, 256)).trimStart();
+  if (/^%PDF-/.test(head)) {
     throw new AhError({
       code: 'unsupported_format',
-      message:
-        'That file is SVG (vector). The platform stores raster artwork, so it cannot be uploaded as-is.',
+      message: 'That file is a PDF, not an image.',
       suggestion:
-        'Rasterize it to PNG first, at the size you intend to print (2000px on the long side is a safe default for apparel) and with a transparent background if the mark should sit on the garment colour. Then upload the PNG. Do NOT redraw or approximate the mark.',
+        'Export the artwork as SVG (best — it is rendered at print resolution) or PNG, then upload that. Do NOT redraw or approximate the mark.',
     });
   }
   throw new AhError({
     code: 'unsupported_format',
     message:
-      'Unsupported image format. The file does not start with PNG, JPEG or WEBP magic bytes.',
-    suggestion: 'Convert the artwork to PNG (preferred, supports transparency), JPEG or WEBP and upload that.',
+      'Unsupported image format. The file is not PNG, JPEG, WEBP or SVG.',
+    suggestion:
+      'Adobe Illustrator (.ai) and EPS files need exporting first: save as SVG to keep it vector (rendered at print resolution, best quality), or export a PNG at the size you intend to print. Do NOT redraw or approximate the mark.',
   });
 }
 
@@ -287,6 +296,7 @@ interface UploadOutcome {
   url?: string;
   title?: string;
   low_res_upscaled?: Record<string, unknown>;
+  rasterized_from_svg?: Record<string, unknown>;
 }
 
 function readStatus(raw: unknown, uuid: string): UploadOutcome {
@@ -298,6 +308,8 @@ function readStatus(raw: unknown, uuid: string): UploadOutcome {
   if (title) out.title = title;
   const lru = isRecord(raw) ? raw.low_res_upscaled : undefined;
   if (isRecord(lru)) out.low_res_upscaled = lru;
+  const svg = isRecord(raw) ? raw.rasterized_from_svg : undefined;
+  if (isRecord(svg)) out.rasterized_from_svg = svg;
   return out;
 }
 
@@ -356,9 +368,12 @@ export const uploadDesign = defineTool({
     'requests).\n' +
     '3. `image_base64` — inline bytes. Works anywhere, but costs roughly 350k tokens per ' +
     'megabyte of file, so reserve it for small files when neither of the above is possible.\n\n' +
-    'Accepts PNG, JPEG and WEBP (rasterize vector sources first). For pixel art, or any ' +
-    'hard-edge mark that must stay crisp, pass upscale="pixel" so a small file is enlarged ' +
-    'without being smoothed.',
+    'Accepts PNG, JPEG, WEBP and SVG. SVG is the BEST input for a logo or mark: it is ' +
+    'rendered server-side at print resolution, so it stays crisp at any size. Two things ' +
+    'must be true of the SVG first — text converted to outlines, and any linked image ' +
+    'embedded — otherwise the upload is refused with instructions rather than silently ' +
+    'losing that part of the artwork. For pixel art, or any hard-edge raster mark that must ' +
+    'stay crisp, pass upscale="pixel" so a small file is enlarged without being smoothed.',
   inputSchema: z.object({
     source_url: z
       .string()
@@ -380,10 +395,10 @@ export const uploadDesign = defineTool({
     filename: z.string().optional().describe('Original filename. Used for the default title.'),
     title: z.string().optional().describe('Display title for the design. Defaults to the filename stem.'),
     content_type: z
-      .enum(['image/png', 'image/jpeg', 'image/webp'])
+      .enum(['image/png', 'image/jpeg', 'image/webp', 'image/svg+xml'])
       .optional()
       .describe(
-        'Declared MIME type. Detected from the file bytes when they are supplied, so it is only needed for the presigned mode (defaults to image/png).',
+        'Declared MIME type. Detected from the file when the bytes are supplied, so it is only needed for the presigned mode (defaults to image/png). Use image/svg+xml to upload vector.',
       ),
     upscale: z
       .enum(['auto', 'pixel', 'smooth'])
@@ -452,7 +467,7 @@ export const uploadDesign = defineTool({
       ? await fetchSourceBytes(ctx, input.source_url)
       : decodeBase64(input.image_base64 as string);
 
-    const detected = sniffContentType(bytes);
+    const detected: ContentType | undefined = sniffContentType(bytes) ?? (looksLikeSvg(bytes) ? 'image/svg+xml' : undefined);
     if (!detected) rejectUnsupportedFormat(bytes);
     if (input.content_type && input.content_type !== detected) {
       warnings.push(
@@ -508,6 +523,12 @@ function finish(
   transport: string,
   bytes?: number,
 ): Record<string, unknown> {
+  const svg = outcome.rasterized_from_svg;
+  if (svg) {
+    warnings.push(
+      `The SVG was rendered to a ${svg.width}x${svg.height} raster at print resolution. The design is now a raster — re-upload the SVG if you need it at a different size.`,
+    );
+  }
   const lru = outcome.low_res_upscaled;
   if (lru) {
     const filter = typeof lru.filter === 'string' ? lru.filter : undefined;
