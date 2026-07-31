@@ -397,7 +397,9 @@ export const shipProduct = defineTool({
   description:
     'End-to-end pipeline in ONE call: take a design, generate + verify a mockup (one per imported color, so every color variant has a matching mockup), create the product with the correct field names, add all variants, associate with a store, sync to fulfillment, then (optionally) sync to sales channels as DRAFT. Handles EMBROIDERY garments (caps/beanies/embroidered apparel) automatically: routes the design to the real embroidery placement and attaches Printful thread colors (derived from the design, or pass thread_colors). Face goods (canvas, posters, backpacks, bags, socks, towels, blankets, pillows, cases...) default to print_style "fill": the design is recomposed onto an aesthetically matching background and printed edge-to-edge, so no green-screen background or contrasting borders reach the product. Enforces pricing floors and guards the AQUA-vs-Navy variant trap. Streams progress. PREFER this over chaining create_product + add_variants + sync_to_fulfillment + sync_to_channel yourself — especially for AUTOMATED or SCHEDULED runs — because it guarantees the correct order (store association + fulfillment sync BEFORE any channel sync). Use the split primitives only when you deliberately need a partial/interactive flow.',
   inputSchema: z.object({
-    design_uuid: z.string().min(1),
+    design_uuid: z.string().min(1).describe(
+      'The design to print. Comes from generate_image / design_apparel, OR from upload_design when the merchant already owns the artwork (a logo, a brand mark, a cleared cover). Never regenerate a mark you were given as a file.',
+    ),
     garment: garmentSchema,
     variants: z.array(variantSchema).min(1),
     pricing: z.object({ price: z.number().positive(), shipping_price: z.number().optional() }),
@@ -644,7 +646,9 @@ export const createProduct = defineTool({
   description:
     'Create a STANDALONE product from a design (split primitive) — it is NOT placed on any store yet. Applies the correct field names + pricing floor, routes EMBROIDERY garments (caps/beanies) to their real embroidery placement with Printful thread colors (derived or explicit), and defaults face goods (canvas/backpacks/bags/socks/towels/blankets/pillows/cases...) to print_style "fill" (design recomposed onto a matching background, printed edge-to-edge). Set generate_mockup: true to render a garment mockup as the display image (it auto-derives representative variants from the catalog, so you do NOT need mockup_variant_ids) — otherwise the raw design is used as the display image. To get it onto a store and listed, the required sequence is: add_variants -> sync_to_fulfillment(product_uuid, store_uuid) [associates it with the store + syncs to Printful/Printify] -> sync_to_channel [sales channel]. To run that whole pipeline in one call instead, use ship_product.',
   inputSchema: z.object({
-    design_uuid: z.string().min(1),
+    design_uuid: z.string().min(1).describe(
+      'The design to print. Comes from generate_image / design_apparel, OR from upload_design when the merchant already owns the artwork (a logo, a brand mark, a cleared cover). Never regenerate a mark you were given as a file.',
+    ),
     garment: garmentSchema,
     pricing: z.object({ price: z.number().positive(), shipping_price: z.number().optional() }),
     product_meta: z.object({ name: z.string().min(1), description: z.string() }),

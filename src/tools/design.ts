@@ -301,7 +301,7 @@ export const verifyDesignText = defineTool({
 export const designApparel = defineTool({
   name: 'design_apparel',
   description:
-    'End-to-end apparel design with the platform lessons baked in: solid-green-background prompt, transparency keying, and (optionally) a local text check. Returns ready-to-use design(s). Streams progress. Set needs_transparency=false for all-over-print products. Rate-limit errors are classified (model_rate_limited = one model\'s provider vs platform_rate_limited = this key\'s ApparelHub throttle vs request_not_sent = the call never reached ApparelHub), and each design\'s fallback_trail shows any model substitutions.',
+    'End-to-end apparel design with the platform lessons baked in: solid-green-background prompt, transparency keying, and (optionally) a local text check. Returns ready-to-use design(s). Streams progress. Set needs_transparency=false for all-over-print products. Rate-limit errors are classified (model_rate_limited = one model\'s provider vs platform_rate_limited = this key\'s ApparelHub throttle vs request_not_sent = the call never reached ApparelHub), and each design\'s fallback_trail shows any model substitutions. This GENERATES new artwork — when the merchant already owns the file (a logo, a brand mark, a cleared cover), use upload_design instead and do not regenerate their mark.',
   inputSchema: z.object({
     prompt: z.string().min(1),
     count: z.number().int().positive().max(4).optional(),

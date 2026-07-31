@@ -2,6 +2,7 @@ import type { ToolDef } from './registry.js';
 import { readTools } from './read.js';
 import { catalogTools } from './catalog.js';
 import { designTools } from './design.js';
+import { uploadTools } from './upload.js';
 import { productTools } from './product.js';
 import { systemsTools } from './systems.js';
 import { safetyTools } from './safety.js';
@@ -20,6 +21,8 @@ export function allTools(): ToolDef[] {
     ...readTools,
     ...catalogTools,
     ...designTools,
+    // Bring-your-own artwork: the merchant already owns the file (#129).
+    ...uploadTools,
     ...productTools,
     ...systemsTools,
     ...safetyTools,
