@@ -89,6 +89,23 @@ describe('CORS (editor clients that run MCP from a browser context)', () => {
   });
 });
 
+
+describe('server display metadata (connector widgets)', () => {
+  it('advertises a human title, site, description and icon', async () => {
+    // Without these a client has only `name` to render, which is the npm
+    // package id "@apparelhub/mcp-server" -- so widgets showed that string and
+    // no logo. Asserted so the metadata cannot be dropped silently.
+    const handle = makeHandler({}, ENV);
+    const res = await handle(postEvent(initializeReq, { bearer: ENV.MCP_BEARER }));
+    expect(res.statusCode).toBe(200);
+    const info = JSON.parse(res.body ?? '{}').result?.serverInfo ?? {};
+    expect(info.title).toBe('ApparelHub');
+    expect(info.websiteUrl).toBe('https://apparelhub.ai');
+    expect(info.description).toBeTruthy();
+    expect(info.icons?.[0]?.src).toMatch(/^https:\/\//);
+  });
+});
+
 describe('lambda handler auth gate', () => {
   it('serves /healthz without auth and without leaking anything', async () => {
     const handle = makeHandler({}, {} as NodeJS.ProcessEnv);
