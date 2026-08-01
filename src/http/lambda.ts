@@ -55,6 +55,34 @@ function redactPath(path: string): string {
     .join('/');
 }
 
+
+// --- CORS (apparelhub-mcp#44 follow-up) ---
+//
+// Editor clients that issue MCP requests from a browser/renderer context are
+// subject to CORS. Two things were missing and BOTH are hard blockers there:
+//
+//   1. The OPTIONS preflight went through auth and returned 401. A preflight is
+//      unauthenticated by definition -- browsers never attach credentials to it
+//      -- so it must short-circuit before any auth runs, or the real request is
+//      never sent and the client reports the server as unreachable.
+//
+//   2. `WWW-Authenticate` was not exposed. Restoring the header at the CDN is
+//      not enough on its own: a browser context cannot READ a response header
+//      unless it is listed in Access-Control-Expose-Headers, so the OAuth
+//      challenge stayed invisible to exactly the clients that need it.
+//
+// `Allow-Origin: *` rather than echoing Origin, because MCP clients authenticate
+// with an explicit Authorization header, never cookies -- so credentialed mode
+// is not needed and the wildcard keeps this cacheable.
+const CORS_HEADERS: Record<string, string> = {
+  'access-control-allow-origin': '*',
+  'access-control-allow-methods': 'GET, POST, DELETE, OPTIONS',
+  'access-control-allow-headers':
+    'authorization, content-type, accept, mcp-session-id, mcp-protocol-version, last-event-id',
+  'access-control-expose-headers': 'www-authenticate, mcp-session-id',
+  'access-control-max-age': '86400',
+};
+
 function jsonResult(
   statusCode: number,
   payload: unknown,
@@ -62,7 +90,7 @@ function jsonResult(
 ): FunctionUrlResult {
   return {
     statusCode,
-    headers: { 'content-type': 'application/json', ...extraHeaders },
+    headers: { 'content-type': 'application/json', ...CORS_HEADERS, ...extraHeaders },
     body: JSON.stringify(payload),
   };
 }
@@ -184,7 +212,13 @@ export function makeHandler(
     const started = Date.now();
     const method = event.requestContext?.http?.method ?? 'GET';
     const rawPath = event.rawPath || '/';
-    const result = await handleInner(event, method, rawPath, deps, env);
+    // Answer the preflight before anything else. Placed in the OUTER handler on
+    // purpose: handleInner owns auth, and a preflight that reaches auth gets a
+    // 401, which kills the request the browser was about to make.
+    const result =
+      method === 'OPTIONS'
+        ? { statusCode: 204, headers: { ...CORS_HEADERS }, body: '' }
+        : await handleInner(event, method, rawPath, deps, env);
     const latencyMs = Date.now() - started;
     const { rpcMethod, toolName } =
       method === 'POST' ? parseRpc(event.body, event.isBase64Encoded === true) : {};

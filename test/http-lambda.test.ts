@@ -50,6 +50,45 @@ const initializeReq = {
 };
 const toolsListReq = { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} };
 
+
+describe('CORS (editor clients that run MCP from a browser context)', () => {
+  it('answers the preflight WITHOUT auth', async () => {
+    // A preflight never carries credentials, so if it reaches the auth gate it
+    // 401s and the browser never sends the real request -- which surfaces to the
+    // user as "unable to reach MCP server", not as an auth problem.
+    const handle = makeHandler({}, {} as NodeJS.ProcessEnv);
+    const res = await handle({
+      rawPath: '/mcp',
+      headers: { origin: 'vscode-file://vscode-app' },
+      requestContext: { http: { method: 'OPTIONS' } },
+    });
+    expect(res.statusCode).toBe(204);
+    expect(res.headers?.['access-control-allow-origin']).toBe('*');
+    expect(res.headers?.['access-control-allow-headers']).toContain('authorization');
+  });
+
+  it('EXPOSES www-authenticate on the 401 so the challenge is readable', async () => {
+    // Restoring the header at the CDN is not sufficient on its own: a browser
+    // context cannot read a response header that is not exposed, so the OAuth
+    // challenge stays invisible to precisely the clients that need it.
+    // ENV (not {}) so this lands on the real 401 rather than the fail-closed 503.
+    const handle = makeHandler({}, ENV);
+    const res = await handle(postEvent(initializeReq));
+    expect(res.statusCode).toBe(401);
+    expect(res.headers?.['access-control-expose-headers']).toContain('www-authenticate');
+  });
+
+  it('carries allow-origin on ordinary responses too, not just the preflight', async () => {
+    const handle = makeHandler({}, {} as NodeJS.ProcessEnv);
+    const res = await handle({
+      rawPath: '/healthz',
+      requestContext: { http: { method: 'GET' } },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers?.['access-control-allow-origin']).toBe('*');
+  });
+});
+
 describe('lambda handler auth gate', () => {
   it('serves /healthz without auth and without leaking anything', async () => {
     const handle = makeHandler({}, {} as NodeJS.ProcessEnv);
