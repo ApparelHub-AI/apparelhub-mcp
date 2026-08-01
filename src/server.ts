@@ -84,8 +84,26 @@ export function createServer(config: Config, deps: ServerDeps = {}): CreatedServ
     '`model_rate_limited` means one specific model\'s provider throttled: the built-in fallback ladder already retries other models, so only back off when it too is exhausted. ' +
     '`request_not_sent` means the call never reached ApparelHub — do not attribute it to ApparelHub at all, and if several unrelated tools fail at the same moment, suspect the calling runtime or its network first.';
 
+  // Display metadata (MCP `Implementation`). Without it a client has only
+  // `name` to render, which is the npm package id "@apparelhub/mcp-server" --
+  // so connector widgets showed that string and no logo at all. `title` is the
+  // human-facing label; `icons` is the standard way to supply a mark.
   const server = new Server(
-    { name: SERVER_NAME, version: SERVER_VERSION },
+    {
+      name: SERVER_NAME,
+      version: SERVER_VERSION,
+      title: 'ApparelHub',
+      websiteUrl: 'https://apparelhub.ai',
+      description:
+        'Design with AI, build products, list and sell across your sales channels, ' +
+        'and fulfil through your own print-on-demand providers.',
+      icons: [
+        {
+          src: 'https://apparelhub.ai/assets/images/apparelhub-logo.svg',
+          mimeType: 'image/svg+xml',
+        },
+      ],
+    },
     { capabilities: { tools: {} }, instructions },
   );
 
