@@ -171,7 +171,12 @@ describe('start_channel_connect', () => {
     )) as any;
     expect(calls[0]!.url).toContain('/store/s1/ecommerce/c2/initiate');
     expect(res.authorization_url).toContain('authorize');
-    expect(res.guidance).toContain('poll');
+    // The dispatch must tell the model to KEEP polling. Without this the model
+    // hands over a link and stops, and since the tab where the user authorizes
+    // cannot report back to the conversation, a successful connect reaches
+    // nobody -- which is exactly what happened to a real operator (#136).
+    expect(res.next_action).toBe('poll_check_connection_status');
+    expect(res.guidance).toContain('KEEP POLLING');
   });
 
   it('refuses a sales-channel connect with no store, instead of guessing one', async () => {

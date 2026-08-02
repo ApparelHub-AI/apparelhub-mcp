@@ -202,7 +202,7 @@ export const connectSalesChannel = defineTool({
 export const startChannelConnect = defineTool({
   name: 'start_channel_connect',
   description:
-    'Begin a browser-based connection (Printful, Shopify, TikTok Shop, Fourthwall). Returns an authorization URL to give the user. It does NOT complete the connection: after the user authorizes, poll check_connection_status. If they need to create an upstream account first, let them, then call this again for a fresh link — nothing is lost and they never have to restart from the web dashboard.',
+    'Begin a browser-based connection (Printful, Shopify, TikTok Shop, Fourthwall). Returns an authorization URL to give the user. THE CONNECTION IS NOT FINISHED WHEN THIS RETURNS. You must keep polling check_connection_status until it reports connected, then tell the user. The browser tab where they authorize is NOT this conversation and cannot report back to you, so polling is the only way you or they will learn it worked. Poll every few seconds, up to about two minutes, and if it has not landed by then ask whether they finished authorizing rather than giving up silently. If they need to create an upstream account first, let them, then call this again for a fresh link.',
   inputSchema: z.object({
     provider_uuid: PROVIDER_UUID,
     kind: z
@@ -266,8 +266,11 @@ export const startChannelConnect = defineTool({
       authorization_url: authUrl,
       store_uuid: str(raw, 'uuid', 'store_uuid') ?? input.store_uuid,
       result: raw,
+      // Structured, because a sentence is easy for a model to skip and this
+      // step is the one that decides whether the user ever learns the outcome.
+      next_action: authUrl ? 'poll_check_connection_status' : 'retry_start_channel_connect',
       guidance: authUrl
-        ? 'Give the user this link and ask them to authorize in a browser. Then poll check_connection_status until connected is true. If they have no account with this provider yet, they can create one and you can re-issue the link.'
+        ? 'Give the user this link and ask them to authorize in a browser. Then KEEP POLLING check_connection_status until connected is true, and tell them when it lands. Do not stop after handing over the link: the tab where they authorize cannot report back to this conversation, so your poll is the only way the result reaches them. Poll every few seconds for about two minutes; if it has not landed, ask whether they finished authorizing.'
         : 'The provider did not return an authorization URL. Re-check the provider and store, then try again.',
     };
   },
@@ -276,7 +279,7 @@ export const startChannelConnect = defineTool({
 export const checkConnectionStatus = defineTool({
   name: 'check_connection_status',
   description:
-    'Poll whether a dispatched connection has completed. Use after start_channel_connect while the user authorizes in their browser. Read-only and safe to call repeatedly; poll every few seconds rather than in a tight loop. Also reports a connection that has stopped working and needs authorizing again.',
+    'Poll whether a dispatched connection has completed. Call this repeatedly after start_channel_connect while the user authorizes in their browser, and announce the result when it lands: they cannot see this conversation from the tab they authorized in, so if you do not tell them, nobody does. Read-only, makes no provider call, and is safe to poll every few seconds. connected true means say so and continue setup. connected false means keep waiting. needs_reconnect means retrying will never work and you must dispatch a fresh link with start_channel_connect.',
   inputSchema: z.object({
     store_uuid: z
       .string()
