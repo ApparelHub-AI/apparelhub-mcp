@@ -201,6 +201,36 @@ describe('start_channel_connect', () => {
     expect(res.store_uuid).toBe('s9');
   });
 
+  // Shopify's consent screen lives on the merchant's OWN domain, so unlike
+  // every other provider it cannot build an authorize URL from the provider
+  // row alone. The tool named Shopify in its description while having no way
+  // to pass a shop, so the very first call failed -- before the user ever saw
+  // a link. Nothing caught it because nothing asserted the tool could supply
+  // what the backend required (#867).
+  it('passes the merchant shop domain through for Shopify', async () => {
+    const { api, calls } = apiRecording({ auth_url: 'https://your-store.myshopify.com/admin/oauth/authorize' });
+    await startChannelConnect.handler(
+      {
+        provider_uuid: 'c3',
+        kind: 'sales_channel',
+        store_uuid: 's1',
+        shop_url: 'your-store.myshopify.com',
+      },
+      fakeContext(api),
+    );
+    expect(JSON.parse(calls[0]!.init?.body as string)).toMatchObject({
+      shop_url: 'your-store.myshopify.com',
+    });
+  });
+
+  it('tells the agent Shopify needs a shop domain before it calls', () => {
+    // The description is the only place a model learns this, and it learns it
+    // BEFORE the first call. A backend error message arrives too late to stop
+    // the user watching a failure.
+    expect(startChannelConnect.description).toContain('shop_url');
+    expect(startChannelConnect.inputSchema.shape.shop_url.description).toContain('myshopify');
+  });
+
   it('says what to do when the provider returns no URL, rather than claiming success', async () => {
     const { api } = apiRecording({ message: 'nothing useful' });
     const res = (await startChannelConnect.handler(
@@ -240,6 +270,88 @@ describe('check_connection_status', () => {
     const res = (await checkConnectionStatus.handler({ store_uuid: 's1' }, fakeContext(api))) as any;
     expect(res.needs_reconnect).toBe(true);
     expect(res.guidance).toContain('Retrying will not fix it');
+  });
+
+  // The bug this file previously could not see: a sales channel could connect
+  // and this reported false forever, because it only ever inspected
+  // `fulfillment.connected`. The agent would poll out its whole budget and
+  // then ask the user whether they had really authorized -- while the channel
+  // sat connected in readiness the entire time (#867).
+  it('sees a connected sales channel, not just fulfillment', async () => {
+    const { api } = apiRecording({
+      stores: [
+        {
+          uuid: 's1',
+          fulfillment: { connected: false, connection_state: 'unknown' },
+          sales_channels: [
+            { integration_uuid: 'i1', provider: { uuid: 'c3', name: 'Shopify' }, connected: true },
+          ],
+        },
+      ],
+    });
+    const res = (await checkConnectionStatus.handler(
+      { store_uuid: 's1', provider_uuid: 'c3' },
+      fakeContext(api),
+    )) as any;
+    expect(res.connected).toBe(true);
+  });
+
+  it('does not call a different provider connected', async () => {
+    // A poll that answers "is anything connected" says true the moment any
+    // earlier connection exists. The agent would then announce success for a
+    // connection that never happened -- worse than reporting false, because
+    // the user stops looking.
+    const { api } = apiRecording({
+      stores: [
+        {
+          uuid: 's1',
+          fulfillment: { connected: true, connection_state: 'connected', provider: { uuid: 'p2', name: 'Printful' } },
+          sales_channels: [
+            { integration_uuid: 'i1', provider: { uuid: 'c1', name: 'WooCommerce' }, connected: true },
+          ],
+        },
+      ],
+    });
+    const res = (await checkConnectionStatus.handler(
+      { store_uuid: 's1', provider_uuid: 'c3' },
+      fakeContext(api),
+    )) as any;
+    expect(res.connected).toBe(false);
+  });
+
+  it('still answers about fulfillment when no provider is named', async () => {
+    // Back-compat: the fulfillment flow verified working in production must
+    // not change behaviour just because channels became visible.
+    const { api } = apiRecording({
+      stores: [
+        {
+          uuid: 's1',
+          fulfillment: { connected: true, connection_state: 'connected', provider: { uuid: 'p2' } },
+          sales_channels: [],
+        },
+      ],
+    });
+    const res = (await checkConnectionStatus.handler({ store_uuid: 's1' }, fakeContext(api))) as any;
+    expect(res.connected).toBe(true);
+  });
+
+  it('surfaces connected channels even when polled without a provider', async () => {
+    const { api } = apiRecording({
+      stores: [
+        {
+          uuid: 's1',
+          fulfillment: { connected: false },
+          sales_channels: [
+            { integration_uuid: 'i1', provider: { uuid: 'c3', name: 'Shopify' }, connected: true },
+          ],
+        },
+      ],
+    });
+    const res = (await checkConnectionStatus.handler({ store_uuid: 's1' }, fakeContext(api))) as any;
+    // Unscoped `connected` stays fulfillment-only by design, but the agent must
+    // not be left with a bare false and no way to tell what happened.
+    expect(res.connected_sales_channels).toHaveLength(1);
+    expect(res.guidance).toContain('provider_uuid');
   });
 
   it('scopes to one store when asked', async () => {
