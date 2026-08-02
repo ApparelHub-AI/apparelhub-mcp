@@ -202,7 +202,7 @@ export const connectSalesChannel = defineTool({
 export const startChannelConnect = defineTool({
   name: 'start_channel_connect',
   description:
-    'Begin a browser-based connection (Printful, Shopify, TikTok Shop, Fourthwall). Returns an authorization URL to give the user. THE CONNECTION IS NOT FINISHED WHEN THIS RETURNS. You must keep polling check_connection_status until it reports connected, then tell the user. The browser tab where they authorize is NOT this conversation and cannot report back to you, so polling is the only way you or they will learn it worked. Poll every few seconds, up to about two minutes, and if it has not landed by then ask whether they finished authorizing rather than giving up silently. If they need to create an upstream account first, let them, then call this again for a fresh link.',
+    'Begin a browser-based connection (Printful, Shopify, TikTok Shop, Fourthwall). Shopify additionally requires shop_url, the merchant myshopify domain — ask for it before calling. Returns an authorization URL to give the user. THE CONNECTION IS NOT FINISHED WHEN THIS RETURNS. You must keep polling check_connection_status (passing the same provider_uuid) until it reports connected, then tell the user. The browser tab where they authorize is NOT this conversation and cannot report back to you, so polling is the only way you or they will learn it worked. Poll every few seconds, up to about two minutes, and if it has not landed by then ask whether they finished authorizing rather than giving up silently. If they need to create an upstream account first, let them, then call this again for a fresh link.',
   inputSchema: z.object({
     provider_uuid: PROVIDER_UUID,
     kind: z
@@ -218,6 +218,17 @@ export const startChannelConnect = defineTool({
       .string()
       .optional()
       .describe('Name for a NEW store, when connecting fulfillment without an existing store_uuid.'),
+    // Shopify cannot build an authorize URL without knowing WHICH shop: the
+    // consent screen lives on the merchant's own domain
+    // (https://<shop>.myshopify.com/admin/oauth/authorize). Every other
+    // provider has one global authorize host, so nothing needed this until
+    // Shopify. Without it the call fails before the user ever sees a link.
+    shop_url: z
+      .string()
+      .optional()
+      .describe(
+        "Required for Shopify only: the merchant's myshopify domain, e.g. their-shop.myshopify.com. Ask the user for it; it is the domain in their Shopify admin URL, not their custom storefront domain. Omit for every other provider.",
+      ),
     callback_url: z
       .string()
       .optional()
@@ -239,6 +250,7 @@ export const startChannelConnect = defineTool({
       }
       const body: Record<string, unknown> = {};
       if (input.callback_url) body.callback_url = input.callback_url;
+      if (input.shop_url) body.shop_url = input.shop_url;
       raw = rec(
         await ctx.api.post(
           `store/${enc(input.store_uuid)}/ecommerce/${enc(input.provider_uuid)}/initiate`,
@@ -270,7 +282,7 @@ export const startChannelConnect = defineTool({
       // step is the one that decides whether the user ever learns the outcome.
       next_action: authUrl ? 'poll_check_connection_status' : 'retry_start_channel_connect',
       guidance: authUrl
-        ? 'Give the user this link and ask them to authorize in a browser. Then KEEP POLLING check_connection_status until connected is true, and tell them when it lands. Do not stop after handing over the link: the tab where they authorize cannot report back to this conversation, so your poll is the only way the result reaches them. Poll every few seconds for about two minutes; if it has not landed, ask whether they finished authorizing.'
+        ? 'Give the user this link and ask them to authorize in a browser. Then KEEP POLLING check_connection_status — passing this same provider_uuid — until connected is true, and tell them when it lands. Do not stop after handing over the link: the tab where they authorize cannot report back to this conversation, so your poll is the only way the result reaches them. Poll every few seconds for about two minutes; if it has not landed, ask whether they finished authorizing.'
         : 'The provider did not return an authorization URL. Re-check the provider and store, then try again.',
     };
   },
@@ -285,6 +297,12 @@ export const checkConnectionStatus = defineTool({
       .string()
       .optional()
       .describe('Narrow the answer to one store. Omit to get the whole account.'),
+    provider_uuid: z
+      .string()
+      .optional()
+      .describe(
+        'The provider you are waiting for — pass the same provider_uuid you gave start_channel_connect. REQUIRED in practice when waiting on a sales channel (Shopify, TikTok Shop): without it this answers only about fulfillment and will report false however long you poll. It also prevents a false positive, where an unrelated existing connection makes this look successful.',
+      ),
   }),
   annotations: { readOnlyHint: true, openWorldHint: true },
   handler: async (input, ctx) => {
@@ -297,25 +315,75 @@ export const checkConnectionStatus = defineTool({
       ? stores.filter((s) => isRecord(s) && s.uuid === input.store_uuid)
       : stores;
 
-    const connected = scoped.some(
-      (s) => isRecord(s) && isRecord(s.fulfillment) && s.fulfillment.connected === true,
+    // Sales channels were invisible here until #867: this only ever read
+    // `fulfillment.connected`, so a Shopify or TikTok connect could complete
+    // and the poll would report false forever. The agent would wait out its
+    // timeout and ask the user whether they had really authorized -- while the
+    // channel sat connected. Readiness has always carried `sales_channels`;
+    // nothing looked at it.
+    const providerUuid = input.provider_uuid;
+
+    const fulfillmentConnected = (s: Record<string, unknown>) =>
+      isRecord(s.fulfillment) && s.fulfillment.connected === true;
+
+    const channelsOf = (s: Record<string, unknown>) =>
+      (Array.isArray(s.sales_channels) ? s.sales_channels : []).filter(isRecord);
+
+    // Scoped to ONE provider when we know which one we are waiting for. A poll
+    // that answers "is anything connected" says true the moment ANY prior
+    // connection exists, which for a second provider is a false positive --
+    // the agent would announce success for something that never happened.
+    const matchesProvider = (holder: Record<string, unknown>) =>
+      isRecord(holder.provider) && holder.provider.uuid === providerUuid;
+
+    const connectedChannels = scoped.flatMap((s) =>
+      isRecord(s) ? channelsOf(s).filter((c) => c.connected === true) : [],
     );
+
+    const connected = providerUuid
+      ? scoped.some(
+          (s) =>
+            isRecord(s) &&
+            ((isRecord(s.fulfillment) &&
+              s.fulfillment.connected === true &&
+              matchesProvider(s.fulfillment)) ||
+              channelsOf(s).some((c) => c.connected === true && matchesProvider(c))),
+        )
+      : // Unscoped keeps the original meaning exactly, so the fulfillment flow
+        // that is already working in production does not change behaviour.
+        scoped.some((s) => isRecord(s) && fulfillmentConnected(s));
+
     const needsReconnect = scoped.filter(
       (s) =>
         isRecord(s) &&
         isRecord(s.fulfillment) &&
-        s.fulfillment.connection_state === 'reconnect_required',
+        s.fulfillment.connection_state === 'reconnect_required' &&
+        (!providerUuid || matchesProvider(s.fulfillment)),
     );
 
     return {
       connected,
       stores: scoped,
+      // Surfaced even when unscoped, so an agent polling after a channel
+      // connect without passing provider_uuid still has something true to read
+      // rather than a bare false.
+      connected_sales_channels: connectedChannels.map((c) => ({
+        provider: isRecord(c.provider) ? c.provider.name : undefined,
+        integration_uuid: c.integration_uuid,
+      })),
       needs_reconnect: needsReconnect.length > 0,
       guidance: needsReconnect.length
         ? 'A fulfillment connection has stopped working. Retrying will not fix it — dispatch start_channel_connect again so the user can re-authorize.'
         : connected
           ? 'Connected. Continue with check_setup_readiness for the next step.'
-          : 'Not connected yet. If the user has authorized in their browser, wait a few seconds and poll again.',
+          : // "poll again" must survive on BOTH branches. It is the instruction
+            // that keeps the agent polling at all (#136); dropping it to make
+            // room for the provider_uuid hint would trade one silent failure
+            // for another.
+            'Not connected yet. If the user has authorized in their browser, wait a few seconds and poll again.' +
+            (providerUuid
+              ? ''
+              : ' If you are waiting on a sales channel, pass provider_uuid — without it this reports only on fulfillment.'),
     };
   },
 });
