@@ -233,7 +233,7 @@ export const startChannelConnect = defineTool({
       .string()
       .optional()
       .describe(
-        'Where the browser lands after authorizing. Must be an ApparelHub app URL; anything else is rejected. Defaults to the platform callback, which is usually what you want.',
+        'OMIT THIS. The platform fills in the callback registered with the provider, and for Shopify that registered URL is the only one that works — anything else is refused, either by us or by Shopify with an error naming neither what was sent nor what was wanted. Set it only if you have been given a specific URL to use.',
       ),
   }),
   annotations: { openWorldHint: true },
