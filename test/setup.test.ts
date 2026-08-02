@@ -208,18 +208,18 @@ describe('start_channel_connect', () => {
   // a link. Nothing caught it because nothing asserted the tool could supply
   // what the backend required (#867).
   it('passes the merchant shop domain through for Shopify', async () => {
-    const { api, calls } = apiRecording({ auth_url: 'https://their-shop.myshopify.com/admin/oauth/authorize' });
+    const { api, calls } = apiRecording({ auth_url: 'https://your-store.myshopify.com/admin/oauth/authorize' });
     await startChannelConnect.handler(
       {
         provider_uuid: 'c3',
         kind: 'sales_channel',
         store_uuid: 's1',
-        shop_url: 'their-shop.myshopify.com',
+        shop_url: 'your-store.myshopify.com',
       },
       fakeContext(api),
     );
     expect(JSON.parse(calls[0]!.init?.body as string)).toMatchObject({
-      shop_url: 'their-shop.myshopify.com',
+      shop_url: 'your-store.myshopify.com',
     });
   });
 

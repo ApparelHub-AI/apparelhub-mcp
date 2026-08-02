@@ -227,7 +227,7 @@ export const startChannelConnect = defineTool({
       .string()
       .optional()
       .describe(
-        "Required for Shopify only: the merchant's myshopify domain, e.g. their-shop.myshopify.com. Ask the user for it; it is the domain in their Shopify admin URL, not their custom storefront domain. Omit for every other provider.",
+        "Required for Shopify only: the merchant's myshopify domain, e.g. your-store.myshopify.com. Ask the user for it; it is the domain in their Shopify admin URL, not their custom storefront domain. Omit for every other provider.",
       ),
     callback_url: z
       .string()
