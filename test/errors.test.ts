@@ -120,3 +120,38 @@ describe('parseRetryAfter', () => {
     expect(parseRetryAfter(null)).toBeUndefined();
   });
 });
+
+// Structured 400s (apparelhub-ai#814/#870/#791). These are refusals that name a
+// condition and return the data to satisfy it — NOT malformed requests. Telling an
+// agent to "check field names" for a knitted garment with an unreadable design
+// sends it looking for a bug that does not exist.
+describe('structured 400 refusals keep their code', () => {
+  const cases: Array<[string, RegExp]> = [
+    ['empty_variant_selection', /available_variants/i],
+    ['no_buildable_variants', /available_colors/i],
+    ['placement_constraint', /fewer placements/i],
+    ['knit_options_unavailable', /knitted/i],
+  ];
+
+  for (const [code, suggestionRe] of cases) {
+    it(`preserves ${code} instead of collapsing to bad_request`, () => {
+      const err = mapHttpError(400, { error: code, message: 'platform prose' });
+      expect(err.code).toBe(code);
+      expect(err.message).toBe('platform prose');
+      expect(err.suggestion).toMatch(suggestionRe);
+      // The generic advice is wrong for these — there is no offending field.
+      expect(err.suggestion).not.toMatch(/check field names/i);
+    });
+  }
+
+  it('an ordinary 400 still maps to bad_request', () => {
+    const err = mapHttpError(400, { message: 'missing required field' });
+    expect(err.code).toBe('bad_request');
+    expect(err.suggestion).toMatch(/check field names/i);
+  });
+
+  it('an unrecognised error code still maps to bad_request', () => {
+    const err = mapHttpError(400, { error: 'something_new', message: 'x' });
+    expect(err.code).toBe('bad_request');
+  });
+});

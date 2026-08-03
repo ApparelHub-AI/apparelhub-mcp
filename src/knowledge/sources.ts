@@ -114,7 +114,19 @@ const FALLBACKABLE_CODES = new Set<string>([
   'request_not_sent', // transport failure — no response received; a different attempt may connect
   'network_error', // legacy alias of request_not_sent (belt-and-braces; no longer emitted)
   'generation_timeout', // async poll never completed — try a (faster) different model
+  // The model finished without producing an image, for a reason unrelated to content policy
+  // (platform code `no_image_returned`, apparelhub-ai#825). Model-specific and NOT caused by the
+  // prompt, so a different model is exactly the right next move. Before the platform
+  // distinguished this from a policy refusal it arrived as a bare `generation_failed` and killed
+  // the whole ladder on the first rung.
+  'no_image_returned',
+  // The model answered conversationally instead of drawing. Also model-specific — another model
+  // routinely renders the same prompt — so it is worth a rung rather than a hard stop.
+  'text_response_instead_of_image',
 ]);
+// DELIBERATELY ABSENT: `content_blocked`. A content-policy refusal is caused by the PROMPT, so
+// every remaining model refuses the same request. Cycling the ladder would burn a generation per
+// model to arrive at the same answer; it must surface immediately with "revise the prompt".
 // Rate-limit-shaped text, used to decide whether an ambiguous `generation_failed` is fallbackable.
 const RATE_LIMIT_MESSAGE_RE = /rate.?limit|quota|429|resource.?exhausted|too many/i;
 

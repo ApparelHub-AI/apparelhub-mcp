@@ -93,6 +93,41 @@ export function parseRetryAfter(header: string | null | undefined): number | und
   return undefined;
 }
 
+// Some 400s are STRUCTURED refusals rather than malformed requests: the platform
+// names a specific condition and returns the data needed to satisfy it. For these
+// the generic "check field names and values" advice is actively wrong — there is
+// no offending field — and collapsing them to `bad_request` throws away the one
+// thing an agent could branch on. Each entry below states the REAL next step.
+const STRUCTURED_BAD_REQUESTS: Record<string, { suggestion: string; fallbackMessage: string }> = {
+  empty_variant_selection: {
+    fallbackMessage: 'No variants were selected.',
+    suggestion:
+      'You sent an empty variant list. Pick from `available_variants` in the response body and ' +
+      'retry with 2-3 specific variant ids. If your own filter produced the empty list, fix that ' +
+      'first — resending the same request will fail identically.',
+  },
+  no_buildable_variants: {
+    fallbackMessage: 'None of the requested variants are buildable.',
+    suggestion:
+      'Re-pick from `available_colors` / `available_sizes` / `available_variants` in the response ' +
+      'body and retry.',
+  },
+  placement_constraint: {
+    fallbackMessage: 'The provider refuses this combination of print placements.',
+    suggestion:
+      'Retry with fewer placements, front first. `requested_placements`, `attempted_placements` ' +
+      'and `max_placements` in the body describe what is allowed. Do not resend the same set.',
+  },
+  knit_options_unavailable: {
+    fallbackMessage: 'This garment is knitted, and yarn colours could not be read from the design.',
+    suggestion:
+      'This garment is KNITTED, not printed: the artwork is reproduced in yarn, so it must have ' +
+      'clear, solid areas of colour (gradients and fine detail do not survive). Use a simpler, ' +
+      'higher-contrast design within `max_colors`, or choose a printed garment. `available_colors` ' +
+      'in the body lists the yarns the provider offers.',
+  },
+};
+
 // Map an HTTP status + parsed body into a broad, memorable AhError (api-contract §5).
 export function mapHttpError(
   status: number,
@@ -104,6 +139,15 @@ export function mapHttpError(
   const capability = extractField(body, 'capability');
 
   if (status === 400) {
+    const structured = errorCode ? STRUCTURED_BAD_REQUESTS[errorCode] : undefined;
+    if (structured) {
+      return new AhError({
+        httpStatus: status,
+        code: errorCode as string,
+        message: message ?? structured.fallbackMessage,
+        suggestion: structured.suggestion,
+      });
+    }
     return new AhError({
       httpStatus: status,
       code: 'bad_request',
