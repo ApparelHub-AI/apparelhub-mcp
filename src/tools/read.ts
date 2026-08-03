@@ -95,6 +95,23 @@ function mapDesign(raw: unknown): Record<string, unknown> {
   };
   const products = num(raw, 'products_using', 'products_count', 'product_count');
   if (products !== undefined) out.products_using = products;
+
+  // A design that is still being worked on, or that failed, has no usable
+  // full_url. Without these an agent sees a null url and no way to tell a
+  // transient failure it should retry from a content block it never will, so
+  // it either gives up on a recoverable design or retries a hopeless one
+  // forever. The platform started returning the reason in apparelhub-ai#886.
+  //
+  // Only emitted when there is something to say: a healthy design carries a
+  // null processing_status and stays as lean as it is today.
+  const processing = str(raw, 'processing_status', 'status');
+  if (processing) {
+    out.processing_status = processing;
+    const reason = str(raw, 'processing_error', 'error');
+    if (reason) out.processing_error = reason;
+    const code = str(raw, 'processing_error_code', 'error_code');
+    if (code) out.processing_error_code = code;
+  }
   return out;
 }
 
@@ -104,7 +121,11 @@ export const listMyDesigns = defineTool({
     "List the merchant's generated design images (newest first). Read-only. Use these design_uuids with the design/product tools. " +
     'Pass on_products=false to find orphan designs (designs not used by any live product), the ' +
     'supported way to audit a workspace for unused designs before archiving them. Pass ' +
-    'archived=true to list already-archived designs.',
+    'archived=true to list already-archived designs. ' +
+    'A design with no full_url carries processing_status: "pending"/"processing" means it is ' +
+    'still being made and is worth polling, while "failed" means it gave up and processing_error ' +
+    'says why. Branch on processing_error_code rather than matching the message text, and do not ' +
+    'retry a design whose failure is a content block — it will fail the same way every time.',
   inputSchema: z.object({
     limit: z.number().int().positive().max(100).optional().describe('Max results (default 20).'),
     sort: z.enum(['newest', 'oldest']).optional().describe('Sort order (default newest).'),

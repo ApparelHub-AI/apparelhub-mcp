@@ -9,6 +9,19 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.8.6]
+### Changed
+- `list_my_designs` now reports why a design has no image. A row still being
+  made carries `processing_status: "pending"`/`"processing"`; one that failed
+  carries `"failed"` plus `processing_error` and `processing_error_code`.
+  The mapper previously dropped all three, so an agent saw a design with a null
+  `full_url` and no way to tell a transient failure worth retrying from a
+  content block that will fail identically every time. The tool description now
+  says to branch on the code rather than match the message text.
+- A completed design is unchanged. The platform reports a null
+  `processing_status` for one, and the fields are omitted entirely in that case
+  rather than adding three nulls to every row of every listing.
+
 ## [0.4.0] - 2026-07-11
 
 ### Changed (major)
