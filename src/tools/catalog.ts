@@ -62,6 +62,35 @@ async function resolveProviderUuid(
   });
 }
 
+/**
+ * How a garment can be decorated, in provider-neutral terms (platform #758).
+ *
+ * Carried through EVERY catalog projection deliberately. The failure this comes
+ * from: an agent found one provider's headwear was embroidery-only and reported
+ * "no hat is possible" as settled fact, while the same account carried printed
+ * caps elsewhere. It had no provider-agnostic way to ask "can this take a
+ * photograph?", so it inferred one from a provider-specific string convention.
+ *
+ * `accepts_photoreal` is nullable and the null is load-bearing: it means nobody
+ * could tell, NOT that the garment cannot take the design. Dropping the field
+ * when absent (rather than coercing to false) is what keeps that distinction
+ * intact through this layer.
+ */
+function decorationFields(raw: unknown): Record<string, unknown> {
+  if (!isRecord(raw)) return {};
+  const methods = asArray(raw.decoration_method).filter(
+    (m): m is string => typeof m === 'string',
+  );
+  const photoreal = raw.accepts_photoreal;
+  return {
+    ...(methods.length ? { decoration_method: methods } : {}),
+    ...(str(raw, 'decoration_confidence')
+      ? { decoration_confidence: str(raw, 'decoration_confidence') }
+      : {}),
+    ...(typeof photoreal === 'boolean' ? { accepts_photoreal: photoreal } : {}),
+  };
+}
+
 function mapGarment(raw: unknown): Record<string, unknown> {
   const variants = asArray(isRecord(raw) ? raw.variants : undefined);
   return {
@@ -72,13 +101,14 @@ function mapGarment(raw: unknown): Record<string, unknown> {
     base_cost: num(raw, 'base_cost', 'cost', 'price'),
     image_url: str(raw, 'image_url', 'thumbnail_url', 'image'),
     variant_count: num(raw, 'variant_count', 'variants_count') ?? (variants.length || undefined),
+    ...decorationFields(raw),
   };
 }
 
 export const browseCatalog = defineTool({
   name: 'browse_catalog',
   description:
-    "Browse a fulfillment provider's catalog for garments to print on. The provider can be any fulfillment provider available to this account. `category` is resolved against THAT provider's own taxonomy (providers use different vocabularies for the same idea) and an unknown category is rejected with the valid list rather than quietly returning everything. `keyword` matches product names across the whole catalog. ALWAYS read `warnings` in the response: they tell you when your results are narrower than you asked for -- e.g. a category that only exists inside one department. Returns minimal listing fields. Read-only.",
+    "Browse ONE fulfillment provider's catalog for garments to print on. `category` is resolved against THAT provider's own taxonomy (providers use different vocabularies for the same idea) and an unknown category is rejected with the valid list rather than quietly returning everything. `keyword` matches product names across the whole catalog. ALWAYS read `warnings` in the response: they tell you when your results are narrower than you asked for -- e.g. a category that only exists inside one department. Each garment carries `decoration_method` / `accepts_photoreal` (`accepts_photoreal` absent means the provider publishes no signal -- unchecked, NOT unsuitable). This searches a SINGLE provider: to ask what the whole account can do, or before concluding a garment cannot take a design, use find_garments. Read-only.",
   inputSchema: z.object({
     provider: providerInput,
     category: z.string().optional().describe('e.g. "t-shirts", "hoodies", "mugs".'),
@@ -87,7 +117,7 @@ export const browseCatalog = defineTool({
       .boolean()
       .optional()
       .describe(
-        'NOT CURRENTLY HONOURED by the platform -- the catalog listing carries no all-over-print flag, so this is ignored and the response says so. To find all-over-print garments, try keyword="all-over" (Printful names them that way; Printify does not) or inspect print areas with get_garment_details.',
+        'Filter to all-over-print garments. All-over print is the weakest part of the decoration signal (not every provider declares the technique, so some are recognised by name) and this searches ONE provider — use find_garments before concluding no provider carries it. Read the response warnings.',
       ),
     page: z.number().int().positive().optional(),
     per_page: z.number().int().positive().max(100).optional(),
@@ -208,12 +238,119 @@ export const getGarmentDetails = defineTool({
         category: str(g, 'category', 'type', 'department'),
         base_cost: baseCost,
         image_url: str(g, 'image_url', 'thumbnail_url', 'image'),
+        ...decorationFields(g),
       },
       variants: asArray(variantsRaw).map(mapVariant),
       print_templates: asArray(templatesRaw).map(mapTemplate),
       pricing_floor: pricingFloor(baseCost),
       quality_tier: qualityTier(brand, name),
       warnings: garmentWarnings(input.product_ref_id),
+    };
+  },
+});
+
+export const findGarments = defineTool({
+  name: 'find_garments',
+  description:
+    "Search EVERY fulfillment provider on the account at once for garments matching a capability. USE THIS BEFORE TELLING A USER AN ITEM CANNOT BE BUILT. A capability limit is almost always scoped to one provider, not to the category of garment: one provider carrying only embroidered headwear says nothing about another's printed caps. browse_catalog answers 'what does THIS provider carry'; this answers 'what on this ACCOUNT can take this design'. Provider scope defaults to every provider available — pass `providers` only to deliberately narrow it. Returns a compact ranked shortlist (confirmed capability first), plus `providers_searched` so you can state your coverage honestly rather than implying you checked everything. An empty result means nothing matched THESE filters on THESE providers; it is not proof the garment does not exist, and the warnings say so. Read-only.",
+  inputSchema: z.object({
+    category: z
+      .string()
+      .optional()
+      .describe(
+        'Garment kind, e.g. "hat", "t-shirt", "mug". Matched against product names across each provider\'s whole catalog, including the words providers actually use ("hat" also finds cap / beanie / snapback / trucker).',
+      ),
+    keyword: z.string().optional().describe('Extra substring match on name/brand.'),
+    decoration_method: z
+      .array(
+        z.enum([
+          'embroidery',
+          'dtg',
+          'dtf',
+          'sublimation',
+          'aop',
+          'patch',
+          'screen',
+          'vinyl',
+          'print',
+        ]),
+      )
+      .optional()
+      .describe('Any match qualifies. "print" means a print process the provider does not name more precisely.'),
+    accepts_photoreal: z
+      .boolean()
+      .optional()
+      .describe(
+        'true for photographic / gradient-heavy / fine-detail artwork; false to find garments you can embroider. This is the filter that answers "can this design go on this thing".',
+      ),
+    providers: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'Provider NAMES to restrict to. OMIT to search every provider on the account — that is the default and the recommended usage.',
+      ),
+    include_unknown: z
+      .boolean()
+      .optional()
+      .describe(
+        'Keep garments whose decoration method the provider never published. Default true: unclassified is not the same as unsuitable, and excluding them hides real options.',
+      ),
+    verify: z
+      .boolean()
+      .optional()
+      .describe(
+        'Confirm low-confidence matches with a per-garment lookup. Defaults on when filtering by capability. Bounded, so a very broad search may leave some unverified.',
+      ),
+    limit: z.number().int().positive().max(50).optional().describe('Default 20.'),
+    workspace: z.string().optional(),
+  }),
+  annotations: { readOnlyHint: true, openWorldHint: true },
+  handler: async (input, ctx) => {
+    const raw = await ctx.api.get('merchandise/find-garments', {
+      query: {
+        category: input.category,
+        keyword: input.keyword,
+        // The platform takes csv; an array here would serialize per-key.
+        decoration_method: input.decoration_method?.join(','),
+        accepts_photoreal: input.accepts_photoreal,
+        providers: input.providers?.join(','),
+        include_unknown: input.include_unknown,
+        verify: input.verify,
+        limit: input.limit,
+      },
+      workspace: input.workspace,
+      signal: ctx.signal,
+    });
+
+    const results = asArray(raw, 'results', 'garments').map((r) => ({
+      provider: str(r, 'provider'),
+      product_ref_id: str(r, 'product_ref_id', 'provider_ref_id'),
+      name: str(r, 'name'),
+      brand: str(r, 'brand'),
+      image_url: str(r, 'image_url', 'image'),
+      variant_count: num(r, 'variant_count'),
+      ...decorationFields(r),
+    }));
+
+    // providers_searched / providers_unavailable / warnings are passed through
+    // verbatim. They carry the only thing the result list cannot say on its own:
+    // what was NOT looked at. An agent that reports "no printable hat exists"
+    // after searching two of three providers is repeating the #757 mistake with
+    // better data, so the coverage has to travel with the answer.
+    const passthrough = (key: string) =>
+      isRecord(raw) && Array.isArray(raw[key]) ? { [key]: raw[key] } : {};
+
+    return {
+      results,
+      total_matched: isRecord(raw) && typeof raw.total_matched === 'number'
+        ? raw.total_matched
+        : results.length,
+      ...passthrough('providers_searched'),
+      ...passthrough('providers_unavailable'),
+      ...(isRecord(raw) && isRecord(raw.filters_applied)
+        ? { filters_applied: raw.filters_applied }
+        : {}),
+      ...passthrough('warnings'),
     };
   },
 });
@@ -266,6 +403,7 @@ export const listCatalogProviders = defineTool({
 export const catalogTools: ToolDef[] = [
   browseCatalog,
   getGarmentDetails,
+  findGarments,
   recommendGarmentTool,
   listCatalogProviders,
 ];
