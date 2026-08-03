@@ -195,6 +195,9 @@ async function pollGeneration(
       'unknown';
     const url = str(s, 'url') ?? str(gi, 'url') ?? str(data, 'url');
     const error = str(s, 'error') ?? str(gi, 'error') ?? str(data, 'error');
+    // Machine-readable failure code (apparelhub-ai#825). Absent on older platform builds and on
+    // failures recorded before it shipped, so every use below stays optional.
+    const errorCode = str(s, 'error_code') ?? str(gi, 'error_code') ?? str(data, 'error_code');
 
     if (status === 'failed') {
       // Async models report a provider rate limit as a structured error string (platform
@@ -216,6 +219,38 @@ async function pollGeneration(
             : `A model provider rate limit failed this generation: ${error}`,
           suggestion:
             'Retry with a DIFFERENT source — the built-in fallback ladder does this automatically. This is the model provider throttling, not ApparelHub\'s request throttle.',
+        });
+      }
+      // The platform now distinguishes three failure kinds that used to be one opaque string
+      // (apparelhub-ai#825), and they have three DIFFERENT remedies. Surfacing the precise code
+      // matters most for content_blocked: it is the only one caused by the prompt, so it is the
+      // only one where cycling the fallback ladder burns a generation per model to arrive at the
+      // same refusal. See FALLBACKABLE_CODES in knowledge/sources.ts.
+      if (errorCode === 'content_blocked') {
+        throw new AhError({
+          code: 'content_blocked',
+          message: error ?? 'The image provider blocked this prompt on content-policy grounds.',
+          suggestion:
+            'Revise the PROMPT and try again — do not retry it unchanged and do not switch model, ' +
+            'because every model refuses the same request. Common causes: a named copyrighted ' +
+            'character, a real brand mark, or a real person.',
+        });
+      }
+      if (errorCode === 'no_image_returned' || errorCode === 'text_response_instead_of_image') {
+        const rephrase = errorCode === 'text_response_instead_of_image';
+        throw new AhError({
+          code: errorCode,
+          message:
+            error ??
+            (rephrase
+              ? 'The model answered with text instead of an image.'
+              : 'The model finished without returning an image.'),
+          suggestion: rephrase
+            ? 'Rephrase the prompt as a description of a flat 2D graphic, or try a different ' +
+              'source — the fallback ladder does this automatically. Asking for 3D, video or ' +
+              'vector output commonly triggers this.'
+            : 'Retry, or try a different source — the fallback ladder does this automatically. ' +
+              'This is not a problem with the prompt.',
         });
       }
       throw new AhError({

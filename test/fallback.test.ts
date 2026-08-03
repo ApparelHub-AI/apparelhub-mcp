@@ -156,6 +156,101 @@ describe('runGenerationWithFallback', () => {
     expect(sources).toEqual(['Nano Banana', 'Flux 1.1 Pro']);
   });
 
+  // apparelhub-ai#825: the platform now distinguishes three failure kinds that used to be one
+  // opaque string. They have three different remedies, and crucially two of the three are worth
+  // another model while the third is not.
+  const asyncFailure = (errorCode: string, message: string) => {
+    const sources: string[] = [];
+    const fetchImpl = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/images/upload/')) {
+        return jsonResponse(200, {
+          processing_status: 'failed',
+          error: message,
+          error_code: errorCode,
+        });
+      }
+      const body = init?.body ? (JSON.parse(String(init.body)) as { source?: string }) : {};
+      const source = body.source ?? '';
+      sources.push(source);
+      if (source === 'Nano Banana') {
+        return jsonResponse(202, { image_uuid: 'gA', processing_status: 'pending' });
+      }
+      return jsonResponse(200, { image_uuid: 'gB', url: 'https://cdn.example/b.png' });
+    }) as unknown as FetchLike;
+    return { fetchImpl, sources };
+  };
+
+  it('content_blocked does NOT fall back — every model refuses the same prompt', async () => {
+    const { fetchImpl, sources } = asyncFailure(
+      'content_blocked',
+      'Image generation was blocked. The prompt may contain copyrighted characters.',
+    );
+    const err = await runGenerationWithFallback(
+      apiWith(fetchImpl),
+      { prompt: 'x', source: 'Nano Banana', sources: ['Nano Banana', 'Flux 1.1 Pro', 'OpenAI'] },
+      { sleep: noSleep, intervalMs: 0 },
+    ).catch((e) => e);
+    expect(err).toBeInstanceOf(AhError);
+    const e = err as AhError;
+    expect(e.code).toBe('content_blocked');
+    // The whole point: only ONE model was tried. Cycling the ladder would burn a generation per
+    // model to arrive at the identical refusal.
+    expect(sources).toEqual(['Nano Banana']);
+    expect(e.suggestion).toMatch(/revise the prompt/i);
+  });
+
+  it('no_image_returned DOES fall back — it is model-specific, not caused by the prompt', async () => {
+    const { fetchImpl, sources } = asyncFailure(
+      'no_image_returned',
+      'Image generation did not return an image.',
+    );
+    const res = await runGenerationWithFallback(
+      apiWith(fetchImpl),
+      { prompt: 'x', source: 'Nano Banana', sources: ['Nano Banana', 'Flux 1.1 Pro'] },
+      { sleep: noSleep, intervalMs: 0 },
+    );
+    expect(res.source_used).toBe('Flux 1.1 Pro');
+    expect(res.fallback_trail[0]).toMatchObject({
+      source: 'Nano Banana',
+      code: 'no_image_returned',
+    });
+    expect(sources).toEqual(['Nano Banana', 'Flux 1.1 Pro']);
+  });
+
+  it('text_response_instead_of_image DOES fall back, and says to rephrase', async () => {
+    const { fetchImpl } = asyncFailure(
+      'text_response_instead_of_image',
+      'the AI model returned a text response instead of an image.',
+    );
+    const res = await runGenerationWithFallback(
+      apiWith(fetchImpl),
+      { prompt: 'x', source: 'Nano Banana', sources: ['Nano Banana', 'Flux 1.1 Pro'] },
+      { sleep: noSleep, intervalMs: 0 },
+    );
+    expect(res.source_used).toBe('Flux 1.1 Pro');
+    expect(res.fallback_trail[0]).toMatchObject({ code: 'text_response_instead_of_image' });
+  });
+
+  it('a failure with no error_code still behaves as before (older platform builds)', async () => {
+    const sources: string[] = [];
+    const fetchImpl = (async (input: unknown, init?: RequestInit) => {
+      if (String(input).includes('/images/upload/')) {
+        return jsonResponse(200, { processing_status: 'failed', error: 'something went wrong' });
+      }
+      const body = init?.body ? (JSON.parse(String(init.body)) as { source?: string }) : {};
+      sources.push(body.source ?? '');
+      return jsonResponse(202, { image_uuid: 'gA', processing_status: 'pending' });
+    }) as unknown as FetchLike;
+    const err = await runGenerationWithFallback(
+      apiWith(fetchImpl),
+      { prompt: 'x', source: 'Nano Banana', sources: ['Nano Banana', 'Flux 1.1 Pro'] },
+      { sleep: noSleep, intervalMs: 0 },
+    ).catch((e) => e);
+    expect((err as AhError).code).toBe('generation_failed');
+    expect(sources).toEqual(['Nano Banana']);
+  });
+
   it('platform_rate_limited does NOT fall back — the per-key throttle is model-independent', async () => {
     const { fetchImpl, sources } = sourceAwareFetch(() =>
       jsonResponse(429, {}, { 'retry-after': '3' }),
