@@ -42,6 +42,66 @@ describe('list_my_designs', () => {
     expect(url).not.toContain('archived');
   });
 
+  it('surfaces why a design failed, so an agent can tell retry from hopeless', async () => {
+    // apparelhub-ai#886. Without these an agent sees a null full_url and no
+    // reason, so it cannot distinguish a transient failure worth retrying from
+    // a content block that will fail identically every time.
+    const { api } = apiRecording({
+      images: [
+        {
+          uuid: 'd-blocked',
+          prompt: 'something the provider refused',
+          url: null,
+          processing_status: 'failed',
+          processing_error: 'This prompt was blocked by the model provider.',
+          processing_error_code: 'content_blocked',
+        },
+      ],
+      total: 1,
+    });
+    const res = (await listMyDesigns.handler({}, fakeContext(api))) as any;
+    expect(res.designs[0]).toMatchObject({
+      design_uuid: 'd-blocked',
+      processing_status: 'failed',
+      processing_error: 'This prompt was blocked by the model provider.',
+      processing_error_code: 'content_blocked',
+    });
+  });
+
+  it('says a design is still in flight rather than looking like a failure', async () => {
+    const { api } = apiRecording({
+      images: [{ uuid: 'd-pending', url: null, processing_status: 'pending' }],
+      total: 1,
+    });
+    const res = (await listMyDesigns.handler({}, fakeContext(api))) as any;
+    expect(res.designs[0].processing_status).toBe('pending');
+    // Nothing has gone wrong yet, so there is no reason to invent one.
+    expect(res.designs[0]).not.toHaveProperty('processing_error');
+  });
+
+  it('keeps a healthy design lean — no failure keys at all', async () => {
+    // The platform returns processing_status: null for a completed image.
+    // Emitting the keys anyway would put three nulls on every row of every
+    // design listing an agent reads.
+    const { api } = apiRecording({
+      images: [
+        {
+          uuid: 'd-ok',
+          url: 'https://cdn.example/f.png',
+          processing_status: null,
+          processing_error: null,
+          processing_error_code: null,
+        },
+      ],
+      total: 1,
+    });
+    const res = (await listMyDesigns.handler({}, fakeContext(api))) as any;
+    expect(res.designs[0].full_url).toBe('https://cdn.example/f.png');
+    expect(res.designs[0]).not.toHaveProperty('processing_status');
+    expect(res.designs[0]).not.toHaveProperty('processing_error');
+    expect(res.designs[0]).not.toHaveProperty('processing_error_code');
+  });
+
   it('passes on_products=false so orphan designs are discoverable', async () => {
     const { api, calls } = apiRecording({ images: [], total: 0 });
     await listMyDesigns.handler({ on_products: false }, fakeContext(api));
