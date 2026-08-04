@@ -164,6 +164,42 @@ export function mapHttpError(
         'Verify APPARELHUB_API_KEY (generate one at https://apparelhub.ai/developer/api-keys). Keys are environment-scoped.',
     });
   }
+  if (status === 402) {
+    // The account is frozen read-only because the owner's plan lapsed. An agent
+    // cannot resolve this itself, and WHERE the owner resolves it depends on who
+    // bills them: sending a Shopify-billed merchant to apparelhub.ai is a dead
+    // end, because we never took their card. Read the provider off the body
+    // rather than assuming (epic apparelhub-ai#729).
+    const billingProvider = extractField(body, 'billing_provider');
+    const billingUrl = extractField(body, 'billing_url');
+    const where =
+      billingProvider === 'shopify'
+        ? `their Shopify admin${billingUrl ? ` (${billingUrl})` : ''}`
+        : `Billing on ApparelHub${billingUrl ? ` (${billingUrl})` : ''}`;
+    return new AhError({
+      httpStatus: status,
+      code: 'account_suspended',
+      message: message ?? 'This account is read-only: its plan is not active.',
+      suggestion:
+        'Do not retry: a 402 does not clear until the plan is fixed. Reads still work, so you ' +
+        'can keep inspecting stores, products, designs, and orders. Tell the ACCOUNT OWNER to ' +
+        `sort the plan out in ${where}. Inbound storefront orders are held, not dropped, and ` +
+        'release automatically once the plan is active.',
+    });
+  }
+  if (status === 403 && errorCode === 'seat_limit_reached') {
+    // Not a permissions problem, so the generic "this key lacks scope" advice
+    // would send the caller looking in entirely the wrong place.
+    return new AhError({
+      httpStatus: status,
+      code: 'seat_limit_reached',
+      message: message ?? 'This plan has no seats left.',
+      suggestion:
+        'The plan includes a fixed number of seats and they are all in use, counting pending ' +
+        'invites. Remove a member to free one, or have the account owner move to a plan with ' +
+        'more seats. Retrying the invite will keep failing.',
+    });
+  }
   if (status === 403 && errorCode === 'workspace_forbidden') {
     return new AhError({
       httpStatus: status,

@@ -56,6 +56,45 @@ describe('mapHttpError', () => {
   it('401 -> auth_required', () => {
     expect(mapHttpError(401, {}).code).toBe('auth_required');
   });
+  // A suspended account is a plan problem, and where the owner fixes it depends
+  // on who bills them. Pointing a Shopify-billed merchant at ApparelHub billing
+  // is a dead end: we never took their card (epic apparelhub-ai#729).
+  it('402 -> account_suspended, and says do not retry', () => {
+    const e = mapHttpError(402, {
+      error: 'account_suspended', tier: 'Enterprise',
+      message: "This account's Enterprise trial has ended.",
+      billing_provider: 'stripe',
+      billing_url: 'https://apparelhub.ai/billing/subscription',
+    });
+    expect(e.code).toBe('account_suspended');
+    expect(e.suggestion).toContain('Do not retry');
+    expect(e.suggestion).toContain('Billing on ApparelHub');
+    expect(e.suggestion).toContain('https://apparelhub.ai/billing/subscription');
+  });
+  it('402 for a Shopify-billed account points at the Shopify admin', () => {
+    const e = mapHttpError(402, {
+      error: 'account_suspended', billing_provider: 'shopify',
+      billing_url: 'https://admin.shopify.com/store/s/charges/apparelhub-ai/pricing_plans',
+    });
+    expect(e.suggestion).toContain('Shopify admin');
+    expect(e.suggestion).not.toContain('Billing on ApparelHub');
+  });
+  it('402 with no billing url still names where to go', () => {
+    const e = mapHttpError(402, { error: 'account_suspended', billing_provider: 'shopify' });
+    expect(e.suggestion).toContain('Shopify admin');
+  });
+  // Seats are a plan limit, not a permission. The generic 403 advice ("this key
+  // lacks scope") would send the caller looking in the wrong place entirely.
+  it('403 seat_limit_reached -> seat_limit_reached, not a scope problem', () => {
+    const e = mapHttpError(403, {
+      error: 'seat_limit_reached', current: 50, limit: 50,
+      message: 'Your plan includes 50 seats and you have used 50.',
+    });
+    expect(e.code).toBe('seat_limit_reached');
+    expect(e.message).toContain('50 seats');
+    expect(e.suggestion).toContain('Remove a member');
+    expect(e.suggestion).not.toContain('scope');
+  });
   it('403 workspace_forbidden -> workspace_forbidden', () => {
     expect(mapHttpError(403, { error: 'workspace_forbidden' }).code).toBe('workspace_forbidden');
   });
