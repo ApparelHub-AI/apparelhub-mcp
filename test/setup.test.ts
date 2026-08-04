@@ -378,3 +378,89 @@ describe('setup tool surface', () => {
     expect(setupTools.every((t) => t.annotations?.openWorldHint)).toBe(true);
   });
 });
+
+// Every call in setup.ts is workspace-scoped server-side, and omitting the
+// workspace scopes to the account's DEFAULT one. Until these tools accepted a
+// workspace there was no way to reach a store that lived anywhere else, so an
+// agency account got two different silent failures: the connect calls refused
+// a store that list_my_stores had just returned ("Store not found or access
+// denied", raised before the credential was ever read), and the readiness
+// polls answered about the wrong workspace and reported false forever.
+describe('workspace scoping', () => {
+  it('threads the workspace onto the sales-channel connect', async () => {
+    const { api, calls } = apiRecording({ message: 'Connected' });
+    await connectSalesChannel.handler(
+      {
+        store_uuid: 's1',
+        provider_uuid: 'c1',
+        credentials: { store_url: 'https://shop.example.com', consumer_key: 'ck', consumer_secret: 'cs' },
+        workspace: 'w-agency',
+      },
+      fakeContext(api),
+    );
+    expect(calls[0]!.url).toContain('workspace=w-agency');
+  });
+
+  it('sends no workspace when none was given, so single-workspace accounts are unchanged', async () => {
+    const { api, calls } = apiRecording({ message: 'Connected' });
+    await connectSalesChannel.handler(
+      { store_uuid: 's1', provider_uuid: 'c1', credentials: { consumer_key: 'ck' } },
+      fakeContext(api),
+    );
+    expect(calls[0]!.url).not.toContain('workspace=');
+  });
+
+  // Both legs, not just the last one: validate-pat resolves the same store, so
+  // a workspace-less validate fails before connect-pat is ever reached.
+  it('threads the workspace onto both legs of the fulfillment connect', async () => {
+    const { api, calls } = apiSequence([{ shops: [{ id: 'shop1' }] }, { message: 'Connected' }]);
+    await connectFulfillmentProvider.handler(
+      { store_uuid: 's1', provider_uuid: 'p1', api_token: 'tok', workspace: 'w-agency' },
+      fakeContext(api),
+    );
+    expect(calls[0]!.url).toContain('workspace=w-agency');
+    expect(calls[1]!.url).toContain('workspace=w-agency');
+  });
+
+  it('threads the workspace onto a browser-based channel dispatch', async () => {
+    const { api, calls } = apiRecording({ auth_url: 'https://provider.example.com/authorize' });
+    await startChannelConnect.handler(
+      { provider_uuid: 'c2', kind: 'sales_channel', store_uuid: 's1', workspace: 'w-agency' },
+      fakeContext(api),
+    );
+    expect(calls[0]!.url).toContain('workspace=w-agency');
+  });
+
+  it('threads the workspace onto the readiness poll', async () => {
+    const { api, calls } = apiRecording({ stores: [] });
+    await checkConnectionStatus.handler(
+      { store_uuid: 's1', workspace: 'w-agency' },
+      fakeContext(api),
+    );
+    expect(calls[0]!.url).toContain('workspace=w-agency');
+  });
+
+  // The poll-forever case made explicit. A named store that readiness does not
+  // report at all cannot become connected by waiting, so this must not read as
+  // "not yet" -- that is what burned the whole poll budget and ended in asking
+  // the user whether they had really authorized.
+  it('calls out a wrong-workspace poll instead of reporting a bare not-yet', async () => {
+    const { api } = apiRecording({
+      stores: [{ uuid: 'other', fulfillment: { connected: true } }],
+    });
+    const res = (await checkConnectionStatus.handler({ store_uuid: 's1' }, fakeContext(api))) as any;
+    expect(res.connected).toBe(false);
+    expect(res.wrong_workspace).toBe(true);
+    expect(res.guidance).toContain('workspace');
+    expect(res.guidance).not.toContain('poll again');
+  });
+
+  it('does not cry wrong-workspace when the store is present but still pending', async () => {
+    const { api } = apiRecording({
+      stores: [{ uuid: 's1', fulfillment: { connected: false, connection_state: 'unknown' } }],
+    });
+    const res = (await checkConnectionStatus.handler({ store_uuid: 's1' }, fakeContext(api))) as any;
+    expect(res.wrong_workspace).toBeUndefined();
+    expect(res.guidance).toContain('poll again');
+  });
+});
