@@ -47,6 +47,29 @@ const PROVIDER_UUID = z
   .min(1)
   .describe('Provider uuid (from list_connectable_providers).');
 
+// Every call in this file is scoped to a workspace server-side, and when it is
+// omitted the platform scopes to the account's DEFAULT workspace. That default
+// is wrong for any agency / multi-brand account working in another workspace,
+// and it fails in a way that reads like something else entirely:
+//
+//   - connect_* and start_channel_connect refuse a store that is plainly
+//     visible in list_my_stores, saying "Store not found or access denied" —
+//     the credential is never even looked at, so a correct credential and a
+//     typo'd one produce the identical error.
+//   - check_setup_readiness / check_connection_status silently answer about
+//     the WRONG workspace, so a connect that really did land reports false and
+//     the agent polls until it times out.
+//
+// So it is threaded through every tool here, exactly as the store / product /
+// order / design tools already do. Pass the workspace the STORE lives in — the
+// one list_my_stores reported for it — not whichever one happens to be default.
+const WORKSPACE = z
+  .string()
+  .optional()
+  .describe(
+    "Workspace uuid the store lives in (agency accounts) — use the store's workspace.uuid from list_my_stores. Omit only for single-workspace accounts; omitting it on a multi-workspace account targets the Default workspace and the call will fail to find a store that lives elsewhere.",
+  );
+
 function rec(raw: unknown): Record<string, unknown> {
   return isRecord(raw) ? raw : { result: raw };
 }
@@ -76,10 +99,15 @@ export const checkSetupReadiness = defineTool({
   name: 'check_setup_readiness',
   description:
     'What this account already has, what it still needs, and the single next action to take. Returns ready_to_design / ready_to_fulfill / ready_to_sell, a per-store breakdown, and an ordered next_steps list. Start here for any first-time setup, and call it again after each connection to confirm the state actually changed. Read-only, makes no provider calls, and is safe to poll.',
-  inputSchema: z.object({}),
+  inputSchema: z.object({ workspace: WORKSPACE }),
   annotations: { readOnlyHint: true, openWorldHint: true },
-  handler: async (_input, ctx) => {
-    const raw = rec(await ctx.api.get('onboarding/readiness', { signal: ctx.signal }));
+  handler: async (input, ctx) => {
+    const raw = rec(
+      await ctx.api.get('onboarding/readiness', {
+        workspace: input.workspace,
+        signal: ctx.signal,
+      }),
+    );
     return { ...raw, guidance: guidanceFor(raw) };
   },
 });
@@ -88,13 +116,18 @@ export const listConnectableProviders = defineTool({
   name: 'list_connectable_providers',
   description:
     'Fulfillment providers and sales channels this account may connect, each marked with how it connects: connect_mode "in_chat" means you can complete it here by asking for a credential, "browser" means you must dispatch an authorization link with start_channel_connect and poll. Also returns where the merchant generates the credential, when there is one. Use this before asking a user for anything, so you ask for the right thing.',
-  inputSchema: z.object({}),
+  inputSchema: z.object({ workspace: WORKSPACE }),
   annotations: { readOnlyHint: true, openWorldHint: true },
-  handler: async (_input, ctx) => {
+  handler: async (input, ctx) => {
     // Readiness already computes both lists, gated to what this caller may
     // actually connect. Reusing it keeps one source of truth and avoids
     // offering a provider the user would then be refused.
-    const raw = rec(await ctx.api.get('onboarding/readiness', { signal: ctx.signal }));
+    const raw = rec(
+      await ctx.api.get('onboarding/readiness', {
+        workspace: input.workspace,
+        signal: ctx.signal,
+      }),
+    );
     const options = isRecord(raw.options) ? raw.options : {};
     const fulfillment = Array.isArray(options.fulfillment) ? options.fulfillment : [];
     const channels = Array.isArray(options.sales_channels) ? options.sales_channels : [];
@@ -128,6 +161,7 @@ export const connectFulfillmentProvider = defineTool({
       .string()
       .optional()
       .describe('Which shop to connect, when the token maps to several. Omit on the first call.'),
+    workspace: WORKSPACE,
   }),
   annotations: { openWorldHint: true },
   handler: async (input, ctx) => {
@@ -138,6 +172,7 @@ export const connectFulfillmentProvider = defineTool({
     const validated = rec(
       await ctx.api.post(`${base}/validate-pat`, {
         body: { api_token: input.api_token },
+        workspace: input.workspace,
         signal: ctx.signal,
       }),
     );
@@ -156,7 +191,13 @@ export const connectFulfillmentProvider = defineTool({
     const body: Record<string, unknown> = { api_token: input.api_token };
     if (input.shop_id) body.shop_id = input.shop_id;
 
-    const connected = rec(await ctx.api.post(`${base}/connect-pat`, { body, signal: ctx.signal }));
+    const connected = rec(
+      await ctx.api.post(`${base}/connect-pat`, {
+        body,
+        workspace: input.workspace,
+        signal: ctx.signal,
+      }),
+    );
 
     return {
       connected: true,
@@ -181,13 +222,14 @@ export const connectSalesChannel = defineTool({
       .describe(
         'Channel credentials, e.g. WooCommerce { store_url, consumer_key, consumer_secret }; Wix { api_key, site_id }. Treat as secrets: do not echo them.',
       ),
+    workspace: WORKSPACE,
   }),
   annotations: { openWorldHint: true },
   handler: async (input, ctx) => {
     const raw = rec(
       await ctx.api.post(
         `store/${enc(input.store_uuid)}/ecommerce/${enc(input.provider_uuid)}/connect-api-key`,
-        { body: input.credentials, signal: ctx.signal },
+        { body: input.credentials, workspace: input.workspace, signal: ctx.signal },
       ),
     );
     return {
@@ -235,6 +277,9 @@ export const startChannelConnect = defineTool({
       .describe(
         'OMIT THIS. The platform fills in the callback registered with the provider, and for Shopify that registered URL is the only one that works — anything else is refused, either by us or by Shopify with an error naming neither what was sent nor what was wanted. Set it only if you have been given a specific URL to use.',
       ),
+    // Also decides WHERE a new store is created on the fulfillment branch
+    // below, not just which store is reachable on the sales_channel branch.
+    workspace: WORKSPACE,
   }),
   annotations: { openWorldHint: true },
   handler: async (input, ctx) => {
@@ -254,7 +299,7 @@ export const startChannelConnect = defineTool({
       raw = rec(
         await ctx.api.post(
           `store/${enc(input.store_uuid)}/ecommerce/${enc(input.provider_uuid)}/initiate`,
-          { body, signal: ctx.signal },
+          { body, workspace: input.workspace, signal: ctx.signal },
         ),
       );
     } else {
@@ -265,6 +310,7 @@ export const startChannelConnect = defineTool({
       raw = rec(
         await ctx.api.post(`store/create/merchandise_provider/${enc(input.provider_uuid)}`, {
           body,
+          workspace: input.workspace,
           signal: ctx.signal,
         }),
       );
@@ -303,13 +349,22 @@ export const checkConnectionStatus = defineTool({
       .describe(
         'The provider you are waiting for — pass the same provider_uuid you gave start_channel_connect. REQUIRED in practice when waiting on a sales channel (Shopify, TikTok Shop): without it this answers only about fulfillment and will report false however long you poll. It also prevents a false positive, where an unrelated existing connection makes this look successful.',
       ),
+    // Same failure shape as the missing provider_uuid above: readiness answers
+    // for ONE workspace, so polling the default while the store lives in
+    // another reports false for as long as you are willing to poll.
+    workspace: WORKSPACE,
   }),
   annotations: { readOnlyHint: true, openWorldHint: true },
   handler: async (input, ctx) => {
     // Readiness is the poll target on purpose: it reads persisted connection
     // state and makes NO provider call, so polling it cannot burn a provider
     // rate limit no matter how eager the model is.
-    const raw = rec(await ctx.api.get('onboarding/readiness', { signal: ctx.signal }));
+    const raw = rec(
+      await ctx.api.get('onboarding/readiness', {
+        workspace: input.workspace,
+        signal: ctx.signal,
+      }),
+    );
     const stores = Array.isArray(raw.stores) ? raw.stores : [];
     const scoped = input.store_uuid
       ? stores.filter((s) => isRecord(s) && s.uuid === input.store_uuid)
@@ -361,9 +416,17 @@ export const checkConnectionStatus = defineTool({
         (!providerUuid || matchesProvider(s.fulfillment)),
     );
 
+    // A named store that readiness does not report at all is not "not yet" —
+    // readiness answers for one workspace, so the store lives in a different
+    // one and no amount of polling will ever turn this true. Say so, instead
+    // of letting the agent burn its whole poll budget on a wrong-workspace
+    // question and then ask the user whether they really authorized.
+    const storeMissingFromWorkspace = Boolean(input.store_uuid) && scoped.length === 0;
+
     return {
       connected,
       stores: scoped,
+      wrong_workspace: storeMissingFromWorkspace || undefined,
       // Surfaced even when unscoped, so an agent polling after a channel
       // connect without passing provider_uuid still has something true to read
       // rather than a bare false.
@@ -372,7 +435,9 @@ export const checkConnectionStatus = defineTool({
         integration_uuid: c.integration_uuid,
       })),
       needs_reconnect: needsReconnect.length > 0,
-      guidance: needsReconnect.length
+      guidance: storeMissingFromWorkspace
+        ? `No store ${input.store_uuid} exists in the workspace this answered for, so polling will never report connected. Get that store's workspace.uuid from list_my_stores and call again passing workspace=<uuid>.`
+        : needsReconnect.length
         ? 'A fulfillment connection has stopped working. Retrying will not fix it — dispatch start_channel_connect again so the user can re-authorize.'
         : connected
           ? 'Connected. Continue with check_setup_readiness for the next step.'
