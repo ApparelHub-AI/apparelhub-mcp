@@ -110,7 +110,48 @@ describe('connect_fulfillment_provider', () => {
       { store_uuid: 's1', provider_uuid: 'p1', api_token: 'secret-token', shop_id: 'shop2' },
       fakeContext(api),
     );
-    expect(JSON.parse(calls[1]!.init?.body as string)).toMatchObject({ shop_id: 'shop2' });
+    expect(JSON.parse(calls[1]!.init?.body as string)).toMatchObject({
+      external_store_id: 'shop2',
+    });
+  });
+
+  // The outage this suite missed: the assertions above check WHICH endpoint was
+  // called, not WHAT was sent. The client posted the credential as `api_token`
+  // while the platform reads `pat`, so the token arrived as nothing, the
+  // provider was called with no credential at all, and its 401 reached the agent
+  // as "Invalid token" -- three freshly minted tokens burned chasing a phantom.
+  // A URL assertion cannot see that. These are body assertions.
+
+  it('sends the credential under the field name the platform actually reads', async () => {
+    const { api, calls } = apiSequence([
+      { valid: true, shops: [{ id: 'shop1' }] },
+      { message: 'Connected' },
+    ]);
+    await connectFulfillmentProvider.handler(
+      { store_uuid: 's1', provider_uuid: 'p1', api_token: 'secret-token' },
+      fakeContext(api),
+    );
+    expect(calls).toHaveLength(2);
+    for (const call of calls) {
+      const body = JSON.parse(call.init?.body as string);
+      expect(body).toMatchObject({ pat: 'secret-token' });
+      // Not merely redundant: a lingering alias means whichever name the
+      // platform stops honouring first turns this back into a credential-less
+      // call that reports itself as the merchant's bad token.
+      expect(body).not.toHaveProperty('api_token');
+    }
+  });
+
+  it('sends the chosen shop under the field name the platform actually reads', async () => {
+    const { api, calls } = apiSequence([
+      { valid: true, shops: [{ id: 'shop1' }, { id: 'shop2' }] },
+      { message: 'Connected' },
+    ]);
+    await connectFulfillmentProvider.handler(
+      { store_uuid: 's1', provider_uuid: 'p1', api_token: 'secret-token', shop_id: 'shop2' },
+      fakeContext(api),
+    );
+    expect(JSON.parse(calls[1]!.init?.body as string)).not.toHaveProperty('shop_id');
   });
 
   it('never returns the submitted token, on any path', async () => {

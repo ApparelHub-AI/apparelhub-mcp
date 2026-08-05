@@ -169,9 +169,17 @@ export const connectFulfillmentProvider = defineTool({
 
     // Validate before connecting: a bad token should fail without persisting
     // anything, and the same call is what surfaces a multi-shop token.
+    //
+    // The wire fields are `pat` and `external_store_id`, NOT this tool's own
+    // input names. Sending the wrong names did not fail loudly: the platform
+    // reads the body directly on the agent surface, so the token resolved to
+    // nothing, the provider was called with no credential at all, and its 401
+    // came back to the agent as "Invalid token" -- pointing the merchant at the
+    // one thing that was not wrong. The body-shape assertions in
+    // test/setup.test.ts exist so a rename cannot go quiet again.
     const validated = rec(
       await ctx.api.post(`${base}/validate-pat`, {
-        body: { api_token: input.api_token },
+        body: { pat: input.api_token },
         workspace: input.workspace,
         signal: ctx.signal,
       }),
@@ -188,8 +196,8 @@ export const connectFulfillmentProvider = defineTool({
       };
     }
 
-    const body: Record<string, unknown> = { api_token: input.api_token };
-    if (input.shop_id) body.shop_id = input.shop_id;
+    const body: Record<string, unknown> = { pat: input.api_token };
+    if (input.shop_id) body.external_store_id = input.shop_id;
 
     const connected = rec(
       await ctx.api.post(`${base}/connect-pat`, {
