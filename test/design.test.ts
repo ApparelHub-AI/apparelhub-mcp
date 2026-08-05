@@ -50,7 +50,7 @@ function fakeImaging(over: Partial<Imaging> = {}): Imaging {
       corner_alpha: [0, 0, 0, 0],
       premultiplied_white: true,
     }),
-    ocr: async () => ({ available: true, text: 'STAY WILD' }),
+    ocr: async () => ({ available: true, text: 'STAY WILD' , confidence: null }),
     recomposeFill: async () => {
       throw new Error('not expected in this test');
     },
@@ -236,7 +236,7 @@ describe('process_transparency', () => {
 
 describe('verify_design_text', () => {
   it('reports a spelling match when OCR is available', async () => {
-    const ctx = fakeContext(undefined, fakeImaging({ ocr: async () => ({ available: true, text: 'STAY WILD' }) }));
+    const ctx = fakeContext(undefined, fakeImaging({ ocr: async () => ({ available: true, text: 'STAY WILD' , confidence: null }) }));
     const res = (await verifyDesignText.handler(
       { image_uuid: 'g1', image_url: 'https://cdn.example/x.png', expected_text: 'stay wild' },
       ctx,
@@ -245,7 +245,7 @@ describe('verify_design_text', () => {
   });
 
   it('degrades with a note when OCR is unavailable', async () => {
-    const ctx = fakeContext(undefined, fakeImaging({ ocr: async () => ({ available: false, text: '' }) }));
+    const ctx = fakeContext(undefined, fakeImaging({ ocr: async () => ({ available: false, text: '' , confidence: null }) }));
     const res = (await verifyDesignText.handler(
       { image_uuid: 'g1', image_url: 'https://cdn.example/x.png' },
       ctx,

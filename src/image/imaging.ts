@@ -94,6 +94,16 @@ export interface EnsureResolutionResult {
   height?: number;
 }
 
+export interface OcrResult {
+  /** False = OCR could not run at all. Distinct from "ran and found nothing". */
+  available: boolean;
+  text: string;
+  /** Mean per-word confidence 0-100, or null when the engine reported none. */
+  confidence: number | null;
+  /** Which engine answered — useful when a caller wants to explain a result. */
+  engine?: 'native' | 'wasm';
+}
+
 export interface Imaging {
   downloadToTemp(url: string, ext?: string): Promise<string>;
   makeTransparent(inputPath: string, opts?: MakeTransparentOptions): Promise<TransparencyResult>;
@@ -103,7 +113,15 @@ export interface Imaging {
   imageStats(path: string): Promise<ImageStats | undefined>;
   /** Measure a rendered product mockup (chroma leak, blankness, resolution). */
   mockupStats(path: string): Promise<MockupStats | undefined>;
-  ocr(imagePath: string): Promise<{ available: boolean; text: string }>;
+  /** Read text from an image.
+   *
+   *  `confidence` is tesseract's mean per-word score (0-100), or null when the
+   *  engine could not report one. It matters as much as the text: tesseract
+   *  returns fluent-looking garbage on stylized display faces, so a caller that
+   *  treats every non-empty result as authoritative will assert a misspelling on
+   *  a design that is perfectly fine. Measured locally on a distorted design:
+   *  garbage came back at confidence 24, correct reads at 96. */
+  ocr(imagePath: string): Promise<OcrResult>;
   /** Dominant design colors mapped to Printful's fixed embroidery thread palette (CIE Lab). */
   threadColors(inputPath: string, max?: number): Promise<string[]>;
   /** Upscale a design to a minimum long-side resolution (Lanczos, white-premultiplied) so it
@@ -317,18 +335,101 @@ export class LocalImaging implements Imaging {
     };
   }
 
-  async ocr(imagePath: string): Promise<{ available: boolean; text: string }> {
+  async ocr(imagePath: string): Promise<OcrResult> {
+    // Native binary first: it is faster than the WASM build and is what a
+    // developer with tesseract on PATH already expects to be used.
     try {
-      const r = await run('tesseract', [imagePath, 'stdout']);
-      if (r.code !== 0) return { available: false, text: '' };
-      return { available: true, text: r.stdout.trim() };
+      // `tsv` rather than plain text: it carries a per-word confidence column,
+      // and plain text alone cannot tell a clean read from convincing garbage.
+      const r = await run('tesseract', [imagePath, 'stdout', 'tsv']);
+      if (r.code === 0) return { ...parseTesseractTsv(r.stdout), available: true, engine: 'native' };
     } catch {
-      // tesseract not installed -> OCR simply isn't available; caller degrades gracefully.
-      return { available: false, text: '' };
+      // Not installed. Fall through to the bundled WASM engine.
     }
+    return ocrWithWasm(imagePath);
   }
 
   async cleanup(paths: string[]): Promise<void> {
     await Promise.allSettled(paths.map((p) => rm(p, { force: true })));
+  }
+}
+
+// --- OCR ---------------------------------------------------------------------
+//
+// Two engines behind one seam. The native `tesseract` binary is preferred when
+// present; otherwise a WASM build answers, which is what makes OCR work on the
+// hosted server at all -- tesseract is not in the Amazon Linux 2023 repos and
+// EPEL is unsupported there, so the hosted image could never install it and
+// verify_design_text returned "unknown" for every design.
+//
+// Language data is bundled next to the code rather than fetched: tesseract.js
+// otherwise downloads it from a CDN on first use, which in Lambda means a
+// multi-megabyte network round trip on a cold start that can simply fail.
+
+/** Bundled tesseract language data. Mirrors the python/ layout so the hosted
+ *  image can COPY it to the same relative path. */
+const TESSDATA_DIR = fileURLToPath(new URL('../../tessdata', import.meta.url));
+
+/** tesseract TSV columns; word rows are level 5. */
+const TSV_LEVEL_WORD = '5';
+const TSV_COL = { level: 0, block: 2, par: 3, line: 4, conf: 10, text: 11 } as const;
+
+/** Reconstruct text and mean word confidence from tesseract's TSV output.
+ *
+ *  Exported for tests: the confidence number is the whole reason we ask for TSV
+ *  instead of plain text, so it needs to be verifiable without a tesseract
+ *  install.
+ */
+export function parseTesseractTsv(tsv: string): { text: string; confidence: number | null } {
+  const rows = tsv.split('\n').slice(1); // drop header
+  const lines = new Map<string, string[]>();
+  const confidences: number[] = [];
+
+  for (const row of rows) {
+    const cells = row.split('\t');
+    if (cells[TSV_COL.level] !== TSV_LEVEL_WORD) continue;
+    const word = (cells[TSV_COL.text] ?? '').trim();
+    if (!word) continue;
+
+    const key = `${cells[TSV_COL.block]}/${cells[TSV_COL.par]}/${cells[TSV_COL.line]}`;
+    const bucket = lines.get(key);
+    if (bucket) bucket.push(word);
+    else lines.set(key, [word]);
+
+    // -1 means "no confidence reported"; averaging it in would drag the score
+    // toward a failure that did not happen.
+    const conf = Number(cells[TSV_COL.conf]);
+    if (Number.isFinite(conf) && conf >= 0) confidences.push(conf);
+  }
+
+  const text = [...lines.values()].map((words) => words.join(' ')).join('\n');
+  const confidence = confidences.length
+    ? confidences.reduce((a, b) => a + b, 0) / confidences.length
+    : null;
+  return { text, confidence };
+}
+
+/** OCR via the bundled WASM engine. Absence of the package is not an error --
+ *  it is the documented "OCR unavailable" state the caller already handles. */
+async function ocrWithWasm(imagePath: string): Promise<OcrResult> {
+  try {
+    const { createWorker } = await import('tesseract.js');
+    const worker = await createWorker('eng', 1, {
+      langPath: TESSDATA_DIR,
+      gzip: false, // we ship the plain .traineddata, not the gzipped CDN form
+      cachePath: join(tmpdir(), 'tesseract-cache'), // Lambda: only /tmp is writable
+      logger: () => {},
+    });
+    try {
+      const { data } = await worker.recognize(imagePath);
+      const text = (data.text ?? '').trim();
+      const confidence = typeof data.confidence === 'number' ? data.confidence : null;
+      return { available: true, text, confidence, engine: 'wasm' };
+    } finally {
+      await worker.terminate();
+    }
+  } catch {
+    // Neither engine is present (or the WASM worker could not start).
+    return { available: false, text: '', confidence: null };
   }
 }

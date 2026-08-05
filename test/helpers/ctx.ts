@@ -18,7 +18,7 @@ const throwingImaging: Imaging = {
   readBytes: async () => new Uint8Array([137, 80, 78, 71]),
   imageSize: async () => undefined,
   imageStats: async () => undefined,
-  ocr: async () => ({ available: false, text: '' }),
+  ocr: async () => ({ available: false, text: '', confidence: null }),
   threadColors: async () => {
     throw new Error('imaging not provided to this test');
   },

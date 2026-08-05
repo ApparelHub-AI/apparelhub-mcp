@@ -12,11 +12,17 @@ npm run build
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR"
 
+# tesseract.js stays EXTERNAL: it loads worker and WASM files from disk at run
+# time, so inlining it into a single .mjs breaks it. The Dockerfile installs it
+# into the image instead, and imaging.ts imports it dynamically — its absence is
+# already handled as "OCR unavailable", which is exactly what a local build that
+# skipped the install should report.
 npx --yes esbuild dist/http/lambda.js \
   --bundle \
   --platform=node \
   --format=esm \
   --target=node22 \
+  --external:tesseract.js \
   --outfile="$OUT_DIR/handler.mjs" \
   --banner:js='import { createRequire } from "node:module"; const require = createRequire(import.meta.url);'
 
