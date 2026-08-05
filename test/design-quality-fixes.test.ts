@@ -41,7 +41,7 @@ function fakeImaging(over: Partial<Imaging> = {}): Imaging {
     imageSize: async () => ({ width: 1024, height: 1024 }),
     imageStats: async () => cleanStats,
     mockupStats: async () => undefined,
-    ocr: async () => ({ available: false, text: '' }),
+    ocr: async () => ({ available: false, text: '' , confidence: null }),
     threadColors: async () => [],
     ensureResolution: async () => ({ outputPath: '/tmp/o.png', upscaled: false }),
     cleanup: async () => {},
@@ -125,7 +125,7 @@ describe('#764 has_text distinguishes "no text" from "unknown"', () => {
   it('returns null, not false, when OCR is unavailable', async () => {
     const res = (await verifyDesignText.handler(
       { image_uuid: 'i1', image_url: 'https://cdn.example/x.png' },
-      fakeContext(undefined, fakeImaging({ ocr: async () => ({ available: false, text: '' }) })),
+      fakeContext(undefined, fakeImaging({ ocr: async () => ({ available: false, text: '' , confidence: null }) })),
     )) as { has_text: boolean | null; note?: string };
 
     // false would assert "this design contains no text" after never looking —
@@ -138,7 +138,7 @@ describe('#764 has_text distinguishes "no text" from "unknown"', () => {
   it('returns false when OCR ran and genuinely found nothing', async () => {
     const res = (await verifyDesignText.handler(
       { image_uuid: 'i1', image_url: 'https://cdn.example/x.png' },
-      fakeContext(undefined, fakeImaging({ ocr: async () => ({ available: true, text: '' }) })),
+      fakeContext(undefined, fakeImaging({ ocr: async () => ({ available: true, text: '' , confidence: null }) })),
     )) as { has_text: boolean | null };
     expect(res.has_text).toBe(false);
   });
@@ -148,7 +148,7 @@ describe('#764 has_text distinguishes "no text" from "unknown"', () => {
       { image_uuid: 'i1', image_url: 'https://cdn.example/x.png' },
       fakeContext(
         undefined,
-        fakeImaging({ ocr: async () => ({ available: true, text: 'STAY WILD' }) }),
+        fakeImaging({ ocr: async () => ({ available: true, text: 'STAY WILD' , confidence: null }) }),
       ),
     )) as { has_text: boolean | null; detected_text: string };
     expect(res.has_text).toBe(true);
@@ -158,7 +158,7 @@ describe('#764 has_text distinguishes "no text" from "unknown"', () => {
   it('does not report phantom detected_text when OCR is unavailable', async () => {
     const res = (await verifyDesignText.handler(
       { image_uuid: 'i1', image_url: 'https://cdn.example/x.png' },
-      fakeContext(undefined, fakeImaging({ ocr: async () => ({ available: false, text: 'noise' }) })),
+      fakeContext(undefined, fakeImaging({ ocr: async () => ({ available: false, text: 'noise' , confidence: null }) })),
     )) as { detected_text: string };
     expect(res.detected_text).toBe('');
   });

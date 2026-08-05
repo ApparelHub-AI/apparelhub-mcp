@@ -29,7 +29,7 @@ function fakeImaging(over: Partial<Imaging> = {}): Imaging {
     readBytes: async () => new Uint8Array([1]),
     imageSize: async () => ({ width: 1024, height: 1024 }),
     imageStats: async () => cleanStats,
-    ocr: async () => ({ available: false, text: '' }),
+    ocr: async () => ({ available: false, text: '' , confidence: null }),
     cleanup: async () => {},
     ...over,
   };

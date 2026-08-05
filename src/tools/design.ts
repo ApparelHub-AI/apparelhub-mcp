@@ -155,6 +155,11 @@ interface TextOutcome {
   note?: string;
 }
 
+/** Below this mean OCR confidence (0-100) we report the text but refuse to
+ *  return a spelling verdict. Chosen from measured separation: garbage on a
+ *  distorted design scored 24, clean reads 96. */
+const OCR_VERDICT_MIN_CONFIDENCE = 70;
+
 function normalizeText(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
@@ -187,6 +192,28 @@ async function verifyTextImpl(
       note: 'Local OCR (tesseract) is not available here, so it is UNKNOWN whether this design contains text — this is not a "no text" result. Install tesseract, or have the calling agent read the design image directly to verify any spelling.',
     };
   }
+  // A low score means the engine read SOMETHING but could not read it well --
+  // typically the stylized display and script faces merch designs are built
+  // from. Measured on a distorted design: garbage came back at 24, correct
+  // reads at 96. Turning a 24 into `spelled_correctly: false` would assert a
+  // misspelling on a perfectly good design, which is the same confident-wrong
+  // failure the UNKNOWN branch above exists to prevent -- just inverted. An
+  // agent acts on a confident wrong answer; it re-checks an honest null.
+  const conf = typeof ocr.confidence === 'number' ? ocr.confidence : null;
+  const unreliable = hasText && conf !== null && conf < OCR_VERDICT_MIN_CONFIDENCE;
+  if (unreliable) {
+    return {
+      has_text: true,
+      detected_text: detected,
+      spelled_correctly: null,
+      confidence: conf / 100,
+      note:
+        `OCR read this design at ${Math.round(conf)}% confidence, too low to judge spelling from ` +
+        '— stylized lettering commonly reads as gibberish. This is UNKNOWN, not a misspelling: ' +
+        'read the design image yourself to confirm the text.',
+    };
+  }
+
   let spelledCorrectly: boolean | null = null;
   let note: string | undefined;
   if (expectedText) {
@@ -194,7 +221,13 @@ async function verifyTextImpl(
   } else if (hasText) {
     note = 'No expected_text provided; detected text is returned for the agent to verify.';
   }
-  return { has_text: hasText, detected_text: detected, spelled_correctly: spelledCorrectly, confidence: 0.7, note };
+  return {
+    has_text: hasText,
+    detected_text: detected,
+    spelled_correctly: spelledCorrectly,
+    confidence: conf !== null ? conf / 100 : 0.7,
+    note,
+  };
 }
 
 // --- Split primitives ---
