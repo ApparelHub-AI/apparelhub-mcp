@@ -58,4 +58,26 @@ describe('hosted image OCR wiring', () => {
     // .traineddata must exist under that name — not the gzipped CDN form.
     expect(() => read('../tessdata/eng.traineddata')).not.toThrow();
   });
+
+  it('lets every path the Dockerfile copies through .dockerignore', () => {
+    // .dockerignore is an allowlist (`*` then `!path`). A COPY of something not
+    // un-ignored fails the build with "file not found in build context", which
+    // reads like a missing file and sends you looking in the wrong place. This
+    // is derived from the Dockerfile rather than hardcoded, so a future COPY is
+    // covered without anyone remembering to update this test.
+    const ignore = read('../.dockerignore')
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith('!'))
+      .map((l) => l.slice(1).replace(/\/$/, ''));
+
+    const copied = [...dockerfile.matchAll(/^COPY\s+(\S+)/gm)]
+      .map((m) => m[1]!.replace(/\/$/, ''))
+      .filter((src) => !src.startsWith('--')); // skip COPY --from= style flags
+
+    for (const src of copied) {
+      const allowed = ignore.some((entry) => src === entry || src.startsWith(`${entry}/`));
+      expect(allowed, `Dockerfile copies "${src}" but .dockerignore never un-ignores it`).toBe(true);
+    }
+  });
 });
