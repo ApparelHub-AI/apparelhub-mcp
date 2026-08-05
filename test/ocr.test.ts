@@ -1,10 +1,15 @@
 import { describe, it, expect } from 'vitest';
 import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
+import { rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { LocalImaging, parseTesseractTsv, type Imaging } from '../src/image/imaging.js';
 import { verifyDesignText } from '../src/tools/design.js';
 import { fakeContext } from './helpers/ctx.js';
 
 const SAMPLE = fileURLToPath(new URL('./fixtures/ocr-sample.png', import.meta.url));
+const SCRIPT = fileURLToPath(new URL('../python/ocr_prep.py', import.meta.url));
 
 function fakeImaging(over: Partial<Imaging> = {}): Imaging {
   return {
@@ -76,6 +81,52 @@ describe('parseTesseractTsv', () => {
     const tsv = [TSV_HEADER, tsvRow('5', '1', '1', '1', '95', 'A'), tsvRow('5', '1', '1', '1', '0', '   ')].join('\n');
     expect(parseTesseractTsv(tsv).text).toBe('A');
     expect(parseTesseractTsv(tsv).confidence).toBe(95);
+  });
+});
+
+describe('ocr_prep (transparent designs)', () => {
+  // Designs here are transparent PNGs by convention and OCR engines composite
+  // RGBA onto WHITE, so a pale design becomes white-on-white. Measured on a
+  // real production design (cream, feathered edges): flattened on white the
+  // engine read NOTHING and reported 29% confidence on the noise; flattened on
+  // dark it read the wording exactly, at 93%.
+  //
+  // These assert the decision itself, which is the part with logic in it. The
+  // synthetic fixtures below deliberately do NOT claim to reproduce the
+  // white-on-white failure — tesseract 5.x survives them, and a fixture that
+  // passes either way would make an end-to-end assertion here vacuous.
+  const prep = (fixture: string) => {
+    const out = join(tmpdir(), `ocr-prep-test-${Math.random().toString(36).slice(2)}.png`);
+    const r = spawnSync('python3', [SCRIPT, fileURLToPath(new URL(fixture, import.meta.url)), out], {
+      encoding: 'utf8',
+    });
+    const meta = JSON.parse(r.stdout.trim()) as {
+      prepared: boolean;
+      background: string | null;
+      reason?: string;
+    };
+    rmSync(out, { force: true });
+    return meta;
+  };
+
+  it('puts a pale design on a dark background', () => {
+    const meta = prep('./fixtures/ocr-pale-transparent.png');
+    expect(meta.prepared).toBe(true);
+    expect(meta.background).toBe('#121212');
+  });
+
+  it('puts a dark design on a light background', () => {
+    // The inverse matters just as much: black artwork on the dark background
+    // would be exactly as unreadable.
+    const meta = prep('./fixtures/ocr-dark-transparent.png');
+    expect(meta.prepared).toBe(true);
+    expect(meta.background).toBe('#f5f5f5');
+  });
+
+  it('leaves an already-opaque image alone', () => {
+    const meta = prep('./fixtures/ocr-sample.png');
+    expect(meta.prepared).toBe(false);
+    expect(meta.reason).toBe('opaque');
   });
 });
 

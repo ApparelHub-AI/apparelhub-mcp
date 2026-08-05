@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -18,6 +19,7 @@ const IMAGE_STATS = fileURLToPath(new URL('../../python/image_stats.py', import.
 const MOCKUP_STATS = fileURLToPath(new URL('../../python/mockup_stats.py', import.meta.url));
 const THREAD_COLORS = fileURLToPath(new URL('../../python/thread_colors.py', import.meta.url));
 const ENSURE_RESOLUTION = fileURLToPath(new URL('../../python/ensure_resolution.py', import.meta.url));
+const OCR_PREP = fileURLToPath(new URL('../../python/ocr_prep.py', import.meta.url));
 const PYTHON = process.env.APPARELHUB_MCP_PYTHON || 'python3';
 
 export interface ImageStats {
@@ -336,17 +338,26 @@ export class LocalImaging implements Imaging {
   }
 
   async ocr(imagePath: string): Promise<OcrResult> {
-    // Native binary first: it is faster than the WASM build and is what a
-    // developer with tesseract on PATH already expects to be used.
+    // Designs here are transparent PNGs by convention and OCR engines composite
+    // RGBA onto WHITE, so a pale design reads as white-on-white noise. Flatten
+    // onto a contrasting background first; see python/ocr_prep.py.
+    const prepared = await prepareForOcr(imagePath);
     try {
-      // `tsv` rather than plain text: it carries a per-word confidence column,
-      // and plain text alone cannot tell a clean read from convincing garbage.
-      const r = await run('tesseract', [imagePath, 'stdout', 'tsv']);
-      if (r.code === 0) return { ...parseTesseractTsv(r.stdout), available: true, engine: 'native' };
-    } catch {
-      // Not installed. Fall through to the bundled WASM engine.
+      // Native binary first: faster than the WASM build, and what a developer
+      // with tesseract on PATH already expects to be used.
+      try {
+        // `tsv` rather than plain text: it carries a per-word confidence column,
+        // and plain text alone cannot tell a clean read from convincing garbage.
+        const r = await run('tesseract', [prepared, 'stdout', 'tsv']);
+        if (r.code === 0)
+          return { ...parseTesseractTsv(r.stdout), available: true, engine: 'native' };
+      } catch {
+        // Not installed. Fall through to the bundled WASM engine.
+      }
+      return await ocrWithWasm(prepared);
+    } finally {
+      if (prepared !== imagePath) await rm(prepared, { force: true });
     }
-    return ocrWithWasm(imagePath);
   }
 
   async cleanup(paths: string[]): Promise<void> {
@@ -407,6 +418,29 @@ export function parseTesseractTsv(tsv: string): { text: string; confidence: numb
     ? confidences.reduce((a, b) => a + b, 0) / confidences.length
     : null;
   return { text, confidence };
+}
+
+/** Flatten a transparent design onto a contrasting background for OCR.
+ *
+ *  Returns a temp path to flatten, or the ORIGINAL path when no preparation
+ *  happened (already opaque, or Python/Pillow unavailable). Best-effort by
+ *  design: a failure here should cost accuracy, never the whole read.
+ */
+async function prepareForOcr(imagePath: string): Promise<string> {
+  // A single temp FILE rather than a temp dir, so the caller's one rm() of the
+  // returned path leaves nothing behind.
+  const out = join(tmpdir(), `ah-ocr-${randomUUID()}.png`);
+  try {
+    const r = await run(PYTHON, [OCR_PREP, imagePath, out]);
+    if (r.code === 0) {
+      const meta = JSON.parse(r.stdout.trim() || '{}') as { prepared?: boolean };
+      if (meta.prepared) return out;
+    }
+    await rm(out, { force: true });
+  } catch {
+    // No python, no Pillow, unparseable output -- OCR the original.
+  }
+  return imagePath;
 }
 
 /** OCR via the bundled WASM engine. Absence of the package is not an error --
