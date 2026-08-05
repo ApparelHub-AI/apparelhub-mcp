@@ -32,6 +32,11 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
+      # Pillow backs the local image toolchain (python/*.py). Without it the OCR
+      # preparation step degrades to a no-op, and the tests covering which
+      # background it picks would have nothing to assert.
+      - name: Install Pillow (local image toolchain)
+        run: python3 -m pip install --break-system-packages --quiet pillow
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run build
