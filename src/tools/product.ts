@@ -950,13 +950,33 @@ export const syncToChannel = defineTool({
 export const updateProduct = defineTool({
   name: 'update_product',
   description:
-    'Update a product (name, description, price). For a price change that must propagate to synced channels, prefer cascade_price_change.',
+    'Update a product (name, description, price). For a price change that must propagate to synced channels, prefer cascade_price_change. ' +
+    'Optionally set tiktok_listing to enrich the TikTok Shop listing (SEO search terms, product highlights, brand, attributes) — applied when the product is synced to a TikTok channel; ignored by other channels.',
   inputSchema: z.object({
     product_uuid: z.string().min(1),
     changes: z.object({
       name: z.string().optional(),
       description: z.string().optional(),
       price: z.number().positive().optional(),
+      tiktok_listing: z
+        .object({
+          search_terms: z
+            .array(z.string())
+            .optional()
+            .describe('TikTok SEO search terms (hidden from buyers, boost search). Max 15 / 250 chars total; excess trimmed.'),
+          key_product_features: z
+            .array(z.string())
+            .optional()
+            .describe('TikTok product-page highlights. Max 5 / 1500 chars total; excess trimmed.'),
+          brand_id: z.string().optional().describe('TikTok brand id (from TikTok Get Brands). Omit for no brand.'),
+          attributes: z
+            .record(z.string(), z.string())
+            .optional()
+            .describe('Optional TikTok product attributes as {name: value}, e.g. {"Material":"Cotton"}.'),
+        })
+        .nullable()
+        .optional()
+        .describe('Per-product TikTok listing metadata (merge; null a key or the whole object to clear). Applied only when synced to TikTok.'),
     }),
     workspace: z.string().optional(),
   }),
@@ -966,6 +986,7 @@ export const updateProduct = defineTool({
     if (input.changes.name !== undefined) body.name = input.changes.name;
     if (input.changes.description !== undefined) body.description = input.changes.description;
     if (input.changes.price !== undefined) body.price = input.changes.price;
+    if (input.changes.tiktok_listing !== undefined) body.tiktok_listing = input.changes.tiktok_listing;
     if (Object.keys(body).length === 0) {
       throw new AhError({ code: 'bad_request', message: 'No changes provided.' });
     }
