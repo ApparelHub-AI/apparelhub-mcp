@@ -973,6 +973,18 @@ export const updateProduct = defineTool({
             .record(z.string(), z.string())
             .optional()
             .describe('Optional TikTok product attributes as {name: value}, e.g. {"Material":"Cotton"}.'),
+          weight: z
+            .object({ value: z.number().positive(), unit: z.string().optional() })
+            .optional()
+            .describe('Package weight for shipping, e.g. {value:0.9, unit:"POUND"} (unit POUND/KILOGRAM/GRAM/OUNCE; default POUND). Replaces the flat 0.5 lb default.'),
+          dimensions: z
+            .object({ length: z.number().positive(), width: z.number().positive(), height: z.number().positive(), unit: z.string().optional() })
+            .optional()
+            .describe('Package dimensions for shipping, e.g. {length:12, width:9, height:3, unit:"INCH"} (unit INCH/CENTIMETER; keep same system as weight).'),
+          shipping_template_id: z
+            .string()
+            .optional()
+            .describe('TikTok shipping-template id to bind (usually set once at the integration level). Binding it uses that template\'s rate instead of the shop default.'),
         })
         .nullable()
         .optional()
