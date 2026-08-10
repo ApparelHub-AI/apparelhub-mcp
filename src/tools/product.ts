@@ -985,6 +985,16 @@ export const updateProduct = defineTool({
             .string()
             .optional()
             .describe('TikTok shipping-template id to bind (usually set once at the integration level). Binding it uses that template\'s rate instead of the shop default.'),
+          title: z
+            .string()
+            .optional()
+            .describe(
+              'TikTok-ONLY title override (max 255 chars). Unset uses the product name. Use this to apply a TikTok-optimized title (e.g. from diagnose_tiktok_listings) WITHOUT rewriting the shared product record, which would also change the Shopify/WooCommerce/Wix listings.',
+            ),
+          description: z
+            .string()
+            .optional()
+            .describe('TikTok-ONLY description override. Unset uses the product description. Same channel-isolation rationale as title.'),
         })
         .nullable()
         .optional()
@@ -1042,6 +1052,86 @@ export const deleteProduct = defineTool({
   },
 });
 
+// TikTok grades every listing POOR/FAIR/GOOD and that grade suppresses reach.
+// This is the diagnose -> fix -> verify loop over TikTok's own quality engine:
+// it reports why a listing is graded low AND the values TikTok itself
+// recommends, so the fix is sourced from the system doing the grading rather
+// than guessed.
+export const diagnoseTiktokListings = defineTool({
+  name: 'diagnose_tiktok_listings',
+  description:
+    "Diagnose TikTok Shop listing quality and optionally apply TikTok's own recommendations. " +
+    'TikTok grades each listing POOR/FAIR/GOOD and a low grade suppresses reach. Returns, per listing: ' +
+    'the current tier, the machine-readable issues behind it (code + how_to_solve + the tier that ONE fix ' +
+    "unlocks), and TikTok's recommended search terms / titles / descriptions. " +
+    'READ-ONLY unless you pass `apply`. ' +
+    "`apply:['search_terms']` is the safe default action — search terms are hidden listing metadata. " +
+    "Passing 'title' or 'description' replaces merchant-visible copy with machine-generated text, so ask " +
+    'the user first; those land on a TikTok-ONLY override and never rewrite the shared product record ' +
+    '(which would also change the Shopify/WooCommerce/Wix listings). Use `dry_run` to preview. ' +
+    'Only LIVE listings can be diagnosed — a draft or in-review listing comes back diagnosable:false. ' +
+    'Tier is a US-market signal. After applying, re-run this tool LATER to see the new tier: TikTok ' +
+    're-grades asynchronously, so the tier does not move the instant an edit lands.',
+  inputSchema: z.object({
+    store_uuid: z.string().min(1),
+    integration_uuid: z
+      .string()
+      .optional()
+      .describe('Only needed when the store has more than one connected TikTok Shop integration.'),
+    product_uuids: z
+      .array(z.string())
+      .optional()
+      .describe('Limit to these products. Omit to cover every listing synced to TikTok.'),
+    apply: z
+      .array(z.enum(['search_terms', 'title', 'description']))
+      .optional()
+      .describe(
+        "Omit for a read-only diagnosis. Provide the fields to overwrite with TikTok's recommendations.",
+      ),
+    dry_run: z
+      .boolean()
+      .optional()
+      .describe('With `apply`: report what would change without writing or syncing.'),
+    workspace: z.string().optional(),
+  }),
+  annotations: { openWorldHint: true },
+  handler: async (input, ctx) => {
+    const base = `store/${enc(input.store_uuid)}/tiktok/listing-quality`;
+
+    if (!input.apply || input.apply.length === 0) {
+      const query: Record<string, string> = {};
+      if (input.integration_uuid) query.integration_uuid = input.integration_uuid;
+      // Filter server-side so TikTok is only asked about the listings we care
+      // about. The route also takes a repeatable `product_uuid`, but this client
+      // cannot send repeated query params, hence the comma-separated form.
+      if (input.product_uuids?.length) query.product_uuids = input.product_uuids.join(',');
+      const r = await ctx.api.get(base, {
+        query,
+        workspace: input.workspace,
+        signal: ctx.signal,
+      });
+      if (!isRecord(r)) return { products: [] };
+      return {
+        integration_uuid: str(r.integration_uuid),
+        products: asArray(r.products),
+        unavailable: r.unavailable ?? {},
+      };
+    }
+
+    const r = await ctx.api.post(`${base}/optimize`, {
+      body: {
+        integration_uuid: input.integration_uuid,
+        product_uuids: input.product_uuids,
+        fields: input.apply,
+        dry_run: input.dry_run ?? false,
+      },
+      workspace: input.workspace,
+      signal: ctx.signal,
+    });
+    return isRecord(r) ? r : { results: [] };
+  },
+});
+
 export const productTools: ToolDef[] = [
   shipProduct,
   createProduct,
@@ -1050,4 +1140,5 @@ export const productTools: ToolDef[] = [
   syncToChannel,
   updateProduct,
   deleteProduct,
+  diagnoseTiktokListings,
 ];
