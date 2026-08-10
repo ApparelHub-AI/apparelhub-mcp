@@ -103,6 +103,50 @@ describe('mapHttpError', () => {
     expect(e.code).toBe('forbidden');
     expect(e.message).toContain('design.generate');
   });
+  // The API's own 403s always carry an `error` code. A 403 carrying ONLY a message is
+  // an edge layer (WAF / CDN / gateway) dropping the request before it reaches the API.
+  // Reporting that as a key-scope problem sent a real user to audit permissions that
+  // were never involved, while the request was being blocked upstream.
+  it('403 with no error code -> blocked_upstream, not a scope problem', () => {
+    const e = mapHttpError(403, { message: 'Forbidden' });
+    expect(e.code).toBe('blocked_upstream');
+    expect(e.suggestion).toContain('NOT a key or permissions problem');
+    expect(e.suggestion).not.toContain('lacks scope');
+  });
+  it('403 blocked_upstream tells the caller not to retry identically', () => {
+    const e = mapHttpError(403, { message: 'Forbidden' });
+    expect(e.suggestion).toContain('keep failing');
+    // The dominant real-world trigger, so the hint has to be actionable.
+    expect(e.suggestion).toContain('upload');
+  });
+  it('403 with a bare string body is still treated as an edge block', () => {
+    expect(mapHttpError(403, 'Forbidden').code).toBe('blocked_upstream');
+  });
+  // A capability-only body is still a real permissions refusal, so the more specific
+  // branch must win over the edge-block one.
+  it('403 with capability but no error code stays forbidden', () => {
+    const e = mapHttpError(403, { capability: 'design.generate' });
+    expect(e.code).toBe('forbidden');
+    expect(e.message).toContain('design.generate');
+  });
+  // A plan gate, not a permission. Same class of misdirection as seat_limit_reached.
+  it('403 feature_unavailable -> feature_unavailable, not a scope problem', () => {
+    const e = mapHttpError(403, {
+      error: 'feature_unavailable',
+      message: 'The cross-client portfolio requires an agency (Enterprise) account.',
+    });
+    expect(e.code).toBe('feature_unavailable');
+    expect(e.message).toContain('agency (Enterprise)');
+    expect(e.suggestion).toContain('upgrade');
+    expect(e.suggestion).not.toContain('lacks scope');
+  });
+  // An unrecognized code should report what the API said rather than asserting a cause.
+  it('403 with an unrecognized error code does not claim a definite cause', () => {
+    const e = mapHttpError(403, { error: 'some_new_gate', message: 'Nope.' });
+    expect(e.code).toBe('forbidden');
+    expect(e.suggestion).toContain('some_new_gate');
+    expect(e.suggestion).not.toContain('lacks scope');
+  });
   it('404 workspace_not_found -> workspace_not_found', () => {
     expect(mapHttpError(404, { error: 'workspace_not_found' }).code).toBe('workspace_not_found');
   });

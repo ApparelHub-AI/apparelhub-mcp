@@ -208,6 +208,20 @@ export function mapHttpError(
       suggestion: 'Target a workspace this account can act in (see list_my_workspaces).',
     });
   }
+  if (status === 403 && errorCode === 'feature_unavailable') {
+    // A PLAN entitlement gate, not a permissions problem: the key and its role are
+    // fine, the account's tier simply does not include the feature. "This key lacks
+    // scope" would send the caller to audit key scopes that were never involved.
+    return new AhError({
+      httpStatus: status,
+      code: 'feature_unavailable',
+      message: message ?? "This account's plan does not include the requested feature.",
+      suggestion:
+        'Not a key or permissions problem — do not audit key scopes and do not retry with a ' +
+        'different key or workspace. The feature is not in this account\'s plan; the ACCOUNT ' +
+        'OWNER has to upgrade. Retrying identically will keep failing.',
+    });
+  }
   if (status === 403 && (errorCode === 'forbidden' || capability)) {
     return new AhError({
       httpStatus: status,
@@ -218,12 +232,40 @@ export function mapHttpError(
       suggestion: 'The role assigned to this key does not permit this action.',
     });
   }
+  if (status === 403 && !errorCode && !capability) {
+    // The API's own 403s ALWAYS carry an `error` code. A 403 whose body has only a
+    // `message` did not come from the API at all — an edge layer (WAF / CDN / gateway)
+    // rejected the request before it ever arrived. The most common trigger is a large
+    // binary upload body being pattern-matched as an attack.
+    //
+    // This is the same trap the seat_limit_reached branch above guards against, and it
+    // has bitten a real user: the tool reported a scope problem, so the API key's
+    // permissions were audited while the request was actually being dropped at the edge.
+    // Nothing about the key, role, or workspace is wrong, so none of the usual
+    // permission remedies apply.
+    return new AhError({
+      httpStatus: status,
+      code: 'blocked_upstream',
+      message: message ?? 'The request was blocked before it reached ApparelHub.',
+      suggestion:
+        'NOT a key or permissions problem — do not audit key scopes and do not retry with a ' +
+        'different key or workspace. An edge security layer rejected the request before it ' +
+        'reached the API, most often a large binary upload body. Retrying it identically will ' +
+        'keep failing. If this was an image upload, a smaller image may succeed. Report it with ' +
+        'the tool name and the approximate payload size.',
+    });
+  }
   if (status === 403) {
+    // An `error` code we do not have a branch for. Report what the API said rather than
+    // asserting a specific cause — the code and message are the reliable signal.
     return new AhError({
       httpStatus: status,
       code: 'forbidden',
       message: message ?? 'Forbidden.',
-      suggestion: 'This key lacks scope for the requested operation.',
+      suggestion:
+        `The API refused this action${errorCode ? ` (${errorCode})` : ''}. Read the message for ` +
+        'the specific reason before changing anything — it is usually a role or scope limit on ' +
+        'this key, but confirm that from the message rather than assuming it.',
     });
   }
   if (status === 404 && errorCode === 'workspace_not_found') {
