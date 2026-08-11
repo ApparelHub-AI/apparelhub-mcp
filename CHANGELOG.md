@@ -9,6 +9,33 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.10.0]
+### Added
+- `channel_performance`, `channel_opportunities` and `channel_coverage`: what the
+  sales channel itself reports about each listing — impressions, clicks,
+  click-through rate, add-to-carts — plus a derived state saying what to do
+  about it. The order-based analytics tools only know what SOLD, so a listing
+  with heavy traffic and no sales was indistinguishable from one nobody had ever
+  seen.
+
+### Fixed
+- `auto_optimize_listings` no longer archives a listing that people are seeing
+  but not buying. It previously proposed `pause` for anything with zero recorded
+  sales, and the review-and-optimize recipe applies pause autonomously — so a
+  listing with thousands of impressions and no sales, which is proven demand
+  with a fixable listing, was being removed from the storefront. Only a listing
+  the channel reports as genuinely inert is archived now; proven-demand failures
+  route to `optimize_listing` and low-exposure ones to `increase_discovery`.
+- Where no demand data is available (tier lacks analytics, no connected channel
+  reports it, the shop needs reconnecting), the proposal is `review` and nothing
+  is applied. It does not fall back to the sales-only heuristic, which would
+  reintroduce the bug on exactly the channels that cannot see demand.
+
+### Changed
+- `analyze_what_works` includes a `channel_demand` block when available, and
+  says plainly when it is not, rather than presenting sales-only insight as the
+  whole picture.
+
 ## [0.8.6]
 ### Changed
 - `list_my_designs` now reports why a design has no image. A row still being
