@@ -1,6 +1,12 @@
 import type { ApiClient } from '../http/client.js';
 import { AhError } from '../errors.js';
-import { isFallbackableError } from '../knowledge/sources.js';
+import {
+  isFallbackableError,
+  isContentBlockError,
+  contentBlockSweep,
+  providerOf,
+  CONTENT_BLOCKED_ALL_MODELS,
+} from '../knowledge/sources.js';
 import { isRecord, str } from '../util/shape.js';
 import type { ProgressReporter } from '../progress.js';
 
@@ -110,33 +116,64 @@ export async function runGeneration(
  *
  * The ladder is short (≤3 sync fallbacks), so the wall-clock cost of exhausting it is bounded even
  * though the first source may be an async-polled model.
+ *
+ * A CONTENT BLOCK takes a second, wider path. Content guards are provider-specific — a prompt one
+ * vendor refuses on recitation grounds routinely renders elsewhere — so on the first
+ * `content_blocked` the short ladder is EXTENDED IN PLACE with a provider-diverse sweep of every
+ * remaining model (contentBlockSweep). This is affordable precisely because a refusal is fast:
+ * ~4.2s measured, quicker than a ~6.0s success, since the model never generates anything.
  */
 export async function runGenerationWithFallback(
   api: ApiClient,
   opts: GenerateWithFallbackOptions,
   deps: GenerateDeps = {},
 ): Promise<GeneratedImageWithFallback> {
-  const sources = opts.sources.length ? opts.sources : [opts.source];
+  // A QUEUE, not a fixed list: a content block appends the full sweep to it mid-flight.
+  const queue = opts.sources.length ? [...opts.sources] : [opts.source];
   const trail: FallbackAttempt[] = [];
   let lastError: unknown;
+  let sweepExtended = false;
 
-  for (let i = 0; i < sources.length; i += 1) {
-    const source = sources[i]!;
+  for (let i = 0; i < queue.length; i += 1) {
+    const source = queue[i]!;
     try {
       const g = await runGeneration(api, { ...opts, source }, deps);
       // g.source_used is the model that actually produced the image (== source here).
       return { ...g, fallback_trail: trail };
     } catch (err) {
       lastError = err;
-      // noFallback: honor the caller's "this model only" — surface the error as-is.
+      // noFallback: honor the caller's "this model only" — surface the error as-is. Checked first
+      // so the opt-out suppresses the content-block sweep too, not just the ladder.
       if (opts.noFallback) throw err;
+
+      const code = err instanceof AhError ? err.code : undefined;
+      const reason = err instanceof AhError ? `${err.code}: ${err.message}` : String(err);
+
+      if (isContentBlockError(err)) {
+        // Extend once, on the FIRST block: every model not already queued, ordered so the next
+        // rungs land on different guards. Excluding the whole queue (not just what has been tried)
+        // keeps a model from being scheduled twice.
+        if (!sweepExtended) {
+          sweepExtended = true;
+          // An edit can only fall back to an edit-capable model; a text-to-image-only model would
+          // spend a rung on a guaranteed rejection.
+          queue.push(...contentBlockSweep({ edit: Boolean(opts.sourceImageUuid), exclude: queue }));
+        }
+        trail.push({ source, reason, ...(code ? { code } : {}) });
+        const remaining = queue.length - i - 1;
+        await deps.progress?.report(
+          15,
+          `${source} refused this on content grounds; trying a different provider` +
+            `${remaining > 0 ? ` (${remaining} model${remaining === 1 ? '' : 's'} left)` : ''}...`,
+        );
+        continue;
+      }
+
       // A non-transient failure (validation/auth/forbidden/not_found) must surface immediately;
       // cycling models would not help and would hide the real cause. A platform_rate_limited
       // (ApparelHub's own per-key throttle) is deliberately NOT fallbackable either — every model
       // rides the same key, so it also surfaces here.
       if (!isFallbackableError(err)) throw err;
-      const code = err instanceof AhError ? err.code : undefined;
-      const reason = err instanceof AhError ? `${err.code}: ${err.message}` : String(err);
       trail.push({ source, reason, ...(code ? { code } : {}) });
       // Fall through to the next model (if any).
       await deps.progress?.report(15, `${source} unavailable (${reason}); trying next model...`);
@@ -146,6 +183,30 @@ export async function runGenerationWithFallback(
   // Every model in the ladder was tried and every one was rate-limited/transiently down.
   const summary = trail.map((t) => `${t.source} (${t.reason})`).join('; ');
   const base = lastError instanceof AhError ? lastError : undefined;
+
+  // EVERY model refused on content grounds. This is the one terminal state that makes abandoning
+  // the design legitimate, so it gets its own code and says so explicitly — a generic failure here
+  // reads as "something went wrong, retry", which is exactly the wrong next move.
+  if (trail.length > 0 && trail.every((t) => t.code === 'content_blocked')) {
+    const tried = trail.map((t) => {
+      const p = providerOf(t.source);
+      return p ? `${t.source} [${p}]` : t.source;
+    });
+    const providers = [...new Set(trail.map((t) => providerOf(t.source)).filter(Boolean))];
+    throw new AhError({
+      code: CONTENT_BLOCKED_ALL_MODELS,
+      httpStatus: base?.httpStatus,
+      message:
+        `Every available image model refused this prompt on content grounds ` +
+        `(${tried.length} model${tried.length === 1 ? '' : 's'} across ` +
+        `${providers.length} provider${providers.length === 1 ? '' : 's'}: ${tried.join(', ')}).`,
+      suggestion:
+        'The full model sweep is exhausted — this is the one case where abandoning the design is ' +
+        'the right call, and no amount of rewording the same idea will change it. If the design ' +
+        'still matters, change the SUBJECT: vary the motif and palette away from the recognisable ' +
+        'signature the guards are reacting to, rather than rephrasing the same request.',
+    });
+  }
   // Honest attribution when the WHOLE ladder was provider-throttled: the final error keeps the
   // precise model_rate_limited code so an agent reports "the model providers are rate limiting",
   // never "ApparelHub is rate limiting" (ApparelHub accepted every request).
@@ -221,19 +282,25 @@ async function pollGeneration(
             'Retry with a DIFFERENT source — the built-in fallback ladder does this automatically. This is the model provider throttling, not ApparelHub\'s request throttle.',
         });
       }
-      // The platform now distinguishes three failure kinds that used to be one opaque string
-      // (apparelhub-ai#825), and they have three DIFFERENT remedies. Surfacing the precise code
-      // matters most for content_blocked: it is the only one caused by the prompt, so it is the
-      // only one where cycling the fallback ladder burns a generation per model to arrive at the
-      // same refusal. See FALLBACKABLE_CODES in knowledge/sources.ts.
+      // The platform distinguishes three failure kinds that used to be one opaque string
+      // (apparelhub-ai#825), and they have three DIFFERENT remedies.
+      //
+      // `content_blocked` is the one caused by the prompt, but that does NOT make it terminal:
+      // content guards are provider-specific, so switching model is in fact the single most
+      // effective response. runGenerationWithFallback catches this code and sweeps every remaining
+      // model, provider-diverse. (The suggestion below used to say "do not switch model, because
+      // every model refuses the same request" — that was wrong, and it is what left agents
+      // rewording a prompt six times while nine other models sat untried.)
       if (errorCode === 'content_blocked') {
         throw new AhError({
           code: 'content_blocked',
           message: error ?? 'The image provider blocked this prompt on content-policy grounds.',
           suggestion:
-            'Revise the PROMPT and try again — do not retry it unchanged and do not switch model, ' +
-            'because every model refuses the same request. Common causes: a named copyrighted ' +
-            'character, a real brand mark, or a real person.',
+            'One model refused this — that alone is NOT grounds to abandon the design. A different ' +
+            'provider often renders the same prompt, because these guards are provider-specific, ' +
+            'and the server sweeps the remaining models automatically. Only a ' +
+            'content_blocked_all_models result means every model refused. Common causes: a named ' +
+            'copyrighted character, a real brand mark, or a real person.',
         });
       }
       if (errorCode === 'no_image_returned' || errorCode === 'text_response_instead_of_image') {

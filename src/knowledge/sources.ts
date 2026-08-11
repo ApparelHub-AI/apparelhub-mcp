@@ -124,9 +124,23 @@ const FALLBACKABLE_CODES = new Set<string>([
   // routinely renders the same prompt — so it is worth a rung rather than a hard stop.
   'text_response_instead_of_image',
 ]);
-// DELIBERATELY ABSENT: `content_blocked`. A content-policy refusal is caused by the PROMPT, so
-// every remaining model refuses the same request. Cycling the ladder would burn a generation per
-// model to arrive at the same answer; it must surface immediately with "revise the prompt".
+// DELIBERATELY ABSENT: `content_blocked` — but NOT because it is unrecoverable. It gets its own
+// path (isContentBlockError + contentBlockSweep, below) because it wants the OPPOSITE treatment
+// from everything above: the full model set rather than the short ladder.
+//
+// The reasoning here used to read "a content refusal is caused by the PROMPT, so every remaining
+// model refuses the same request." That is wrong, and it is worth saying so plainly, because it is
+// the assumption this path exists to correct. Content guards are PROVIDER-SPECIFIC: Google runs a
+// recitation/copyright guard that the Replicate-hosted models do not have, so a prompt Google
+// refuses on recitation grounds routinely renders on Flux or Seedream. Measured against
+// production: one session hit a recitation block, reworded the same idea six times, was refused
+// every time, and abandoned the design — while nine other models sat untried.
+//
+// It stays OUT of FALLBACKABLE_CODES so the two behaviours remain separately tunable. That set is
+// for transient/per-model faults and is walked with a short ladder to bound wall-clock on slow
+// retries. A content block is neither transient nor slow — measured ~4.2s to refuse, FASTER than
+// the ~6.0s a success takes, because the model never generates anything — so the cap that protects
+// the rate-limit path buys nothing here and would only truncate the sweep that does the work.
 // Rate-limit-shaped text, used to decide whether an ambiguous `generation_failed` is fallbackable.
 const RATE_LIMIT_MESSAGE_RE = /rate.?limit|quota|429|resource.?exhausted|too many/i;
 
@@ -147,6 +161,108 @@ export function isFallbackableError(err: unknown): boolean {
   if (isPromptTooLongError(err)) return true;
   if (err.code === 'generation_failed') return RATE_LIMIT_MESSAGE_RE.test(err.message);
   return false;
+}
+
+/** The terminal code for "every model refused this on content grounds".
+ *
+ *  This is the ONLY signal that abandoning a design is legitimate. A single block never is —
+ *  that was the behaviour being corrected. Kept distinct from `content_blocked` so an agent can
+ *  tell "one model said no" from "all ten did". */
+export const CONTENT_BLOCKED_ALL_MODELS = 'content_blocked_all_models';
+
+/** TRUE when a provider refused on content/copyright grounds (platform code `content_blocked`,
+ *  normalised across every provider by the platform side of this work). */
+export function isContentBlockError(err: unknown): boolean {
+  return err instanceof AhError && err.code === 'content_blocked';
+}
+
+// Which account/guard each model rides. This is the axis that matters after a content block:
+// cycling to a sibling on the SAME host is the least useful move available, because it is the same
+// guard that just refused.
+//
+// Note `Google Imagen 4` is a Google MODEL but is reached through Replicate, and `GPT Image 2` is
+// native OpenAI (it shares the OpenAI account and therefore the OpenAI moderation surface).
+const SOURCE_PROVIDER: Record<string, string> = {
+  'Nano Banana': 'google',
+  'OpenAI': 'openai',
+  'GPT Image 2': 'openai',
+  'Seedream 4.0': 'replicate',
+  'Seedream 4.5': 'replicate',
+  'Flux 1.1 Pro': 'replicate',
+  'Flux 2 Pro': 'replicate',
+  'Grok Imagine': 'replicate',
+  'Wan 2.7': 'replicate',
+  'Google Imagen 4': 'replicate',
+};
+
+// Preference order WITHIN each provider, best first. `Google Imagen 4` is deliberately last among
+// the Replicate models: it is Google's model, so it is the Replicate entry most likely to carry a
+// Google-flavoured guard and the least likely to help after Google has already refused.
+const PROVIDER_MODEL_ORDER: Record<string, string[]> = {
+  replicate: [
+    'Flux 1.1 Pro', 'Seedream 4.5', 'Flux 2 Pro', 'Seedream 4.0',
+    'Grok Imagine', 'Wan 2.7', 'Google Imagen 4',
+  ],
+  google: ['Nano Banana'],
+  openai: ['OpenAI', 'GPT Image 2'],
+};
+
+// Providers round-robined first, then the last-resort group appended whole.
+//
+// OpenAI is pinned last by the standing operator directive that it is the least-preferred model
+// (shared billing surface, wins on nothing today) — see pickSource. That directive and this
+// path's own logic agree rather than conflict: OpenAI's guard is a moderation/safety guard, the
+// same CLASS Replicate's per-model safety checkers use, so it adds no guard diversity that a
+// Replicate model has not already supplied. Trying it earlier would cost an OpenAI generation for
+// no extra chance of success.
+const SWEEP_PROVIDER_ORDER = ['replicate', 'google'];
+const SWEEP_LAST_RESORT_PROVIDERS = ['openai'];
+
+/** Every model worth trying after a content block, ordered provider-diverse, minus `exclude`.
+ *
+ *  Round-robin across providers means the first few rungs each land on a DIFFERENT guard, which is
+ *  where nearly all the value is: if a different guard is going to render this prompt, it renders
+ *  on rung 2, not rung 7. Siblings on an already-refused host come later, once diversity is spent.
+ *
+ *  `edit` restricts to the edit-capable set — a text-to-image-only model can never be a valid edit
+ *  fallback, and offering one would just spend a rung on a guaranteed 400. */
+export function contentBlockSweep(
+  opts: { edit?: boolean; exclude?: Iterable<string> } = {},
+): string[] {
+  const seen = new Set<string>(opts.exclude ?? []);
+  const sweep: string[] = [];
+  const push = (m: string | undefined): void => {
+    if (!m || seen.has(m)) return;
+    seen.add(m);
+    sweep.push(m);
+  };
+  /** The best still-untried model on this provider. `push` mutates `seen`, so calling this once
+   *  per provider per round walks each provider's list in order. */
+  const nextFrom = (provider: string): string | undefined =>
+    (PROVIDER_MODEL_ORDER[provider] ?? []).find(
+      (m) => !seen.has(m) && (!opts.edit || EDIT_CAPABLE_SOURCES.has(m)),
+    );
+
+  // Round-robin the preferred providers: one model each, then the next model each, and so on.
+  const maxRounds = Math.max(
+    ...SWEEP_PROVIDER_ORDER.map((p) => (PROVIDER_MODEL_ORDER[p] ?? []).length),
+    0,
+  );
+  for (let round = 0; round < maxRounds; round += 1) {
+    for (const provider of SWEEP_PROVIDER_ORDER) push(nextFrom(provider));
+  }
+  // Then the last-resort providers, in their own preference order.
+  for (const provider of SWEEP_LAST_RESORT_PROVIDERS) {
+    for (const m of PROVIDER_MODEL_ORDER[provider] ?? []) {
+      if (!opts.edit || EDIT_CAPABLE_SOURCES.has(m)) push(m);
+    }
+  }
+  return sweep;
+}
+
+/** The provider a source rides, for honest reporting. */
+export function providerOf(source: string): string | undefined {
+  return SOURCE_PROVIDER[source];
 }
 
 // Lesson 9b in as few characters as it can be said. The previous wording ran 331

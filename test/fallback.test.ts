@@ -7,6 +7,7 @@ import {
 } from '../src/tools/design.js';
 import { ApiClient, type FetchLike } from '../src/http/client.js';
 import { AhError } from '../src/errors.js';
+import { VALID_SOURCES, EDIT_CAPABLE_SOURCES, providerOf } from '../src/knowledge/sources.js';
 import { fakeContext } from './helpers/ctx.js';
 import { jsonResponse, noSleep } from './helpers/fakeFetch.js';
 
@@ -181,23 +182,140 @@ describe('runGenerationWithFallback', () => {
     return { fetchImpl, sources };
   };
 
-  it('content_blocked does NOT fall back — every model refuses the same prompt', async () => {
-    const { fetchImpl, sources } = asyncFailure(
-      'content_blocked',
-      'Image generation was blocked. The prompt may contain copyrighted characters.',
+  // Every model refuses — for exercising the terminal state and the full sweep.
+  const asyncFailureAll = (errorCode: string, message: string) => {
+    const sources: string[] = [];
+    const fetchImpl = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/images/upload/')) {
+        return jsonResponse(200, {
+          processing_status: 'failed',
+          error: message,
+          error_code: errorCode,
+        });
+      }
+      const body = init?.body ? (JSON.parse(String(init.body)) as { source?: string }) : {};
+      sources.push(body.source ?? '');
+      return jsonResponse(202, { image_uuid: 'gX', processing_status: 'pending' });
+    }) as unknown as FetchLike;
+    return { fetchImpl, sources };
+  };
+
+  const BLOCK_MSG = 'Image generation was blocked. The prompt may contain copyrighted characters.';
+
+  // NOTE: this suite previously asserted content_blocked did NOT fall back, reasoning that "the
+  // prompt caused it, so every model refuses the same request". Production disproved that. Guards
+  // are provider-specific: an agent hit a recitation block, reworded the same idea six times, was
+  // refused every time, and abandoned the design — while nine other models sat untried.
+  it('content_blocked now falls back — a different provider renders what one refused', async () => {
+    const { fetchImpl, sources } = asyncFailure('content_blocked', BLOCK_MSG);
+    const res = await runGenerationWithFallback(
+      apiWith(fetchImpl),
+      { prompt: 'x', source: 'Nano Banana', sources: ['Nano Banana'] },
+      { sleep: noSleep, intervalMs: 0 },
     );
-    const err = await runGenerationWithFallback(
+    expect(res.fallback_trail[0]).toMatchObject({
+      source: 'Nano Banana',
+      code: 'content_blocked',
+    });
+    expect(sources.length).toBeGreaterThan(1);
+  });
+
+  it('leaves the refusing provider immediately rather than walking its siblings', async () => {
+    const { fetchImpl, sources } = asyncFailure('content_blocked', BLOCK_MSG);
+    await runGenerationWithFallback(
+      apiWith(fetchImpl),
+      // Ladder of one, so the order under test is the SWEEP's, not the ladder's.
+      { prompt: 'x', source: 'Nano Banana', sources: ['Nano Banana'] },
+      { sleep: noSleep, intervalMs: 0 },
+    );
+    expect(providerOf(sources[0]!)).toBe('google');
+    // A sibling on the host that just refused is the same guard — the least useful next move.
+    expect(providerOf(sources[1]!)).not.toBe('google');
+    expect(providerOf(sources[1]!)).toBe('replicate');
+  });
+
+  it('sweeps the FULL model set, not the short 3-rung ladder', async () => {
+    const { fetchImpl, sources } = asyncFailureAll('content_blocked', BLOCK_MSG);
+    await runGenerationWithFallback(
       apiWith(fetchImpl),
       { prompt: 'x', source: 'Nano Banana', sources: ['Nano Banana', 'Flux 1.1 Pro', 'OpenAI'] },
       { sleep: noSleep, intervalMs: 0 },
     ).catch((e) => e);
+    // Every model, exactly once. The 3-rung cap exists to bound slow rate-limit retries; a refusal
+    // is FASTER than a success, so that rationale does not apply here.
+    expect(new Set(sources)).toEqual(new Set(VALID_SOURCES));
+    expect(sources.length).toBe(VALID_SOURCES.length);
+  });
+
+  it('when every model refuses, the terminal error says exactly that', async () => {
+    const { fetchImpl } = asyncFailureAll('content_blocked', BLOCK_MSG);
+    const err = await runGenerationWithFallback(
+      apiWith(fetchImpl),
+      { prompt: 'x', source: 'Nano Banana', sources: ['Nano Banana'] },
+      { sleep: noSleep, intervalMs: 0 },
+    ).catch((e) => e);
     expect(err).toBeInstanceOf(AhError);
     const e = err as AhError;
-    expect(e.code).toBe('content_blocked');
-    // The whole point: only ONE model was tried. Cycling the ladder would burn a generation per
-    // model to arrive at the identical refusal.
+    // A DISTINCT terminal code: this is the only signal that abandoning the design is legitimate,
+    // and it must not read the same as one model saying no.
+    expect(e.code).toBe('content_blocked_all_models');
+    expect(e.message).toMatch(/every available image model refused/i);
+    expect(e.message).toMatch(/provider/i);
+    expect(e.suggestion).toMatch(/exhausted/i);
+  });
+
+  it('restricts the sweep to edit-capable models on an edit', async () => {
+    const { fetchImpl, sources } = asyncFailureAll('content_blocked', BLOCK_MSG);
+    await runGenerationWithFallback(
+      apiWith(fetchImpl),
+      { prompt: 'x', source: 'Nano Banana', sources: ['Nano Banana'], sourceImageUuid: 'src' },
+      { sleep: noSleep, intervalMs: 0 },
+    ).catch((e) => e);
+    // A text-to-image-only model can never rescue an edit; offering one spends a rung on a
+    // guaranteed rejection.
+    expect(sources).not.toContain('Google Imagen 4');
+    expect(sources).not.toContain('Flux 1.1 Pro');
+    for (const s of sources) expect(EDIT_CAPABLE_SOURCES.has(s)).toBe(true);
+  });
+
+  it('no_fallback still fails on the chosen source alone, with the plain block code', async () => {
+    const { fetchImpl, sources } = asyncFailure('content_blocked', BLOCK_MSG);
+    const err = await runGenerationWithFallback(
+      apiWith(fetchImpl),
+      { prompt: 'x', source: 'Nano Banana', sources: ['Nano Banana'], noFallback: true },
+      { sleep: noSleep, intervalMs: 0 },
+    ).catch((e) => e);
+    expect((err as AhError).code).toBe('content_blocked');
     expect(sources).toEqual(['Nano Banana']);
-    expect(e.suggestion).toMatch(/revise the prompt/i);
+  });
+
+  it('a mixed sweep is NOT reported as "every model refused"', async () => {
+    // One content block, then rate limits. Claiming the sweep was exhausted would tell the agent to
+    // abandon a design the later models never actually refused.
+    const sources: string[] = [];
+    const fetchImpl = (async (input: unknown, init?: RequestInit) => {
+      if (String(input).includes('/images/upload/')) {
+        return jsonResponse(200, {
+          processing_status: 'failed',
+          error: BLOCK_MSG,
+          error_code: 'content_blocked',
+        });
+      }
+      const body = init?.body ? (JSON.parse(String(init.body)) as { source?: string }) : {};
+      const source = body.source ?? '';
+      sources.push(source);
+      if (source === 'Nano Banana') {
+        return jsonResponse(202, { image_uuid: 'gA', processing_status: 'pending' });
+      }
+      return jsonResponse(429, { error: 'model_rate_limited', source, retry_after: 5 });
+    }) as unknown as FetchLike;
+    const err = await runGenerationWithFallback(
+      apiWith(fetchImpl),
+      { prompt: 'x', source: 'Nano Banana', sources: ['Nano Banana'] },
+      { sleep: noSleep, intervalMs: 0 },
+    ).catch((e) => e);
+    expect((err as AhError).code).not.toBe('content_blocked_all_models');
   });
 
   it('no_image_returned DOES fall back — it is model-specific, not caused by the prompt', async () => {
