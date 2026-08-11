@@ -190,12 +190,35 @@ function mapChannelStatuses(raw: unknown): Record<string, unknown>[] {
   const list = isRecord(raw)
     ? (raw.channel_statuses ?? raw.ecommerce_statuses ?? raw.ecommerce_sync_history)
     : undefined;
-  return asArray(list).map((c) => ({
-    integration_uuid: str(c, 'integration_uuid', 'uuid'),
-    channel_name: str(c, 'channel_name', 'provider_name', 'channel'),
-    sync_status: str(c, 'sync_status', 'status'),
-    external_id: str(c, 'external_id'),
-  }));
+  return asArray(list).map((c) => {
+    const detail = isRecord(c) && isRecord(c.health_detail) ? c.health_detail : undefined;
+    const entry: Record<string, unknown> = {
+      integration_uuid: str(c, 'integration_uuid', 'uuid'),
+      channel_name: str(c, 'channel_name', 'provider_name', 'channel'),
+      sync_status: str(c, 'sync_status', 'status'),
+      // Always a string. Channel product ids can exceed 2^53 (TikTok's do), so
+      // treating one as a JS number silently corrupts it.
+      external_id: str(c, 'external_id'),
+      // What the CHANNEL last said about the listing, as opposed to what we
+      // believe we published. A sales channel can remove or deactivate a
+      // listing at any time without being asked, so a product that synced
+      // successfully is not guaranteed to still be live — an agent that reads
+      // only sync_status will keep reporting a dead listing as fine.
+      //   'Removed'         - gone from the channel (deleted or taken down)
+      //   'Needs Attention' - still there but not visible to buyers
+      //   'Unknown'         - we could not reach the channel; NOT a problem claim
+      //   absent            - never checked, which is not the same as healthy
+      health: str(c, 'health'),
+    };
+    // The channel's own explanation, when it gave one. It arrives only on the
+    // channel's push notification — a later poll reads status alone and cannot
+    // recover it — so it is often the only actionable detail available.
+    const reason = detail ? str(detail, 'channel_reason') : undefined;
+    if (reason) entry.health_reason = reason;
+    const checkedAt = str(c, 'health_checked_at');
+    if (checkedAt) entry.health_checked_at = checkedAt;
+    return entry;
+  });
 }
 
 function mapProductListItem(raw: unknown): Record<string, unknown> {
@@ -220,7 +243,7 @@ function mapProductListItem(raw: unknown): Record<string, unknown> {
 export const listMyProducts = defineTool({
   name: 'list_my_products',
   description:
-    "List the merchant's products with their fulfillment and sales-channel sync status. Pass store_uuid to scope to one store; omit for all products. Read-only.",
+    "List the merchant's products with their fulfillment and sales-channel sync status. Each channel entry also carries `health` — what the channel last said about the listing. A channel can remove or deactivate a listing at any time, so check `health`, not just `sync_status`: a product can read 'Synced' historically and still be gone. Pass store_uuid to scope to one store; omit for all products. Read-only.",
   inputSchema: z.object({
     store_uuid: z.string().optional().describe('Scope to one store (omit for all products).'),
     status: z.enum(['active', 'draft', 'archived']).optional(),
