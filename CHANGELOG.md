@@ -9,6 +9,20 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.10.3]
+
+### Added
+- `listing_changes`: what has been changed on your listings, and whether it worked.
+  Every shopper-visible edit is recorded as it happens with the signal state that
+  prompted it, and gets a verdict on the ONE metric that change should have moved —
+  a title is judged on click-through, not revenue.
+- `unmeasurable` is documented as the DEFAULT verdict rather than an error, with
+  `verdict_reason` alongside it. On a low-traffic shop most verdicts will be
+  unmeasurable, and reading that as "the change had no effect" is the same
+  mistake as reading a missing metric as zero, one step later in the process.
+- `confounded` marks two edits that landed close enough that neither owns the
+  result. It is a refusal to guess, not a gap in the data.
+
 ## [0.10.2]
 
 ### Fixed
