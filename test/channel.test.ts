@@ -60,6 +60,9 @@ const LISTINGS_PAYLOAD = {
   listings: [
     {
       channel_product_ref: '111',
+      provider: 'TikTok Shop',
+      store_name: 'Acme Apparel',
+      store_uuid: 's1',
       product_uuid: 'p-hot',
       product_name: 'Acme Tee',
       mapped_to_apparelhub: true,
@@ -122,6 +125,26 @@ describe('channel_performance', () => {
     await channelPerformance.handler({ state: 'conversion_blocked' }, fakeContext(api));
     expect(calls[0].url).toContain('analytics/channel/listings');
     expect(calls[0].url).toContain('state=conversion_blocked');
+  });
+
+  it('says which channel and store each row came from', () => {
+    // A channel product id is only unique within its channel, so a row without
+    // provenance cannot be safely compared to another.
+    return channelPerformance
+      .handler({}, fakeContext(apiReturning(LISTINGS_PAYLOAD)))
+      .then((out: any) => {
+        const hot = out.listings.find((l: any) => l.product_uuid === 'p-hot');
+        expect(hot.provider).toBe('TikTok Shop');
+        expect(hot.store_name).toBe('Acme Apparel');
+      });
+  });
+
+  it('passes the channel and store filters through', async () => {
+    const { api, calls } = recording(LISTINGS_PAYLOAD);
+    await channelPerformance.handler(
+      { provider: 'TikTok Shop', store: 's1' }, fakeContext(api));
+    expect(calls[0].url).toContain('provider=TikTok+Shop');
+    expect(calls[0].url).toContain('store=s1');
   });
 
   it('is read-only', () => {
