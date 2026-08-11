@@ -9,6 +9,14 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.10.1]
+### Added
+- `channel_performance` rows carry `provider`, `store_name` and `store_uuid`, and
+  both channel tools accept `provider` and `store` filters plus return
+  `channels_present`. An agent comparing two rows without knowing their channel
+  was drawing a conclusion it had no basis for — a channel product id is only
+  unique within its own channel.
+
 ## [0.10.0]
 ### Added
 - `channel_performance`, `channel_opportunities` and `channel_coverage`: what the
