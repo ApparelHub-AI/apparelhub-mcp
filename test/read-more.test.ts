@@ -214,3 +214,67 @@ describe('get_order_details', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Listing health on channel statuses (apparelhub-ai#1024 / #1028).
+//
+// An agent that reads only `sync_status` will keep reporting a listing as fine
+// after the channel has taken it down — the whole point of surfacing health.
+// ---------------------------------------------------------------------------
+describe('list_my_products — listing health', () => {
+  const productWith = (channel: Record<string, unknown>) => ({
+    products: [
+      {
+        uuid: 'p1',
+        name: 'Root Cause Tee',
+        channel_statuses: [
+          {
+            integration_uuid: 'i1',
+            provider_name: 'TikTok Shop',
+            sync_status: 'Not Synced',
+            ...channel,
+          },
+        ],
+      },
+    ],
+  });
+
+  it('surfaces health so a removed listing is not read as merely un-synced', async () => {
+    const { api } = apiRecording(productWith({ health: 'Removed' }));
+    const res = (await listMyProducts.handler({}, fakeContext(api))) as any;
+    expect(res.products[0].channel_statuses[0].health).toBe('Removed');
+  });
+
+  it("carries the channel's own takedown reason when it gave one", async () => {
+    const { api } = apiRecording(
+      productWith({ health: 'Removed', health_detail: { channel_reason: 'Prohibited product' } }),
+    );
+    const res = (await listMyProducts.handler({}, fakeContext(api))) as any;
+    expect(res.products[0].channel_statuses[0].health_reason).toBe('Prohibited product');
+  });
+
+  it('omits health_reason rather than emitting an empty one', async () => {
+    const { api } = apiRecording(productWith({ health: 'Removed', health_detail: {} }));
+    const res = (await listMyProducts.handler({}, fakeContext(api))) as any;
+    expect(res.products[0].channel_statuses[0]).not.toHaveProperty('health_reason');
+  });
+
+  it('keeps a large channel product id as a string', async () => {
+    // TikTok product ids exceed 2^53; as a JS number this value corrupts.
+    const { api } = apiRecording(
+      productWith({ external_id: '1732547368555024494', health: 'In Sync' }),
+    );
+    const res = (await listMyProducts.handler({}, fakeContext(api))) as any;
+    const ext = res.products[0].channel_statuses[0].external_id;
+    expect(typeof ext).toBe('string');
+    expect(ext).toBe('1732547368555024494');
+  });
+
+  it('a never-checked listing reports no health rather than a false healthy', async () => {
+    const { api } = apiRecording(productWith({ sync_status: 'Synced' }));
+    const res = (await listMyProducts.handler({}, fakeContext(api))) as any;
+    const ch = res.products[0].channel_statuses[0];
+    expect(ch.sync_status).toBe('Synced');
+    expect(ch.health).toBeUndefined();
+  });
+});
