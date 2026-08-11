@@ -137,3 +137,52 @@ describe('update_product tiktok_listing overrides', () => {
     expect(body.description).toBeUndefined();
   });
 });
+
+describe('remediation when TikTok offers no recommendation (#976)', () => {
+  it('passes requirements, building blocks and candidates straight through', async () => {
+    const enriched = {
+      integration_uuid: 'int-1',
+      products: [
+        {
+          product_uuid: 'prod-1',
+          tier: 'POOR',
+          issues: [
+            {
+              field: 'TITLE',
+              code: 'TITLE_MORE_THAN_150_OR_LESS_THAN_40_CHARS',
+              fixable_by: 'agent',
+              constraint: { min_length: 40, max_length: 150 },
+            },
+            { field: 'IMAGE', code: 'PRD_NOT_INCLUDE_MODEL_IMG_OR_DETAILS', fixable_by: 'photography' },
+          ],
+          // TikTok offered nothing — this is the case the enrichment exists for.
+          recommended: { search_terms: [], titles: [], descriptions: [], image: null },
+          requirements: { title: { min_length: 40, max_length: 150, current_length: 21 } },
+          building_blocks: { garment: 'Unisex Staple T-Shirt', colors: ['Black'] },
+          candidates: { title: [{ title: 'A Sufficiently Long Compliant Title Here', length: 40 }] },
+        },
+      ],
+      unavailable: {},
+    };
+    const { api } = apiRecording(enriched);
+    const out = (await diagnoseTiktokListings.handler(
+      { store_uuid: 'store-1' },
+      fakeContext(api),
+    )) as { products: Record<string, any>[] };
+
+    const p = out.products[0];
+    expect(p.requirements.title.min_length).toBe(40);
+    expect(p.building_blocks.garment).toBe('Unisex Staple T-Shirt');
+    expect(p.candidates.title[0].length).toBe(40);
+    // The agent needs to know which issues are not its to solve.
+    expect(p.issues[1].fixable_by).toBe('photography');
+  });
+
+  it('tells the agent what to do when TikTok suggests nothing', () => {
+    const d = diagnoseTiktokListings.description;
+    expect(d).toContain('requirements');
+    expect(d).toContain('candidates');
+    expect(d).toContain('fixable_by');
+    expect(d).toContain('photography');
+  });
+});
