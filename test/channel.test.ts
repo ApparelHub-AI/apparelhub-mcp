@@ -197,11 +197,31 @@ describe('channel_coverage', () => {
 });
 
 describe('tool surface', () => {
-  it('registers the read-only channel tools', () => {
+  it('registers the channel tools', () => {
     expect(channelTools.map((t) => t.name).sort()).toEqual([
       'channel_coverage',
       'channel_opportunities',
       'channel_performance',
+      'describe_listing_attributes',
+      'listing_changes',
+      'set_channel_settings',
+      'set_listing_attributes',
+    ]);
+  });
+
+  it('marks exactly the read tools read-only', () => {
+    // Asserted on the ANNOTATION rather than the name, because that is what a
+    // client acts on: a write mistakenly carrying readOnlyHint can be
+    // auto-approved, and one of these writes records a legal attestation.
+    const readOnly = channelTools
+      .filter((t) => t.annotations?.readOnlyHint === true)
+      .map((t) => t.name)
+      .sort();
+    expect(readOnly).toEqual([
+      'channel_coverage',
+      'channel_opportunities',
+      'channel_performance',
+      'describe_listing_attributes',
       'listing_changes',
     ]);
   });
