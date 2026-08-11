@@ -52,6 +52,11 @@ function mapCoverage(raw: unknown): Record<string, unknown> {
 function mapListing(raw: unknown): Record<string, unknown> {
   return {
     channel_product_ref: str(raw, 'channel_product_ref'),
+    // Which channel/store these numbers came from. A channel product id is only
+    // unique WITHIN its channel, so never compare two rows without checking this.
+    provider: str(raw, 'provider'),
+    store_name: str(raw, 'store_name'),
+    store_uuid: str(raw, 'store_uuid'),
     product_uuid: str(raw, 'product_uuid'),
     product_name: str(raw, 'product_name'),
     mapped_to_apparelhub: bool(raw, 'mapped_to_apparelhub'),
@@ -90,9 +95,19 @@ export const channelPerformance = defineTool({
     'page is losing them), starved (too few views to judge; needs discovery, NOT a ' +
     'rewrite), dead (no activity at all; the only state safe to archive), ' +
     'insufficient_data (not enough signal, or this channel does not report it). ' +
+    'Each row says which channel and store it came from — always check that before ' +
+    'comparing two rows, since a channel product id is only unique within its own channel. ' +
     'ALWAYS check the coverage block before treating a missing metric as zero. Read-only.',
   inputSchema: z.object({
     ...rangeShape,
+    provider: z
+      .string()
+      .optional()
+      .describe(
+        'Only listings from this sales channel, by name (e.g. "TikTok Shop"). ' +
+          'Case-insensitive. channels_present lists the channels that actually have data.',
+      ),
+    store: z.string().optional().describe('Only listings from this store uuid.'),
     state: z
       .string()
       .optional()
@@ -105,7 +120,10 @@ export const channelPerformance = defineTool({
   annotations: { readOnlyHint: true, openWorldHint: true },
   handler: async (input, ctx) => {
     const raw = await ctx.api.get('analytics/channel/listings', {
-      query: { start: input.start, end: input.end, state: input.state },
+      query: {
+        start: input.start, end: input.end, state: input.state,
+        provider: input.provider, store: input.store,
+      },
       workspace: input.workspace,
       signal: ctx.signal,
     });
@@ -113,6 +131,7 @@ export const channelPerformance = defineTool({
     const limited = input.limit ? listings.slice(0, input.limit) : listings;
     return {
       ...mapEnvelope(raw),
+      channels_present: asArray(isRecord(raw) ? raw.channels_present : undefined),
       listings: limited,
       listing_count: listings.length,
       summary: isRecord(raw) && isRecord(raw.summary) ? raw.summary : undefined,
@@ -130,17 +149,24 @@ export const channelOpportunities = defineTool({
     'Also returns per-state counts and, separately, the listings that are genuinely inert ' +
     '(state "dead") and therefore safe to archive. Nothing else is safe to archive. ' +
     'Read-only.',
-  inputSchema: z.object(rangeShape),
+  inputSchema: z.object({ ...rangeShape,
+    provider: z.string().optional().describe('Narrow to one sales channel, by name.'),
+    store: z.string().optional().describe('Narrow to one store uuid.'),
+  }),
   annotations: { readOnlyHint: true, openWorldHint: true },
   handler: async (input, ctx) => {
     const raw = await ctx.api.get('analytics/channel/summary', {
-      query: { start: input.start, end: input.end },
+      query: {
+        start: input.start, end: input.end,
+        provider: input.provider, store: input.store,
+      },
       workspace: input.workspace,
       signal: ctx.signal,
     });
     const summary = isRecord(raw) && isRecord(raw.summary) ? raw.summary : {};
     return {
       ...mapEnvelope(raw),
+      channels_present: asArray(isRecord(raw) ? raw.channels_present : undefined),
       counts: isRecord(summary.counts) ? summary.counts : undefined,
       total_listings: num(summary, 'total'),
       top_opportunities: asArray(summary.top_opportunities).map(mapListing),
