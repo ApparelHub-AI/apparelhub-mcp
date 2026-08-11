@@ -3,6 +3,7 @@ import {
   channelPerformance,
   channelOpportunities,
   channelCoverage,
+  listingChanges,
   channelTools,
 } from '../src/tools/channel.js';
 import { findUnderperformers, type DemandSignal } from '../src/knowledge/insights.js';
@@ -196,11 +197,12 @@ describe('channel_coverage', () => {
 });
 
 describe('tool surface', () => {
-  it('registers three read-only tools', () => {
+  it('registers the read-only channel tools', () => {
     expect(channelTools.map((t) => t.name).sort()).toEqual([
       'channel_coverage',
       'channel_opportunities',
       'channel_performance',
+      'listing_changes',
     ]);
   });
 });
@@ -307,5 +309,71 @@ describe('the shop-level finding is not buried', () => {
     const api = apiReturning({ ...LISTINGS_PAYLOAD });
     const out: any = await channelPerformance.handler({} as any, fakeContext(api));
     expect(out.shop).toBeUndefined();
+  });
+});
+
+describe('listing_changes: whether the last fix worked', () => {
+  const PAYLOAD = {
+    count: 2,
+    window_days: 7,
+    interventions: [
+      {
+        uuid: 'iv-1', kind: 'title', occurred_at: '2026-07-20T10:00:00',
+        before: 'Old', after: 'New', signal_state: 'conversion_blocked',
+        actor_kind: 'agent', target_metric: 'ctr',
+        verdict: 'improved', evidence: { relative_change: 0.42 },
+      },
+      {
+        uuid: 'iv-2', kind: 'price', occurred_at: '2026-07-21T10:00:00',
+        before: '25.00', after: '19.00', target_metric: 'units_sold',
+        verdict: 'unmeasurable', verdict_reason: 'no_shop_traffic',
+      },
+    ],
+    summary: {
+      total: 2, measurable: 1, counts: { improved: 1, unmeasurable: 1 },
+      headline: '1 of 1 judged changes improved the metric they targeted (2 recorded in total).',
+    },
+  };
+
+  it('returns the changes with their verdicts', async () => {
+    const api = apiReturning(PAYLOAD);
+    const out: any = await listingChanges.handler({} as any, fakeContext(api));
+    expect(out.change_count).toBe(2);
+    expect(out.changes[0].verdict).toBe('improved');
+    expect(out.changes[0].target_metric).toBe('ctr');
+  });
+
+  it('keeps the reason a verdict could not be reached', async () => {
+    // "unmeasurable" on its own is nearly as unhelpful as a wrong answer — the
+    // reason is what tells an agent whether to wait, reconnect, or stop
+    // recommending listing edits entirely.
+    const api = apiReturning(PAYLOAD);
+    const out: any = await listingChanges.handler({} as any, fakeContext(api));
+    expect(out.changes[1].verdict).toBe('unmeasurable');
+    expect(out.changes[1].verdict_reason).toBe('no_shop_traffic');
+  });
+
+  it('hoists how many changes could be judged at all', async () => {
+    // The denominator matters: "1 improved" next to "of 1 judged" reads very
+    // differently from "1 improved of 40 recorded, 39 unjudgeable".
+    const api = apiReturning(PAYLOAD);
+    const out: any = await listingChanges.handler({} as any, fakeContext(api));
+    expect(out.measurable).toBe(1);
+    expect(out.headline).toContain('judged');
+  });
+
+  it('passes the filters through', async () => {
+    const { api, calls } = recording(PAYLOAD);
+    await listingChanges.handler(
+      { days: 30, product: 'p-1', verdict: 'worsened' } as any, fakeContext(api));
+    expect(calls[0].url).toContain('analytics/interventions');
+    expect(calls[0].url).toContain('days=30');
+    expect(calls[0].url).toContain('product=p-1');
+    expect(calls[0].url).toContain('verdict=worsened');
+  });
+
+  it('is registered and read-only', () => {
+    expect(channelTools.map((t) => t.name)).toContain('listing_changes');
+    expect(listingChanges.annotations?.readOnlyHint).toBe(true);
   });
 });

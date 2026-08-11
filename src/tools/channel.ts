@@ -218,8 +218,90 @@ export const channelCoverage = defineTool({
   },
 });
 
+function mapIntervention(raw: unknown): Record<string, unknown> {
+  return {
+    uuid: str(raw, 'uuid'),
+    kind: str(raw, 'kind'),
+    occurred_at: str(raw, 'occurred_at'),
+    before: str(raw, 'before'),
+    after: str(raw, 'after'),
+    // The signal state that motivated the change, when there was one. A tidy
+    // edit made for its own reasons has none and is still recorded.
+    signal_state: str(raw, 'signal_state'),
+    note: str(raw, 'note'),
+    actor_kind: str(raw, 'actor_kind'),
+    product_uuid: str(raw, 'product_uuid'),
+    product_name: str(raw, 'product_name'),
+    channel_product_ref: str(raw, 'channel_product_ref'),
+    target_metric: str(raw, 'target_metric'),
+    verdict: str(raw, 'verdict'),
+    verdict_reason: str(raw, 'verdict_reason'),
+    evaluated_at: str(raw, 'evaluated_at'),
+    evidence: isRecord(raw) && isRecord(raw.evidence) ? raw.evidence : undefined,
+  };
+}
+
+export const listingChanges = defineTool({
+  name: 'listing_changes',
+  description:
+    'What has been changed on your listings, and whether it worked. The other ' +
+    'half of channel_performance: that says what to fix, this says whether the ' +
+    'last fix landed.\n\n' +
+    'Every shopper-visible change — title, description, images, price, search ' +
+    'terms, variants, availability — is recorded automatically when it is made, ' +
+    'along with the signal state that prompted it. Once the channel has finalised ' +
+    'enough days either side, a verdict is computed on the ONE metric that change ' +
+    'should have moved (a title is judged on click-through, not revenue).\n\n' +
+    '⛔ `unmeasurable` IS THE DEFAULT VERDICT, NOT AN ERROR, and it does not mean ' +
+    'the change had no effect. It means the data cannot support a conclusion — ' +
+    'most often because the shop is not getting enough views for any single edit ' +
+    'to register, in which case the answer is distribution and not more editing. ' +
+    'Read `verdict_reason` before saying anything about a change: no_shop_traffic, ' +
+    'window_not_final, metric_not_reported, no_baseline.\n\n' +
+    '`confounded` means two changes landed close enough together that neither owns ' +
+    'the result. Do not attribute it to whichever was most recent.\n\n' +
+    'Read-only. Verdicts settle when read, so a window that closed since you last ' +
+    'looked is already answered.',
+  inputSchema: z.object({
+    days: z.number().int().positive().max(365).optional()
+      .describe('How far back to look. Default 90.'),
+    product: z.string().optional()
+      .describe("Limit to one product uuid — that listing's change history."),
+    store: z.string().optional().describe('Limit to one store uuid.'),
+    kind: z.string().optional()
+      .describe('Limit to one kind of change, e.g. "title" or "price".'),
+    verdict: z.string().optional()
+      .describe('Limit to one verdict, e.g. "improved" or "worsened".'),
+    workspace: z.string().optional().describe('Workspace uuid to scope to.'),
+  }),
+  annotations: { readOnlyHint: true, openWorldHint: true },
+  handler: async (input, ctx) => {
+    const raw = await ctx.api.get('analytics/interventions', {
+      query: {
+        days: input.days, product: input.product, store: input.store,
+        kind: input.kind, verdict: input.verdict,
+      },
+      workspace: input.workspace,
+      signal: ctx.signal,
+    });
+    const summary = isRecord(raw) && isRecord(raw.summary) ? raw.summary : undefined;
+    return {
+      // Hoisted: how many changes could be judged AT ALL reframes every count
+      // beneath it. "3 improved of 4 judged" and "3 improved of 40 recorded,
+      // 36 unjudgeable" are very different states and the second is the common one.
+      measurable: summary ? num(summary, 'measurable') : undefined,
+      headline: summary ? str(summary, 'headline') : undefined,
+      changes: asArray(isRecord(raw) ? raw.interventions : undefined).map(mapIntervention),
+      change_count: num(raw, 'count'),
+      window_days: num(raw, 'window_days'),
+      summary,
+    };
+  },
+});
+
 export const channelTools: ToolDef[] = [
   channelPerformance,
   channelOpportunities,
   channelCoverage,
+  listingChanges,
 ];
