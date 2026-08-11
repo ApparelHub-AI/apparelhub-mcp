@@ -1069,6 +1069,15 @@ export const diagnoseTiktokListings = defineTool({
     "Passing 'title' or 'description' replaces merchant-visible copy with machine-generated text, so ask " +
     'the user first; those land on a TikTok-ONLY override and never rewrite the shared product record ' +
     '(which would also change the Shopify/WooCommerce/Wix listings). Use `dry_run` to preview. ' +
+    'IMPORTANT — TikTok often flags a title WITHOUT offering a replacement, so `apply:["title"]` returns ' +
+    'no_recommendation. That is not a dead end: each listing also carries `requirements` (the computed ' +
+    'target, e.g. 40-150 chars — TikTok\'s own length rules contradict each other and this is the ' +
+    'intersection), `building_blocks` (the product\'s real garment/colors/sizes, so you write from facts ' +
+    'rather than inventing them), and `candidates.title` (ready-to-use options, shortest first, each ' +
+    'already validated against the requirements). Offer the candidates to the user, or write your own ' +
+    'title to the requirements and set it via update_product tiktok_listing.title. ' +
+    'Check `issues[].fixable_by` before acting: `photography` means the listing needs new imagery, not ' +
+    'better writing — report it rather than trying to write around it. ' +
     'Only LIVE listings can be diagnosed — a draft or in-review listing comes back diagnosable:false. ' +
     'Tier is a US-market signal. After applying, re-run this tool LATER to see the new tier: TikTok ' +
     're-grades asynchronously, so the tier does not move the instant an edit lands.',
