@@ -58,4 +58,21 @@ describe('findUnderperformers', () => {
     const u = findUnderperformers(products, orders, signals);
     expect(u[0]?.action).toBe('optimize_listing');
   });
+
+  it('routes a listing the channel has never reported to a human, not a rewrite', () => {
+    // The channel returning NOTHING for a synced listing is not weak performance,
+    // it is the channel behaving as though the listing does not exist — nearly
+    // always a live/approval problem. Optimising the copy cannot touch that, and
+    // archiving it would delete a product on zero evidence.
+    const signals = new Map([['p2', { state: 'no_channel_data' }]]);
+    const u = findUnderperformers(products, orders, signals);
+    expect(u[0]?.action).toBe('review');
+    expect(u[0]?.rationale).toMatch(/not actually live/i);
+  });
+
+  it('never archives a listing the channel has never reported', () => {
+    const signals = new Map([['p2', { state: 'no_channel_data' }]]);
+    const u = findUnderperformers(products, orders, signals);
+    expect(u.some((x) => x.action === 'pause')).toBe(false);
+  });
 });
