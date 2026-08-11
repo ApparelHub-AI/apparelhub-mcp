@@ -225,6 +225,21 @@ export function findUnderperformers(
           'Too few people have seen this to judge the listing. It needs discovery ' +
           '(content, affiliate, ads), not a rewrite and not archiving.',
       });
+    } else if (signal.state === 'no_channel_data') {
+      // Synced from our side, but the channel has never reported a single day for
+      // it. That is not a weak listing — it is a listing the channel is behaving as
+      // though does not exist. Almost always a live/approval problem, which no
+      // amount of copy or imagery work will touch. Deliberately `review`: neither
+      // safe to archive (no evidence either way) nor sensible to send to a rewrite.
+      proposals.push({
+        ...base,
+        action: 'review',
+        rationale:
+          'Synced to the channel, but the channel has never reported any activity for ' +
+          'it — not even zero views. That usually means it is not actually live there ' +
+          '(pending review, out of stock, or delisted). Check the listing on the ' +
+          'channel before optimising anything about it.',
+      });
     }
     // winner / insufficient_data: propose nothing.
   }

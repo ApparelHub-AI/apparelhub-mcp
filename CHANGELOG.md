@@ -9,6 +9,24 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.10.2]
+
+### Fixed
+- A listing is no longer called `dead` because the *shop* has no traffic. On a shop
+  whose best listing managed 26 views in a month, 8 of 22 listings were being offered
+  as safe to archive — the measurement was of the shop, not the designs.
+- Listings the channel has never reported are no longer invisible. Products synced to
+  a channel that reports nothing back now appear as `no_channel_data` rather than being
+  silently absent from the grid, so "22 listings" stops reading as "your whole catalogue".
+
+### Added
+- `channel_performance` and `channel_opportunities` return a top-level `shop` verdict.
+  Whether the shop is being served at all reframes every per-listing state beneath it,
+  so it is hoisted out of `summary` rather than left somewhere a caller has to go find.
+- `no_channel_data` routes to human review, never to archive and never to a listing
+  rewrite: a listing the channel behaves as though does not exist is almost always a
+  live/approval problem, and no amount of copy work touches that.
+
 ## [0.10.1]
 ### Added
 - `channel_performance` rows carry `provider`, `store_name` and `store_uuid`, and

@@ -94,7 +94,12 @@ export const channelPerformance = defineTool({
     'listing card is losing them), pdp_blocked (they click but do not buy — the product ' +
     'page is losing them), starved (too few views to judge; needs discovery, NOT a ' +
     'rewrite), dead (no activity at all; the only state safe to archive), ' +
+    'no_channel_data (synced to the channel, but the channel has never reported it — ' +
+    'usually means it is not actually live; check the listing before anything else), ' +
     'insufficient_data (not enough signal, or this channel does not report it). ' +
+    'READ `summary.shop` FIRST. If it says no_channel_traffic, the whole shop is barely ' +
+    'being served and no per-listing state means anything yet — the problem is ' +
+    'distribution, and editing titles or images cannot fix a listing nobody is shown. ' +
     'Each row says which channel and store it came from — always check that before ' +
     'comparing two rows, since a channel product id is only unique within its own channel. ' +
     'ALWAYS check the coverage block before treating a missing metric as zero. Read-only.',
@@ -129,12 +134,17 @@ export const channelPerformance = defineTool({
     });
     const listings = asArray(isRecord(raw) ? raw.listings : undefined).map(mapListing);
     const limited = input.limit ? listings.slice(0, input.limit) : listings;
+    const summary = isRecord(raw) && isRecord(raw.summary) ? raw.summary : undefined;
     return {
+      // Hoisted out of `summary` deliberately: whether the shop is being served
+      // at all reframes every per-listing state below it, so it must not be
+      // something the caller has to go looking for.
+      shop: summary && isRecord(summary.shop) ? summary.shop : undefined,
       ...mapEnvelope(raw),
       channels_present: asArray(isRecord(raw) ? raw.channels_present : undefined),
       listings: limited,
       listing_count: listings.length,
-      summary: isRecord(raw) && isRecord(raw.summary) ? raw.summary : undefined,
+      summary,
     };
   },
 });
@@ -148,6 +158,10 @@ export const channelOpportunities = defineTool({
     'already there and only the listing is in the way. ' +
     'Also returns per-state counts and, separately, the listings that are genuinely inert ' +
     '(state "dead") and therefore safe to archive. Nothing else is safe to archive. ' +
+    'READ `shop` BEFORE acting on anything else here. If the shop as a whole is getting ' +
+    'almost no views, safe_to_archive will be empty and top_opportunities will be thin — ' +
+    'not because the listings are fine, but because nothing has been seen enough to judge. ' +
+    'That is a distribution problem and no listing edit will move it. ' +
     'Read-only.',
   inputSchema: z.object({ ...rangeShape,
     provider: z.string().optional().describe('Narrow to one sales channel, by name.'),
@@ -165,6 +179,9 @@ export const channelOpportunities = defineTool({
     });
     const summary = isRecord(raw) && isRecord(raw.summary) ? raw.summary : {};
     return {
+      // First key on purpose. `safe_to_archive` being empty means two opposite
+      // things depending on this: "nothing is dead" vs "nothing is measurable yet".
+      shop: isRecord(summary.shop) ? summary.shop : undefined,
       ...mapEnvelope(raw),
       channels_present: asArray(isRecord(raw) ? raw.channels_present : undefined),
       counts: isRecord(summary.counts) ? summary.counts : undefined,

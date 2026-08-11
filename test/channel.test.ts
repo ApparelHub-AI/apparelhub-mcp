@@ -275,3 +275,37 @@ describe('findUnderperformers demand-awareness', () => {
     expect(hot?.action).toBe('review');
   });
 });
+
+describe('the shop-level finding is not buried', () => {
+  // An agent reading per-listing states on a shop nobody is being served will
+  // reach confident conclusions about listings that never had a fair hearing.
+  // The shop verdict has to sit where it cannot be scrolled past, which is why
+  // it is hoisted out of `summary` rather than left nested inside it.
+  const SHOP = {
+    state: 'no_channel_traffic',
+    peak_impressions: 26,
+    summary: 'Nothing in this shop is getting enough views to judge listings.',
+    suggested_focus: 'distribution',
+  };
+
+  it('channel_performance returns the shop verdict at the top level', async () => {
+    const api = apiReturning({ ...LISTINGS_PAYLOAD, summary: { shop: SHOP } });
+    const out: any = await channelPerformance.handler({} as any, fakeContext(api));
+    expect(out.shop).toEqual(SHOP);
+  });
+
+  it('channel_opportunities returns the shop verdict at the top level', async () => {
+    const api = apiReturning({ summary: { shop: SHOP, counts: {}, archivable: [] } });
+    const out: any = await channelOpportunities.handler({} as any, fakeContext(api));
+    expect(out.shop).toEqual(SHOP);
+    // The pairing that matters: an empty archive list next to a shop with no
+    // traffic means "unmeasurable", not "nothing is dead".
+    expect(out.safe_to_archive).toEqual([]);
+  });
+
+  it('omits the shop key rather than inventing a verdict', async () => {
+    const api = apiReturning({ ...LISTINGS_PAYLOAD });
+    const out: any = await channelPerformance.handler({} as any, fakeContext(api));
+    expect(out.shop).toBeUndefined();
+  });
+});
