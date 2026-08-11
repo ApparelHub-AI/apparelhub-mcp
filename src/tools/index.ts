@@ -9,6 +9,7 @@ import { safetyTools } from './safety.js';
 import { orderTools } from './orders.js';
 import { issueTools } from './issues.js';
 import { analyticsTools } from './analytics.js';
+import { channelTools } from './channel.js';
 import { collectionTools } from './collections.js';
 import { transferTools } from './transfer.js';
 import { workspaceTools } from './workspaces.js';
@@ -35,6 +36,7 @@ export function allTools(): ToolDef[] {
     // Post-sale fulfillment-issue reporting + resolution (platform epic #510).
     ...issueTools,
     ...analyticsTools,
+    ...channelTools,
     ...collectionTools,
     ...transferTools,
     // Workspace & team management for agency accounts (create/assign/invite).

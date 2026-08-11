@@ -4,6 +4,7 @@ import { asArray, isRecord, num, str, viewUrl } from '../util/shape.js';
 import {
   deriveInsights,
   findUnderperformers,
+  type DemandSignal,
   type InsightOrder,
   type InsightProduct,
 } from '../knowledge/insights.js';
@@ -15,6 +16,46 @@ import type { ToolContext } from './context.js';
 // delete; keep listings' state; respect pricing floors) when explicitly applied.
 
 const enc = encodeURIComponent;
+
+/**
+ * Per-listing demand signal from the sales channels, keyed by product_uuid.
+ *
+ * Best-effort by design. It returns undefined — never an empty map — when the
+ * signal is unavailable for ANY reason (tier lacks advanced analytics, no
+ * connected channel reports performance, the shop needs reconnecting, the
+ * request failed). That distinction is load-bearing: an empty map would read as
+ * "checked, found no demand anywhere" and let the caller archive everything,
+ * whereas undefined means "we cannot see demand" and blocks autonomous archive.
+ */
+async function loadDemandSignals(
+  ctx: ToolContext,
+  workspace: string | undefined,
+): Promise<Map<string, DemandSignal> | undefined> {
+  try {
+    const raw = await ctx.api.get('analytics/channel/listings', {
+      workspace,
+      signal: ctx.signal,
+    });
+    const listings = asArray(isRecord(raw) ? raw.listings : undefined);
+    if (!listings.length) return undefined;
+    const map = new Map<string, DemandSignal>();
+    for (const item of listings) {
+      const uuid = str(item, 'product_uuid');
+      const state = str(item, 'state');
+      if (!uuid || !state) continue;
+      map.set(uuid, {
+        state,
+        impressions: num(item, 'impressions'),
+        units_sold: num(item, 'units_sold'),
+      });
+    }
+    return map.size ? map : undefined;
+  } catch {
+    // Deliberately swallowed to a NEGATIVE signal, not to an empty one: the
+    // caller must degrade to "cannot judge", never to "nothing has demand".
+    return undefined;
+  }
+}
 
 async function loadData(
   ctx: ToolContext,
@@ -45,14 +86,50 @@ export const analyzeWhatWorks = defineTool({
   annotations: { readOnlyHint: true, openWorldHint: true },
   handler: async (input, ctx) => {
     const { products, orders } = await loadData(ctx, input.store_uuid, input.workspace);
-    return { insights: deriveInsights(products, orders) };
+    const signals = await loadDemandSignals(ctx, input.workspace);
+    const insights = deriveInsights(products, orders);
+
+    // Own-account sales tell you what SOLD. The channel signal tells you what
+    // was SEEN — which is where the unrealised money is.
+    let demand: Record<string, unknown> | undefined;
+    if (signals) {
+      const counts: Record<string, number> = {};
+      for (const s of signals.values()) counts[s.state] = (counts[s.state] ?? 0) + 1;
+      const wasted = [...signals.entries()]
+        .filter(([, v]) => v.state === 'conversion_blocked' || v.state === 'pdp_blocked')
+        .sort((a, b) => (b[1].impressions ?? 0) - (a[1].impressions ?? 0))
+        .slice(0, 5)
+        .map(([product_uuid, v]) => ({
+          product_uuid,
+          state: v.state,
+          impressions: v.impressions,
+        }));
+      demand = { state_counts: counts, biggest_missed_opportunities: wasted };
+    }
+
+    return {
+      insights,
+      ...(demand
+        ? { channel_demand: demand }
+        : {
+            channel_demand_unavailable:
+              'No sales channel here reports listing performance, so this view shows ' +
+              'what sold but not what was seen. Use channel_coverage to check why.',
+          }),
+    };
   },
 });
 
 export const autoOptimizeListings = defineTool({
   name: 'auto_optimize_listings',
   description:
-    'Propose (and, with dry_run=false, apply) optimizations across listings. Currently flags no-sales products to pause. DEFAULTS TO DRY-RUN; applying only ever archives (never deletes, never changes a listing to live).',
+    'Propose (and, with dry_run=false, apply) optimizations across listings. Uses the ' +
+    'sales channel\'s own demand data, so a listing that people SEE but do not buy is ' +
+    'flagged for a listing fix rather than archived — that listing is proven demand with ' +
+    'broken conversion, and archiving it destroys the best opportunity in the catalogue. ' +
+    'Only a listing the channel reports as genuinely inert is ever archived. Where no ' +
+    'demand data is available the proposal is "review" and NOTHING is applied. ' +
+    'DEFAULTS TO DRY-RUN; applying only ever archives (never deletes, never goes live).',
   inputSchema: z.object({
     scope: z.enum(['underperformers', 'out_of_date', 'all']).optional(),
     dry_run: z.boolean().optional().describe('Default true — preview only.'),
@@ -62,14 +139,32 @@ export const autoOptimizeListings = defineTool({
   annotations: { openWorldHint: true },
   handler: async (input, ctx) => {
     const { products, orders } = await loadData(ctx, input.store_uuid, input.workspace);
-    const proposals = findUnderperformers(products, orders);
+    const signals = await loadDemandSignals(ctx, input.workspace);
+    const proposals = findUnderperformers(products, orders, signals);
     const dryRun = input.dry_run ?? true;
+
+    // Surfaced on every response so the caller can see WHY a run archived
+    // nothing — "no demand data" and "no dead listings" look identical otherwise.
+    const demandNote = signals
+      ? undefined
+      : 'No demand data available for these listings, so nothing was archived. ' +
+        'Archiving on sales alone would remove listings that people are seeing but ' +
+        'not buying. Use channel_coverage to see which channels report performance.';
+
     if (dryRun) {
-      return { proposed_actions: proposals, executed: false };
+      return {
+        proposed_actions: proposals,
+        executed: false,
+        ...(demandNote ? { demand_data: demandNote } : {}),
+      };
     }
     const results: Record<string, unknown>[] = [];
     for (const p of proposals) {
-      if (p.action !== 'pause') continue; // only the safe action auto-executes
+      // ONLY 'pause' auto-executes, and findUnderperformers only ever emits
+      // 'pause' for a listing the channel confirms is inert. Everything else —
+      // optimize_listing, increase_discovery, review — is returned for a human
+      // or a follow-up tool call, never applied here.
+      if (p.action !== 'pause') continue;
       try {
         await ctx.api.patch(`product/${enc(p.product_uuid)}`, {
           body: { status: 'archived' },
@@ -86,7 +181,12 @@ export const autoOptimizeListings = defineTool({
         });
       }
     }
-    return { proposed_actions: proposals, executed: true, results };
+    return {
+      proposed_actions: proposals,
+      executed: true,
+      results,
+      ...(demandNote ? { demand_data: demandNote } : {}),
+    };
   },
 });
 

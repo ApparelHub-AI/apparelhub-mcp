@@ -22,22 +22,55 @@ describe('analyze_what_works', () => {
 
 describe('auto_optimize_listings', () => {
   it('defaults to a dry-run preview', async () => {
-    const { api } = apiSequence([{ products: [{ product_uuid: 'p1', name: 'Dead Tee' }] }, { orders: [] }]);
+    // Third response is the channel-analytics lookup; empty => no demand data.
+    const { api } = apiSequence([
+      { products: [{ product_uuid: 'p1', name: 'Dead Tee' }] },
+      { orders: [] },
+      { listings: [] },
+    ]);
     const res = (await autoOptimizeListings.handler({}, fakeContext(api))) as any;
     expect(res.executed).toBe(false);
-    expect(res.proposed_actions[0].action).toBe('pause');
+    // Without demand data the proposal is `review`, never `pause` — archiving on
+    // sales alone is the bug this epic removes.
+    expect(res.proposed_actions[0].action).toBe('review');
+    expect(res.demand_data).toContain('No demand data');
   });
 
-  it('archives underperformers when applied', async () => {
+  it('archives nothing when it cannot see demand, even when applied', async () => {
     const { api, calls } = apiSequence([
       { products: [{ product_uuid: 'p1', name: 'Dead Tee' }] },
       { orders: [] },
+      { listings: [] },
+    ]);
+    const res = (await autoOptimizeListings.handler({ dry_run: false }, fakeContext(api))) as any;
+    expect(res.executed).toBe(true);
+    expect(res.results).toEqual([]);
+    expect(calls.find((c) => c.init?.method === 'PATCH')).toBeFalsy();
+  });
+
+  it('archives a listing the channel confirms is inert', async () => {
+    const { api, calls } = apiSequence([
+      { products: [{ product_uuid: 'p1', name: 'Dead Tee' }] },
+      { orders: [] },
+      { listings: [{ product_uuid: 'p1', state: 'dead', impressions: 1 }] },
       {}, // PATCH archive
     ]);
     const res = (await autoOptimizeListings.handler({ dry_run: false }, fakeContext(api))) as any;
     expect(res.executed).toBe(true);
     expect(res.results[0]).toMatchObject({ action: 'paused', status: 'ok' });
     expect(calls.find((c) => c.init?.method === 'PATCH')).toBeTruthy();
+  });
+
+  it('does NOT archive a listing people are seeing but not buying', async () => {
+    const { api, calls } = apiSequence([
+      { products: [{ product_uuid: 'p1', name: 'Popular Tee' }] },
+      { orders: [] },
+      { listings: [{ product_uuid: 'p1', state: 'conversion_blocked', impressions: 5420 }] },
+    ]);
+    const res = (await autoOptimizeListings.handler({ dry_run: false }, fakeContext(api))) as any;
+    expect(res.proposed_actions[0].action).toBe('optimize_listing');
+    expect(res.results).toEqual([]);
+    expect(calls.find((c) => c.init?.method === 'PATCH')).toBeFalsy();
   });
 });
 
