@@ -1247,7 +1247,7 @@ export const diagnoseTiktokListings = defineTool({
       });
       if (!isRecord(r)) return { products: [] };
       return {
-        integration_uuid: str(r.integration_uuid),
+        integration_uuid: str(r, 'integration_uuid'),
         products: asArray(r.products),
         unavailable: r.unavailable ?? {},
       };

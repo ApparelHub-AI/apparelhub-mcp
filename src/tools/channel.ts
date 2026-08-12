@@ -342,6 +342,33 @@ const NEVER_INVENT =
   'invented one is not. Do not infer it from the product type, do not copy it from ' +
   'another shop, and do not pick the nearest allowed value because it looks close.';
 
+// A listing-attribute value is a string, a list of strings, or — for a field
+// whose `value_type` is `object` — a structure. The structured case is real:
+// `size_chart_measurements` carries a whole size chart. Typing this as
+// string|string[] alone means Zod rejects a size chart before the request is
+// ever made, which is the same trap the platform's own validator had (it
+// stringified structured values and stored "{'unit': 'inch', ...}").
+const ATTRIBUTE_VALUE = z.union([
+  z.string(),
+  z.array(z.string()),
+  z.record(z.string(), z.unknown()),
+]);
+
+const SIZE_CHART_NOTE =
+  '📏 SIZE CHART. US apparel is graded down without one. A chart is normally ' +
+  'rendered automatically from the fulfillment provider\'s real measurements, so ' +
+  'most listings need nothing. When one IS flagged, prefer ' +
+  '`size_chart_measurements` (an object — call import_size_measurements to fill ' +
+  'it from the provider) over `size_chart_template_id`: the template id can only ' +
+  'come from a human in the channel\'s own admin, because the channel publishes ' +
+  'no way to list, verify or correct one.\n\n' +
+  '⛔ NEVER INVENT MEASUREMENTS. They are what a buyer reads before choosing a ' +
+  'size. Do not derive a table from the garment type, do not copy one from a ' +
+  'similar product, and do not fill a gap with a plausible number. A malformed ' +
+  'table is refused whole, with a reason — nothing is half-applied. A missing ' +
+  'cell is fine and renders blank; an invented one means somebody receives a ' +
+  'garment that does not fit.';
+
 /** Build the right route for the scope being addressed. */
 function routeFor(input: {
   store_uuid: string;
@@ -369,8 +396,8 @@ function routeFor(input: {
 function normalizeRead(r: unknown) {
   if (!isRecord(r)) return { supported: false, fields: [], values: {} };
   return {
-    integration_uuid: str(r.integration_uuid),
-    provider: str(r.provider),
+    integration_uuid: str(r, 'integration_uuid'),
+    provider: str(r, 'provider'),
     supported: r.supported === true,
     allows_custom_fields: r.allows_custom_fields === true,
     resolved_for: r.resolved_for ?? null,
@@ -384,8 +411,8 @@ function normalizeRead(r: unknown) {
 function normalizeWrite(r: unknown) {
   if (!isRecord(r)) return { accepted: {}, rejected: [] };
   return {
-    integration_uuid: str(r.integration_uuid),
-    provider: str(r.provider),
+    integration_uuid: str(r, 'integration_uuid'),
+    provider: str(r, 'provider'),
     accepted: r.accepted ?? {},
     rejected: asArray(r.rejected),
     unset_required: asArray(r.unset_required),
@@ -403,7 +430,12 @@ export const describeListingAttributes = defineTool({
     'set_channel_settings: the field names and their allowed values are defined by ' +
     'the channel, so guessing them gets the value dropped.\n\n' +
     'Pass `product_uuid` for one listing, or `integration_uuid` alone for the ' +
-    "shop-wide settings (compliance, brand, shipping and size-chart templates).\n\n" +
+    'shop-wide settings (compliance answers, the shipping template, and a fallback ' +
+    'size chart).\n\n' +
+    'BRAND and the per-listing SIZE CHART are per-PRODUCT, not shop-wide — both ' +
+    'describe the blank, so a shop selling two blanks needs two values, and a ' +
+    'shop-wide size chart would replace the accurate per-garment one on every ' +
+    'other listing at once. Ask for them with `product_uuid`.\n\n' +
     'Each field carries `value_type`, `cardinality` (single vs multi), `free_text` ' +
     '(whether a value outside the list is accepted) and `requirement`. Those are ' +
     'separate on purpose: most fields are enumerated AND accept free text, so ' +
@@ -425,6 +457,10 @@ export const describeListingAttributes = defineTool({
     'than setting none. Treat keyword_match as unverified and say so.\n\n' +
     'Big value lists are omitted by default and reported as `allowed_values_count`; ' +
     'pass `include_values` to expand them (one real field carries 647 values).\n\n' +
+    'A field whose `value_type` is `object` takes a STRUCTURE, not a string, and ' +
+    'publishes its shape in `channel_ref.object_schema`. Build the value from that ' +
+    'schema — `size_chart_measurements` is one, and import_size_measurements will ' +
+    'fill it for you from the fulfillment provider.\n\n' +
     'A channel with no listing attributes answers `supported: false` with an empty ' +
     '`fields` — a real answer, not an error.',
   inputSchema: z.object({
@@ -478,6 +514,8 @@ export const setListingAttributes = defineTool({
     '\n\n' +
     NEVER_INVENT +
     '\n\n' +
+    SIZE_CHART_NOTE +
+    '\n\n' +
     'Setting a value does NOT change the live listing on its own — the channel is ' +
     'updated on the next sync. Pass `sync: true` to push it immediately, or run ' +
     'sync_to_channel afterwards.',
@@ -485,10 +523,12 @@ export const setListingAttributes = defineTool({
     store_uuid: z.string().min(1),
     product_uuid: z.string().min(1),
     values: z
-      .record(z.string(), z.union([z.string(), z.array(z.string())]))
+      .record(z.string(), ATTRIBUTE_VALUE)
       .describe(
         'field key -> value. Use an array for a field whose `cardinality` is ' +
-          '"multi". Values are relayed exactly as given.',
+          '"multi", and an object for one whose `value_type` is "object" (build it ' +
+          'from that field\'s `channel_ref.object_schema`). Values are relayed ' +
+          'exactly as given.',
       ),
     remove: z
       .array(z.string())
@@ -529,11 +569,17 @@ export const setChannelSettings = defineTool({
   name: 'set_channel_settings',
   description:
     'Set SHOP-WIDE listing settings for one connected sales channel: product ' +
-    'compliance attestations, brand, shipping template, size-chart template. These ' +
-    'apply to every listing on that channel, so they are set once rather than per ' +
-    'product. Call describe_listing_attributes with `integration_uuid` (and no ' +
+    'compliance attestations, the shipping template, and a fallback size chart. ' +
+    'These apply to every listing on that channel, so they are set once rather than ' +
+    'per product. Call describe_listing_attributes with `integration_uuid` (and no ' +
     '`product_uuid`) first to see which settings this channel defines and what each ' +
     'one accepts.\n\n' +
+    '⚠️ BRAND and the per-listing SIZE CHART are NOT here — they are per-product ' +
+    '(use set_listing_attributes), because both describe the blank rather than the ' +
+    'shop. `default_size_measurements` is the one size-chart setting that is ' +
+    'shop-wide, and only as a FALLBACK for listings with no provider measurements ' +
+    'of their own. Set it only when the whole catalogue is ONE blank: with a mixed ' +
+    'catalogue it would be applied to garments it does not describe.\n\n' +
     '⛔ SOME OF THESE ARE LEGAL ATTESTATIONS. Product-compliance answers (for ' +
     'example California Proposition 65 questions) are statements the MERCHANT ' +
     'makes about their goods, and they carry legal weight. ' +
@@ -553,8 +599,11 @@ export const setChannelSettings = defineTool({
     store_uuid: z.string().min(1),
     integration_uuid: z.string().min(1),
     values: z
-      .record(z.string(), z.union([z.string(), z.array(z.string())]))
-      .describe('setting key -> value, exactly as the merchant supplied it.'),
+      .record(z.string(), ATTRIBUTE_VALUE)
+      .describe(
+        'setting key -> value, exactly as the merchant supplied it. Use an object ' +
+          'for a setting whose `value_type` is "object".',
+      ),
     remove: z
       .array(z.string())
       .optional()
@@ -575,10 +624,59 @@ export const setChannelSettings = defineTool({
   },
 });
 
+export const importSizeMeasurements = defineTool({
+  name: 'import_size_measurements',
+  description:
+    "Get the blank's real per-size measurements from its fulfillment provider, in " +
+    'the exact shape `size_chart_measurements` takes. READ-ONLY. Use this instead ' +
+    'of asking a merchant to type a size chart, and never instead of asking them ' +
+    'when it comes back unavailable.\n\n' +
+    'It imports nothing by itself — adopting a set of measurements is the ' +
+    "merchant's decision. Show them the table, let them correct it, then write it " +
+    'back with set_listing_attributes as `size_chart_measurements`.\n\n' +
+    '`available: false` is an ANSWER, not a failure. Branch on `reason`:\n' +
+    '• `provider_publishes_no_size_guide` — this provider has no size-guide API at ' +
+    'all (Printify and Gelato), so no product of theirs will ever import. ' +
+    'Permanent: ask the merchant for the blank manufacturer\'s own numbers.\n' +
+    '• `no_size_guide_for_this_blank` — the provider does publish guides, just not ' +
+    'for this item. Normal for non-apparel.\n' +
+    '• `provider_lookup_unavailable` — transient. Retry.\n' +
+    '• `product_has_no_fulfillment_provider` — nothing to import from.\n\n' +
+    '⚠️ TELL THE MERCHANT WHERE THE NUMBERS CAME FROM. `source` names the provider ' +
+    'and the catalog item. These are measurements a buyer makes a purchase ' +
+    'decision on, published in the merchant\'s name — present them as the ' +
+    "provider's figures for a specific blank, not as something you know.\n\n" +
+    '`notes`, when present, lists what was adjusted on the way through (a provider ' +
+    'sometimes files a measurement under a size outside its own size list). Pass ' +
+    'those on rather than dropping them.',
+  inputSchema: z.object({
+    store_uuid: z.string().min(1),
+    product_uuid: z.string().min(1),
+    workspace: z.string().optional(),
+  }),
+  annotations: { readOnlyHint: true, openWorldHint: true },
+  handler: async (input, ctx) => {
+    const r = await ctx.api.get(
+      `store/${enc(input.store_uuid)}/products/${enc(input.product_uuid)}/size-measurements`,
+      { workspace: input.workspace, signal: ctx.signal },
+    );
+    if (!isRecord(r)) return { available: false, measurements: null };
+    return {
+      available: r.available === true,
+      measurements: r.measurements ?? null,
+      reason: str(r, 'reason'),
+      message: str(r, 'message'),
+      source: r.source ?? {},
+      notes: asArray(r.notes),
+    };
+  },
+});
+
 export const channelTools: ToolDef[] = [
   describeListingAttributes,
   setListingAttributes,
   setChannelSettings,
+  importSizeMeasurements,
   channelPerformance,
   channelOpportunities,
   channelCoverage,
