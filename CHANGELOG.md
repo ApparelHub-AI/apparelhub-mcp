@@ -9,6 +9,46 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.13.0]
+
+### Added
+- `import_size_measurements`: the blank's real per-size measurements from its
+  fulfillment provider, in the exact shape `size_chart_measurements` takes. US
+  apparel is graded down without a size chart, and until now the only way to give
+  one to a blank whose provider publishes no measurements was a template id copied
+  out of the channel's own admin — something an agent can never discover, verify or
+  correct, because the channel publishes no way to list them.
+- `available: false` is an ANSWER with a `reason`, not a failure. It distinguishes
+  "this provider has no size-guide API at all" (permanent — gate an Import
+  affordance on `source.publishes_size_guides` rather than a hardcoded provider
+  list) from "the provider has one, just not for this blank" (specific to the
+  product) and from a transient outage.
+- `source` names the provider and catalog item every table came from. These are
+  measurements a buyer makes a purchase decision on, published in the merchant's
+  name, so the agent can attribute them rather than presenting them as its own.
+- `notes` reports anything adjusted during import instead of adjusting it silently.
+
+### Changed
+- `set_listing_attributes` and `set_channel_settings` accept an OBJECT value, for
+  fields whose `value_type` is `object`. Previously typed `string | string[]`, so a
+  size chart was rejected by the schema before a request was ever made — the
+  feature was unreachable from an agent regardless of what the platform accepted.
+- `describe_listing_attributes` no longer describes brand and the size chart as
+  shop-wide. Both are per-PRODUCT: they describe the blank, so a shop selling two
+  blanks needs two values, and a shop-wide size chart would replace the accurate
+  per-garment one on every other listing at once. Brand has been described wrongly
+  since it moved scope.
+- Structured fields publish their shape in `channel_ref.object_schema`, and the
+  tool says to build the value from it rather than guessing.
+
+### Fixed
+- `describe_listing_attributes`, `set_listing_attributes`, `set_channel_settings`
+  and `list_my_products` silently dropped `integration_uuid` and `provider` from
+  every response — the shape helper takes `(object, ...keys)` and was being passed
+  a value, so its type guard failed and it returned `undefined`. An agent could not
+  tell which channel had answered, which is ambiguous on a store with more than one
+  connected. Now covered by a test, since nothing caught it for two releases.
+
 ## [0.10.3]
 
 ### Added

@@ -5,6 +5,10 @@ import {
   channelCoverage,
   listingChanges,
   channelTools,
+  importSizeMeasurements,
+  describeListingAttributes,
+  setListingAttributes,
+  setChannelSettings,
 } from '../src/tools/channel.js';
 import { findUnderperformers, type DemandSignal } from '../src/knowledge/insights.js';
 import { ApiClient } from '../src/http/client.js';
@@ -203,6 +207,7 @@ describe('tool surface', () => {
       'channel_opportunities',
       'channel_performance',
       'describe_listing_attributes',
+      'import_size_measurements',
       'listing_changes',
       'set_channel_settings',
       'set_listing_attributes',
@@ -222,6 +227,7 @@ describe('tool surface', () => {
       'channel_opportunities',
       'channel_performance',
       'describe_listing_attributes',
+      'import_size_measurements',
       'listing_changes',
     ]);
   });
@@ -395,5 +401,146 @@ describe('listing_changes: whether the last fix worked', () => {
   it('is registered and read-only', () => {
     expect(channelTools.map((t) => t.name)).toContain('listing_changes');
     expect(listingChanges.annotations?.readOnlyHint).toBe(true);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// Size chart measurements. The provider's numbers are imported rather than
+// typed, and the value is an OBJECT — exactly what the old string-only schema
+// could not carry.
+// ---------------------------------------------------------------------------
+describe('size chart measurements', () => {
+  const TABLE = {
+    unit: 'inch',
+    sizes: ['S', 'M'],
+    columns: [{ label: 'Chest', values: { S: '18.25', M: '20.25' } }],
+  };
+
+  it('accepts a structured value on set_listing_attributes', async () => {
+    // ⛔ THE GATE. `values` used to be typed string | string[], so a size chart
+    // was rejected by the schema before a request was ever made — the feature
+    // was unreachable from an agent no matter what the platform accepted.
+    const parsed = setListingAttributes.inputSchema.safeParse({
+      store_uuid: 's-1',
+      product_uuid: 'p-1',
+      values: { size_chart_measurements: TABLE },
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  it('accepts a structured value on set_channel_settings too', () => {
+    const parsed = setChannelSettings.inputSchema.safeParse({
+      store_uuid: 's-1',
+      integration_uuid: 'i-1',
+      values: { default_size_measurements: TABLE },
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  it('still accepts the scalar and multi shapes', () => {
+    const parsed = setListingAttributes.inputSchema.safeParse({
+      store_uuid: 's-1',
+      product_uuid: 'p-1',
+      values: { material: 'Cotton', style: ['Casual', 'Streetwear'] },
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  it('imports the provider table and keeps its provenance', async () => {
+    const { api, calls } = recording({
+      available: true,
+      measurements: TABLE,
+      source: { provider: 'Printful', product_ref: '586', publishes_size_guides: true },
+    });
+    const out = (await importSizeMeasurements.handler(
+      { store_uuid: 's-1', product_uuid: 'p-1' },
+      fakeContext(api),
+    )) as Record<string, unknown>;
+
+    expect(calls[0].url).toContain('/products/p-1/size-measurements');
+    expect(out.available).toBe(true);
+    expect(out.measurements).toEqual(TABLE);
+    // Provenance travels with the numbers: they are a claim about a physical
+    // garment, published in the merchant's name.
+    expect((out.source as Record<string, unknown>).provider).toBe('Printful');
+  });
+
+  it('reports an unavailable import as an answer, with a reason', async () => {
+    const { api } = recording({
+      available: false,
+      reason: 'provider_publishes_no_size_guide',
+      message: 'That provider does not publish size guides through its API.',
+      source: { provider: 'Printify', publishes_size_guides: false },
+    });
+    const out = (await importSizeMeasurements.handler(
+      { store_uuid: 's-1', product_uuid: 'p-1' },
+      fakeContext(api),
+    )) as Record<string, unknown>;
+
+    expect(out.available).toBe(false);
+    // An agent branches on this, so it must survive normalisation.
+    expect(out.reason).toBe('provider_publishes_no_size_guide');
+    expect(out.message).toBeTruthy();
+    expect(out.measurements).toBeNull();
+  });
+
+  it('passes through what the import adjusted rather than dropping it', async () => {
+    const { api } = recording({
+      available: true,
+      measurements: TABLE,
+      source: { provider: 'Printful' },
+      notes: ['Dropped the "Height" measurement for "6", which is not a listed size.'],
+    });
+    const out = (await importSizeMeasurements.handler(
+      { store_uuid: 's-1', product_uuid: 'p-1' },
+      fakeContext(api),
+    )) as Record<string, unknown>;
+    expect((out.notes as unknown[]).length).toBe(1);
+  });
+
+  it('is marked read-only — importing must never look like a write', () => {
+    expect(importSizeMeasurements.annotations?.readOnlyHint).toBe(true);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// `str()` takes (object, ...keys). Passing it a VALUE makes its isRecord()
+// guard false and it silently returns undefined — so these fields were dropped
+// from every listing-attribute response for two releases, with nothing failing.
+// ---------------------------------------------------------------------------
+describe('normalisation keeps the fields the platform sent', () => {
+  it('describe_listing_attributes reports which channel answered', async () => {
+    const { api } = recording({
+      integration_uuid: 'i-1',
+      provider: 'TikTok Shop',
+      supported: true,
+      fields: [],
+      values: {},
+    });
+    const out = (await describeListingAttributes.handler(
+      { store_uuid: 's-1', product_uuid: 'p-1' },
+      fakeContext(api),
+    )) as Record<string, unknown>;
+    // Without this an agent cannot tell WHICH channel it just read, and a store
+    // with two connected channels becomes ambiguous.
+    expect(out.integration_uuid).toBe('i-1');
+    expect(out.provider).toBe('TikTok Shop');
+  });
+
+  it('set_listing_attributes reports which channel accepted the write', async () => {
+    const { api } = recording({
+      integration_uuid: 'i-1',
+      provider: 'TikTok Shop',
+      accepted: { material: 'Cotton' },
+      rejected: [],
+    });
+    const out = (await setListingAttributes.handler(
+      { store_uuid: 's-1', product_uuid: 'p-1', values: { material: 'Cotton' } },
+      fakeContext(api),
+    )) as Record<string, unknown>;
+    expect(out.integration_uuid).toBe('i-1');
+    expect(out.provider).toBe('TikTok Shop');
   });
 });
