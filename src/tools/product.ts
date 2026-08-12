@@ -381,6 +381,40 @@ async function associateAndSyncFulfillment(
 // (the client already retried the transient ones), so those propagate unchanged.
 const CHANNEL_SYNC_HEALABLE_STATUS = new Set([400, 404, 409, 422]);
 
+/**
+ * Read the listing state the CHANNEL ended up in from a sync response.
+ *
+ * This exists because the previous code derived `sync_status` from the caller's
+ * own `state` argument and never looked at the response at all. A channel that
+ * published a listing live despite a draft request still came back
+ * `synced_as_draft`, so an agent honouring a publish gate reported to its
+ * operator that nothing was live while the catalogue was on sale.
+ *
+ * Only channels that actually have a draft concept report a state (TikTok
+ * does; Shopify/WooCommerce/Wix do not). When none is reported we return the
+ * neutral `synced` rather than guessing: "it synced and we cannot confirm
+ * draft vs live" is true, and `synced_as_draft` would not be.
+ */
+function readAppliedListingState(r: unknown): {
+  syncStatus: 'synced_as_live' | 'synced_as_draft' | 'synced';
+  warnings: string[];
+} {
+  const warnings: string[] = [];
+  const details = isRecord(r) && isRecord(r.sync_details) ? r.sync_details : undefined;
+
+  // The platform tells us when it could not honour the requested state (the
+  // listing already existed, or the channel has no per-request draft). Pass its
+  // reason through verbatim rather than inventing one.
+  for (const w of asArray(details?.warnings)) {
+    if (typeof w === 'string') warnings.push(w);
+  }
+
+  const applied = details ? str(details, 'listing_state') : undefined;
+  if (applied === 'live') return { syncStatus: 'synced_as_live', warnings };
+  if (applied === 'draft') return { syncStatus: 'synced_as_draft', warnings };
+  return { syncStatus: 'synced', warnings };
+}
+
 const garmentSchema = z.object({
   provider_uuid: z.string().min(1),
   product_ref_id: z.string().min(1),
@@ -608,10 +642,14 @@ export const shipProduct = defineTool({
               signal: ctx.signal,
             },
           );
+          // Same fix as sync_to_channel: report the channel's state, not ours.
+          const appliedState = readAppliedListingState(r);
           channelResults.push({
             integration_uuid: ch.integration_uuid,
-            status: state === 'live' ? 'synced_as_live' : 'synced_as_draft',
+            status: appliedState.syncStatus,
+            requested_listing_state: state,
             listing_url: str(r, 'listing_url', 'external_url', 'url'),
+            ...(appliedState.warnings.length ? { warnings: appliedState.warnings } : {}),
           });
         } catch (err) {
           channelResults.push({
@@ -937,12 +975,21 @@ export const syncToChannel = defineTool({
       r = await channelSync();
     }
 
+    // Report the state the CHANNEL is in, never the state we asked for. This
+    // used to be `state === 'live' ? ... : ...` — a restatement of the request
+    // that never looked at the response, so a channel that published a
+    // "draft" listing live still returned `synced_as_draft` and the agent told
+    // its operator the publish gate had held.
+    const applied = readAppliedListingState(r);
     return {
       product_uuid: input.product_uuid,
       integration_uuid: input.integration_uuid,
-      sync_status: state === 'live' ? 'synced_as_live' : 'synced_as_draft',
+      sync_status: applied.syncStatus,
+      requested_listing_state: state,
       channel_url: str(r, 'listing_url', 'external_url', 'url'),
-      ...(warnings.length ? { warnings } : {}),
+      ...(warnings.length || applied.warnings.length
+        ? { warnings: [...warnings, ...applied.warnings] }
+        : {}),
     };
   },
 });
@@ -951,7 +998,12 @@ export const updateProduct = defineTool({
   name: 'update_product',
   description:
     'Update a product (name, description, price). For a price change that must propagate to synced channels, prefer cascade_price_change. ' +
-    'Optionally set tiktok_listing to enrich the TikTok Shop listing (SEO search terms, product highlights, brand, attributes) — applied when the product is synced to a TikTok channel; ignored by other channels.',
+    'Optionally set tiktok_listing to enrich the TikTok Shop listing (SEO search terms, product '
+    + 'highlights, brand, packaging, TikTok-only title/description, and category_id) — applied when '
+    + 'the product is synced to a TikTok channel; ignored by other channels. For channel-defined '
+    + 'ATTRIBUTES (Material, Style, Washing Instructions...) use set_listing_attributes instead: it '
+    + 'validates against the listing category\'s real schema and tells you which values the channel '
+    + 'refused, which this tool cannot.',
   inputSchema: z.object({
     product_uuid: z.string().min(1),
     changes: z.object({
@@ -969,10 +1021,23 @@ export const updateProduct = defineTool({
             .optional()
             .describe('TikTok product-page highlights. Max 5 / 1500 chars total; excess trimmed.'),
           brand_id: z.string().optional().describe('TikTok brand id (from TikTok Get Brands). Omit for no brand.'),
-          attributes: z
-            .record(z.string(), z.string())
+          category_id: z
+            .string()
+            .nullable()
             .optional()
-            .describe('Optional TikTok product attributes as {name: value}, e.g. {"Material":"Cotton"}.'),
+            .describe(
+              "Pin this product's TikTok category, overriding automatic resolution. Null clears "
+              + 'the pin. Worth setting when a listing has been auto-filed somewhere wrong (a tee '
+              + 'under Golf Clubs, a hoodie under Pet Supplies) — the category also determines '
+              + 'which attributes the listing accepts, so a wrong one silently invalidates them.',
+            ),
+          // `attributes` deliberately REMOVED here. set_listing_attributes owns
+          // channel-defined fields: it validates against the listing's actual
+          // category schema and reports which values the channel refused.
+          // Writing them through this tool skipped all of that and reported
+          // blanket success, so an agent could not tell an accepted attribute
+          // from an ignored one. Two doors to one outcome, one of which was
+          // silent — the schema now leaves only the door that tells the truth.
           weight: z
             .object({ value: z.number().positive(), unit: z.string().optional() })
             .optional()
@@ -996,9 +1061,16 @@ export const updateProduct = defineTool({
             .optional()
             .describe('TikTok-ONLY description override. Unset uses the product description. Same channel-isolation rationale as title.'),
         })
+        // STRICT on purpose. Zod strips unknown keys by default, which would
+        // silently discard `attributes` (now owned by set_listing_attributes)
+        // and hand the caller a success — the precise failure this release
+        // exists to remove. The platform rejects unknown tiktok_listing keys
+        // too (`tiktok_listing_unknown_key`), so this just fails earlier and
+        // more clearly, at the tool boundary rather than over the wire.
+        .strict()
         .nullable()
         .optional()
-        .describe('Per-product TikTok listing metadata (merge; null a key or the whole object to clear). Applied only when synced to TikTok.'),
+        .describe('Per-product TikTok listing metadata (merge; null a key or the whole object to clear). Applied only when synced to TikTok. Channel-defined ATTRIBUTES are not set here — use set_listing_attributes.'),
     }),
     workspace: z.string().optional(),
   }),
@@ -1017,10 +1089,57 @@ export const updateProduct = defineTool({
       workspace: input.workspace,
       signal: ctx.signal,
     });
+    // Renamed from `changes_applied`, which was a lie by construction: it was
+    // Object.keys(body) — the keys we SENT — so it reported success identically
+    // whether every nested field persisted, some did, or none did. The platform
+    // PATCH returns the updated product rather than a per-field report, so the
+    // honest thing this tool can say is what it asked for.
     return {
       product_uuid: input.product_uuid,
-      changes_applied: Object.keys(body),
+      changes_requested: Object.keys(body),
       product_url: viewUrl.product(input.product_uuid),
+    };
+  },
+});
+
+export const unsyncFromChannel = defineTool({
+  name: 'unsync_from_channel',
+  description:
+    'Remove a product from ONE sales channel, leaving every other channel and the fulfillment ' +
+    'provider untouched. The product stays in ApparelHub; only that channel listing goes away. ' +
+    'Use this to delist from a single channel — do NOT hand-roll it against the raw unsync ' +
+    'endpoint: that endpoint is product-level and defaults to detaching fulfillment AND cascading ' +
+    'to every channel, so getting the parameters slightly wrong unsyncs far more than you asked ' +
+    'for. To remove a product from EVERYTHING, use archive_product instead.',
+  inputSchema: z.object({
+    product_uuid: z.string().min(1),
+    store_uuid: z.string().min(1),
+    integration_uuid: z
+      .string()
+      .min(1)
+      .describe('The sales-channel integration to remove the listing from. Required: without it '
+        + 'the platform would cascade to fulfillment and every other channel.'),
+    workspace: z.string().optional(),
+  }),
+  // Destructive but narrow, and re-running it on an already-unsynced product is
+  // a no-op on the platform side.
+  annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: true },
+  handler: async (input, ctx) => {
+    const r = await ctx.api.del(
+      `store/${enc(input.store_uuid)}/products/${enc(input.product_uuid)}/sync`,
+      {
+        // target=ecommerce is what scopes this to the one channel. It is set
+        // here by construction precisely so a caller cannot omit it.
+        query: { target: 'ecommerce', integration_uuid: input.integration_uuid },
+        workspace: input.workspace,
+        signal: ctx.signal,
+      },
+    );
+    return {
+      product_uuid: input.product_uuid,
+      integration_uuid: input.integration_uuid,
+      unsynced: { fulfillment: false, channels: [input.integration_uuid] },
+      message: str(r, 'message') ?? 'Product unsynced from the sales channel.',
     };
   },
 });
@@ -1028,7 +1147,9 @@ export const updateProduct = defineTool({
 export const deleteProduct = defineTool({
   name: 'delete_product',
   description:
-    'Delete (default) or archive a product. Hard delete cascades to variants; if the product is synced to channels, unsync it first (sync_to_channel / the web UI) to avoid orphan listings.',
+    'Delete (default) or archive a product. Hard delete cascades to variants; if the product is ' +
+    'synced to channels, unsync it first to avoid orphan listings — unsync_from_channel for one ' +
+    'channel, archive_product for all of them. (sync_to_channel cannot unsync; it only syncs.)',
   inputSchema: z.object({
     product_uuid: z.string().min(1),
     archive_only: z.boolean().optional().describe('Default false (hard delete).'),
@@ -1078,7 +1199,12 @@ export const diagnoseTiktokListings = defineTool({
     'title to the requirements and set it via update_product tiktok_listing.title. ' +
     'Check `issues[].fixable_by` before acting: `photography` means the listing needs new imagery, not ' +
     'better writing — report it rather than trying to write around it. ' +
-    'Only LIVE listings can be diagnosed — a draft or in-review listing comes back diagnosable:false. ' +
+    '⚠️ `diagnosable` means "TikTok returned a diagnosis", NOT "this listing is live". TikTok also '
+    + 'answers for deactivated and deleted listings, so a catalog can come back entirely '
+    + 'diagnosable:true while a third of it is no longer for sale. Read `listing_health` for '
+    + 'liveness: "Removed" is gone, "Needs Attention" is present but not visible to buyers, and '
+    + 'null means we have never checked — which is NOT the same as healthy. Do not advise a user '
+    + 'to delist something on the strength of diagnosable alone. ' +
     'Tier is a US-market signal. After applying, re-run this tool LATER to see the new tier: TikTok ' +
     're-grades asynchronously, so the tier does not move the instant an edit lands.',
   inputSchema: z.object({
@@ -1148,6 +1274,7 @@ export const productTools: ToolDef[] = [
   syncToFulfillment,
   syncToChannel,
   updateProduct,
+  unsyncFromChannel,
   deleteProduct,
   diagnoseTiktokListings,
 ];

@@ -6,6 +6,7 @@ import {
   syncToFulfillment,
   syncToChannel,
   updateProduct,
+  unsyncFromChannel,
   deleteProduct,
 } from '../src/tools/product.js';
 import { ApiClient } from '../src/http/client.js';
@@ -121,9 +122,13 @@ describe('ship_product', () => {
       fulfillment_status: 'synced',
       variants_added: 1,
     });
+    // The fake platform response carries no sync_details, so the channel never
+    // told us a listing state. 'synced' is the honest answer; 'synced_as_draft'
+    // (the old value) was the request echoed back as if it were an outcome.
     expect(res.channel_sync_results[0]).toMatchObject({
       integration_uuid: 'i1',
-      status: 'synced_as_draft',
+      status: 'synced',
+      requested_listing_state: 'draft',
     });
 
     // Correct field names on create (Lesson 2), and correct ordering.
@@ -623,7 +628,10 @@ describe('sync_to_channel', () => {
       { product_uuid: 'p1', store_uuid: 's1', integration_uuid: 'i1' },
       fakeContext(api),
     )) as any;
-    expect(res.sync_status).toBe('synced_as_draft');
+    // A channel that reports no listing state gets the neutral 'synced'. We
+    // still record what was ASKED for, separately, so the two never blur.
+    expect(res.sync_status).toBe('synced');
+    expect(res.requested_listing_state).toBe('draft');
     expect(res.warnings).toBeUndefined(); // happy path: no heal, no warning
     expect(calls).toHaveLength(1); // no extra associate/fulfillment work when it succeeds first try
     expect(calls[0]?.url).toContain('listing_state=draft');
@@ -651,7 +659,7 @@ describe('sync_to_channel', () => {
       fakeContext(api),
     )) as any;
 
-    expect(res.sync_status).toBe('synced_as_draft');
+    expect(res.sync_status).toBe('synced');
     expect(res.channel_url).toBe('https://shop.example/z');
     expect(res.warnings?.[0]).toContain('auto-associated');
     expect(calls).toHaveLength(4);
@@ -689,7 +697,9 @@ describe('update_product', () => {
       { product_uuid: 'p1', changes: { price: 29.99 } },
       fakeContext(api),
     )) as any;
-    expect(res.changes_applied).toEqual(['price']);
+    // Renamed: this reports what was SENT. It never knew what persisted.
+    expect(res.changes_requested).toEqual(['price']);
+    expect(res.changes_applied).toBeUndefined();
     expect(calls[0]?.init?.method).toBe('PATCH');
   });
 });
@@ -710,5 +720,95 @@ describe('delete_product', () => {
     )) as any;
     expect(res.archived).toBe(true);
     expect(calls[0]?.init?.method).toBe('PATCH');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A write tool must report what HAPPENED, not what was requested.
+// ---------------------------------------------------------------------------
+describe('write-truth: sync state comes from the channel, not the request', () => {
+  it('reports LIVE when the channel published a listing we asked to keep as a draft', async () => {
+    // The original incident: state:'draft' returned synced_as_draft while every
+    // listing was Active on TikTok, so the agent reported the publish gate held
+    // for a whole session while the catalogue was on sale.
+    const { api } = apiFrom([
+      { sync_details: { provider: 'TikTok Shop', status: 'Synced', listing_state: 'live' } },
+    ]);
+    const res = (await syncToChannel.handler(
+      { product_uuid: 'p1', store_uuid: 's1', integration_uuid: 'i1', state: 'draft' },
+      fakeContext(api),
+    )) as any;
+    expect(res.sync_status).toBe('synced_as_live');
+    expect(res.requested_listing_state).toBe('draft');
+  });
+
+  it('reports DRAFT when the channel actually honoured the draft', async () => {
+    const { api } = apiFrom([
+      { sync_details: { provider: 'TikTok Shop', status: 'Synced', listing_state: 'draft' } },
+    ]);
+    const res = (await syncToChannel.handler(
+      { product_uuid: 'p1', store_uuid: 's1', integration_uuid: 'i1', state: 'draft' },
+      fakeContext(api),
+    )) as any;
+    expect(res.sync_status).toBe('synced_as_draft');
+  });
+
+  it("passes the platform's own not-applied warning through verbatim", async () => {
+    const { api } = apiFrom([
+      {
+        sync_details: {
+          listing_state: 'live',
+          warnings: ["Requested listing_state='draft' was not applied because the listing already exists on this channel; it keeps its current state."],
+        },
+      },
+    ]);
+    const res = (await syncToChannel.handler(
+      { product_uuid: 'p1', store_uuid: 's1', integration_uuid: 'i1', state: 'draft' },
+      fakeContext(api),
+    )) as any;
+    expect(res.warnings?.[0]).toContain('was not applied');
+  });
+});
+
+describe('unsync_from_channel', () => {
+  it('always scopes to one channel via target=ecommerce', async () => {
+    // The whole reason this tool exists: the raw endpoint defaults to
+    // target=merchandise, which detaches fulfillment AND cascades every
+    // channel. Setting it by construction is what makes that unreachable.
+    const { api, calls } = apiFrom([{ message: 'Product unsynced from sales channel.' }]);
+    const res = (await unsyncFromChannel.handler(
+      { product_uuid: 'p1', store_uuid: 's1', integration_uuid: 'i1' },
+      fakeContext(api),
+    )) as any;
+    expect(calls[0]?.init?.method).toBe('DELETE');
+    expect(calls[0]?.url).toContain('target=ecommerce');
+    expect(calls[0]?.url).toContain('integration_uuid=i1');
+    expect(res.unsynced).toEqual({ fulfillment: false, channels: ['i1'] });
+  });
+
+  it('cannot be called without an integration_uuid', () => {
+    const parsed = (unsyncFromChannel.inputSchema as any).safeParse({
+      product_uuid: 'p1',
+      store_uuid: 's1',
+    });
+    expect(parsed.success).toBe(false);
+  });
+});
+
+describe('update_product no longer owns listing attributes', () => {
+  it('rejects tiktok_listing.attributes so the agent uses set_listing_attributes', () => {
+    const parsed = (updateProduct.inputSchema as any).safeParse({
+      product_uuid: 'p1',
+      changes: { tiktok_listing: { attributes: { Material: 'Cotton' } } },
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it('accepts category_id, which the platform now supports', () => {
+    const parsed = (updateProduct.inputSchema as any).safeParse({
+      product_uuid: 'p1',
+      changes: { tiktok_listing: { category_id: '601226' } },
+    });
+    expect(parsed.success).toBe(true);
   });
 });
