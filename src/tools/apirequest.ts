@@ -43,46 +43,52 @@ function safeRelPath(raw: string): string {
  * what it thinks it has.
  *
  * ⛔ WHY THIS RIDES AN EXISTING TOOL RATHER THAN A NEW ONE.
- * A client whose tool list is stale does not have any tool added after its list
+ * A client whose tool list is stale does not have any tool added AFTER that list
  * was fetched — so a dedicated `check_connector_version` tool would be invisible
  * to exactly the clients that need it. It has to arrive through a tool the agent
- * ALREADY has, and `get_api_reference` is the natural one: it is old, read-only,
- * and already the thing an agent reaches for when a capability seems missing.
+ * ALREADY has, and `get_api_reference` is the natural one: long-standing,
+ * read-only, and already what an agent reaches for when a capability seems
+ * missing.
  *
- * The mechanism works because a stale client holds old tool DESCRIPTIONS while
- * the server runs current CODE — so this block reaches it in the response even
- * though its schema for this tool predates the block existing.
+ * It works because a stale client holds old tool DESCRIPTIONS while the server
+ * runs current CODE, so this block reaches it in the response even though its
+ * schema for this tool predates the block existing.
  *
- * Why the server cannot just tell the client instead: MCP announces a changed
+ * Why the server cannot just announce the change instead: MCP signals a changed
  * tool list with `notifications/tools/list_changed`, which needs an open,
  * stateful session to push over. This server is deliberately stateless
  * streamable-HTTP (that is what lets it run on a Lambda Function URL), so it has
  * no channel to announce on and a client only ever learns by asking again.
+ *
+ * ⚠️ `names` comes from the CONTEXT, injected by the registry. Importing the tool
+ * index here instead is a circular import: it survives unit tests and breaks the
+ * bundled Lambda build, which is how the first attempt at this failed.
  */
-async function connectorSelfReport(): Promise<Record<string, unknown>> {
-  // Imported lazily: `index.ts` imports THIS module, so a top-level import would
-  // be a load-order cycle. By call time the module graph is initialised.
-  const { allTools } = await import('./index.js');
-  const names = allTools().map((t) => t.name).sort();
-  return {
-    server_version: SERVER_VERSION,
-    tool_count: names.length,
-    tool_names: names,
-    self_check: (
-      'Compare `tool_names` with the tools you can actually call. Anything listed ' +
-      'here that you cannot call means YOUR tool list is stale — it was fetched ' +
-      'before this server was last updated, and the missing tool does exist.'
-    ),
-    if_stale: (
-      'Tell the user to reconnect the connector (toggle it off and on, or remove ' +
-      'and re-add it). A plain "refresh" is not always enough: some clients ' +
-      're-read their own cached registry rather than re-requesting the tool list. ' +
-      'This server is stateless and never caches — it cannot push a change ' +
-      'notification, so a client only learns by asking again. Meanwhile you can ' +
-      'reach any missing capability through api_request using the endpoint index ' +
-      'below.'
-    ),
-  };
+function connectorSelfReport(names: string[] | undefined): Record<string, unknown> {
+  const report: Record<string, unknown> = { server_version: SERVER_VERSION };
+  if (!names || names.length === 0) {
+    // Reporting `tool_count: 0` would be worse than saying nothing: an agent
+    // could read it as "the server serves fewer tools than I have".
+    report.tool_names_unavailable =
+      'This server could not enumerate its own tools on this call. Compare ' +
+      '`server_version` against the version your client connected with instead.';
+    return report;
+  }
+  report.tool_count = names.length;
+  report.tool_names = names;
+  report.self_check =
+    'Compare `tool_names` with the tools you can actually call. Anything listed ' +
+    'here that you cannot call means YOUR tool list is stale — it was fetched ' +
+    'before this server was last updated, and the missing tool does exist.';
+  report.if_stale =
+    'Tell the user to reconnect the connector (toggle it off and on, or remove ' +
+    'and re-add it). A plain "refresh" is not always enough: some clients ' +
+    're-read their own cached registry rather than re-requesting the tool list. ' +
+    'This server is stateless and never caches — it cannot push a change ' +
+    'notification, so a client only learns by asking again. Meanwhile you can ' +
+    'reach any missing capability through api_request using the endpoint index ' +
+    'below.';
+  return report;
 }
 
 export const getApiReference = defineTool({
@@ -129,7 +135,7 @@ export const getApiReference = defineTool({
       endpoints,
       // Deliberately NOT gated behind a `filter` — a stale client asking about
       // one namespace still needs to be able to discover that it is stale.
-      connector: await connectorSelfReport(),
+      connector: connectorSelfReport(ctx.toolNames),
       hint: 'Call api_request({ method, path }) to invoke any of these. Paths are relative under /agents/v1.',
     };
   },

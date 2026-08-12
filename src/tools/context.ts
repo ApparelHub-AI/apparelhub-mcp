@@ -22,4 +22,10 @@ export interface ToolContext {
   sleepImpl?: (ms: number) => Promise<void>;
   /** Injectable clock, so poll-timeout behaviour is testable. */
   nowImpl?: () => number;
+  /** Every tool name THIS server serves, injected by the registry at call time.
+   *  Lets `get_api_reference` report the real surface so a client can tell a
+   *  stale tool list from a missing feature. Injected rather than imported: the
+   *  registry already owns the list, and importing it back into a tool module
+   *  would be a cycle that survives unit tests and breaks the bundled build. */
+  toolNames?: string[];
 }
