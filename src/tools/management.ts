@@ -385,9 +385,14 @@ export const syncOrders = defineTool({
 export const estimateOrderCosts = defineTool({
   name: 'estimate_order_costs',
   description:
-    'Estimate shipping + tax + total for an order WITHOUT creating it (read-only against the ' +
-    'fulfillment provider, no order placed). Give the store, the recipient (country_code required), and ' +
-    'the variants + quantities. Use to preview costs before placing an order.',
+    'Estimate production + shipping + tax + total for an order WITHOUT creating it (read-only against ' +
+    'the fulfillment provider, no order placed). Give the store, the recipient, and the variants + ' +
+    'quantities. Use to preview landed cost before placing an order. ' +
+    'AVAILABLE FOR PRINTFUL AND GELATO ONLY: Printify offers no pre-order estimate, so a Printify-' +
+    'fulfilled store returns a refusal rather than a number — do not retry it, and do not present a ' +
+    'cross-provider landed-cost comparison that silently omits Printify. ' +
+    'Both country_code AND address1 are required; the platform rejects the request without a street ' +
+    'address. The variants must already be synced to the fulfillment provider.',
   inputSchema: z.object({
     store_uuid: z.string().min(1).describe('The store the order would be placed in.'),
     recipient: z
@@ -396,10 +401,15 @@ export const estimateOrderCosts = defineTool({
         state_code: z.string().optional().describe('State / province code, e.g. "CA".'),
         city: z.string().optional(),
         zip: z.string().optional(),
-        address1: z.string().optional().describe('Street address (optional but improves accuracy).'),
+        address1: z
+          .string()
+          .min(1)
+          .describe('Street address (REQUIRED — the platform rejects an estimate without it).'),
         name: z.string().optional(),
       })
-      .describe('Ship-to details. country_code is required; more fields improve accuracy.'),
+      .describe(
+        'Ship-to details. country_code and address1 are both required; city/state/zip improve accuracy.',
+      ),
     items: z
       .array(
         z.object({
