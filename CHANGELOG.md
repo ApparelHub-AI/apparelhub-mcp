@@ -9,7 +9,7 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
-## [0.13.1]
+## [0.13.2]
 
 ### Added
 - `get_api_reference` now returns a `connector` block reporting what THIS server
@@ -29,6 +29,18 @@ this package implements tool surface **v1**.
   session, and this server is deliberately stateless streamable-HTTP so it runs on
   a Lambda Function URL. It has no channel to announce on; a client only ever
   learns by asking again.
+
+  The tool list is injected by the registry at call time rather than imported.
+  Importing the tool index back into a tool module is a circular dependency that
+  passes every unit test and then breaks the bundled Lambda build — which is
+  exactly how the first attempt at this failed, caught by the deploy's own bundle
+  smoke check.
+
+### Note on 0.13.1
+- Published to npm but never deployed: its bundle did not load (the circular
+  import above). 0.13.2 is that change, fixed. Use 0.13.2 so the npm package and
+  the hosted server report the same version — which is the whole point of the
+  block they added.
 
 ## [0.13.0]
 

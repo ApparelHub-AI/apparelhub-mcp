@@ -99,6 +99,8 @@ export class ToolRegistry {
         suggestion: 'Check the tool inputSchema and required fields.',
       });
     }
-    return tool.handler(parsed.data, ctx);
+    // The registry is the only thing that knows the whole surface, so it is the
+    // right place to hand it to a handler that needs it.
+    return tool.handler(parsed.data, { ...ctx, toolNames: [...this.names()].sort() });
   }
 }
