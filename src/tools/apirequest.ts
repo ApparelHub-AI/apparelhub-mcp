@@ -64,7 +64,10 @@ function safeRelPath(raw: string): string {
  * index here instead is a circular import: it survives unit tests and breaks the
  * bundled Lambda build, which is how the first attempt at this failed.
  */
-function connectorSelfReport(names: string[] | undefined): Record<string, unknown> {
+function connectorSelfReport(
+  names: string[] | undefined,
+  fingerprints?: string[],
+): Record<string, unknown> {
   const report: Record<string, unknown> = { server_version: SERVER_VERSION };
   if (!names || names.length === 0) {
     // Reporting `tool_count: 0` would be worse than saying nothing: an agent
@@ -76,10 +79,22 @@ function connectorSelfReport(names: string[] | undefined): Record<string, unknow
   }
   report.tool_count = names.length;
   report.tool_names = names;
+  if (fingerprints && fingerprints.length > 0) {
+    report.tool_fingerprints = fingerprints;
+  }
   report.self_check =
-    'Compare `tool_names` with the tools you can actually call. Anything listed ' +
-    'here that you cannot call means YOUR tool list is stale — it was fetched ' +
-    'before this server was last updated, and the missing tool does exist.';
+    'Three ways your tool list can be stale. Names alone only catch the first two.\n' +
+    '1. ADDED — listed in `tool_names` but you cannot call it. It exists; your ' +
+    'list predates it.\n' +
+    '2. REMOVED — you can call it but it is NOT listed here. It is gone.\n' +
+    '3. MODIFIED — same name on both sides, but its schema or wording changed ' +
+    'under you. Compare `tool_fingerprints`: each entry is `name [#abcdef]`, and ' +
+    'the SAME marker is printed at the end of that tool\'s description in your own ' +
+    'tool list. Markers differ means your copy of THAT tool is out of date — ' +
+    're-read it before calling it, and do NOT repeat its old description back to ' +
+    'the user as fact. This is the dangerous one: nothing errors. You simply send ' +
+    'arguments its current schema rejects, or state something about the platform ' +
+    'that is no longer true.';
   report.if_stale =
     'Tell the user to reconnect the connector (toggle it off and on, or remove ' +
     'and re-add it). A plain "refresh" is not always enough: some clients ' +
@@ -135,7 +150,7 @@ export const getApiReference = defineTool({
       endpoints,
       // Deliberately NOT gated behind a `filter` — a stale client asking about
       // one namespace still needs to be able to discover that it is stale.
-      connector: connectorSelfReport(ctx.toolNames),
+      connector: connectorSelfReport(ctx.toolNames, ctx.toolFingerprints),
       hint: 'Call api_request({ method, path }) to invoke any of these. Paths are relative under /agents/v1.',
     };
   },
