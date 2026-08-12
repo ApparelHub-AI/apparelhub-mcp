@@ -28,4 +28,9 @@ export interface ToolContext {
    *  registry already owns the list, and importing it back into a tool module
    *  would be a cycle that survives unit tests and breaks the bundled build. */
   toolNames?: string[];
+  /** `name [#abcdef]` per tool, injected by the registry alongside toolNames.
+   *  The same marker is appended to each served description, so an agent can
+   *  compare by eye and notice a tool whose schema or wording changed under it
+   *  (#173) — which bare names cannot express. */
+  toolFingerprints?: string[];
 }
