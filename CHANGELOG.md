@@ -9,6 +9,27 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.13.1]
+
+### Added
+- `get_api_reference` now returns a `connector` block reporting what THIS server
+  actually serves: `server_version`, `tool_count` and every `tool_names` entry,
+  plus what to conclude and what to tell the user.
+
+  This exists because an agent had no way to tell "the tool is not built" from
+  "my tool list is stale", and reported the first when the second was true. The
+  block rides an EXISTING tool on purpose: a client whose list is stale does not
+  have any tool added after that list was fetched, so a dedicated
+  `check_connector_version` tool would be invisible to precisely the clients that
+  need it. It works because a stale client holds old tool *descriptions* while the
+  server runs current *code*, so the block arrives in the response regardless.
+
+  The server cannot simply announce the change instead: MCP signals a changed tool
+  list with `notifications/tools/list_changed`, which needs an open stateful
+  session, and this server is deliberately stateless streamable-HTTP so it runs on
+  a Lambda Function URL. It has no channel to announce on; a client only ever
+  learns by asking again.
+
 ## [0.13.0]
 
 ### Added
