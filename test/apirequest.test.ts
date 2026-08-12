@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { getApiReference, apiRequest, __test } from '../src/tools/apirequest.js';
+import { allTools } from '../src/tools/index.js';
+import { SERVER_VERSION } from '../src/version.js';
 import { ApiClient } from '../src/http/client.js';
 import { fakeContext } from './helpers/ctx.js';
 import { jsonResponse, queueFetch, noSleep } from './helpers/fakeFetch.js';
@@ -87,5 +89,52 @@ describe('api_request', () => {
     await expect(
       apiRequest.handler({ method: 'GET', path: '../../auth/login' }, fakeContext(apiReturning({}))),
     ).rejects.toThrow();
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// Connector self-report.
+//
+// A client whose tool list is stale cannot call any tool added after that list
+// was fetched — so the ONLY place this can usefully live is a tool the agent
+// already has. That is the whole design constraint, and it is what these guard.
+// ---------------------------------------------------------------------------
+describe('connector self-report', () => {
+  const spec = { info: { title: 'ApparelHub Agent API', version: '1' }, paths: {
+    '/orders': { get: { summary: 'List orders' } },
+  } };
+
+  it('reports the running version and every tool this server serves', async () => {
+    const res = (await getApiReference.handler({}, fakeContext(apiReturning(spec)))) as any;
+    expect(res.connector.server_version).toBe(SERVER_VERSION);
+    expect(res.connector.tool_count).toBe(allTools().length);
+    expect(res.connector.tool_names).toContain('import_size_measurements');
+    // Sorted, so a client can diff it against its own list without normalising.
+    expect(res.connector.tool_names).toEqual([...res.connector.tool_names].sort());
+  });
+
+  it('the count and the names cannot disagree', async () => {
+    // A count that drifts from the list would send an agent chasing a phantom.
+    const res = (await getApiReference.handler({}, fakeContext(apiReturning(spec)))) as any;
+    expect(res.connector.tool_names.length).toBe(res.connector.tool_count);
+  });
+
+  it('survives a `filter`, because a stale client asks narrow questions', async () => {
+    // The staleness signal must not be gated behind asking the right question:
+    // an agent hunting one namespace still needs to learn its list is old.
+    const res = (await getApiReference.handler(
+      { filter: 'collections' }, fakeContext(apiReturning(spec)))) as any;
+    expect(res.endpoints.length).toBe(0);
+    expect(res.connector.tool_count).toBe(allTools().length);
+  });
+
+  it('tells the agent what to conclude and what to tell the user', async () => {
+    const res = (await getApiReference.handler({}, fakeContext(apiReturning(spec)))) as any;
+    // Not decoration: without this an agent reads a missing tool as an unbuilt
+    // feature, which is exactly the wrong report to give a user.
+    expect(res.connector.self_check).toMatch(/stale/i);
+    expect(res.connector.if_stale).toMatch(/reconnect/i);
+    expect(res.connector.if_stale).toMatch(/api_request/i);
   });
 });

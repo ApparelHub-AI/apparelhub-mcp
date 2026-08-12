@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { defineTool, type ToolDef } from './registry.js';
 import { AhError } from '../errors.js';
+import { SERVER_VERSION } from '../version.js';
 import { isRecord, str } from '../util/shape.js';
 
 // -----------------------------------------------------------------------------
@@ -37,13 +38,66 @@ function safeRelPath(raw: string): string {
   return rel;
 }
 
+/**
+ * What this server actually serves right now, for a client to compare against
+ * what it thinks it has.
+ *
+ * ⛔ WHY THIS RIDES AN EXISTING TOOL RATHER THAN A NEW ONE.
+ * A client whose tool list is stale does not have any tool added after its list
+ * was fetched — so a dedicated `check_connector_version` tool would be invisible
+ * to exactly the clients that need it. It has to arrive through a tool the agent
+ * ALREADY has, and `get_api_reference` is the natural one: it is old, read-only,
+ * and already the thing an agent reaches for when a capability seems missing.
+ *
+ * The mechanism works because a stale client holds old tool DESCRIPTIONS while
+ * the server runs current CODE — so this block reaches it in the response even
+ * though its schema for this tool predates the block existing.
+ *
+ * Why the server cannot just tell the client instead: MCP announces a changed
+ * tool list with `notifications/tools/list_changed`, which needs an open,
+ * stateful session to push over. This server is deliberately stateless
+ * streamable-HTTP (that is what lets it run on a Lambda Function URL), so it has
+ * no channel to announce on and a client only ever learns by asking again.
+ */
+async function connectorSelfReport(): Promise<Record<string, unknown>> {
+  // Imported lazily: `index.ts` imports THIS module, so a top-level import would
+  // be a load-order cycle. By call time the module graph is initialised.
+  const { allTools } = await import('./index.js');
+  const names = allTools().map((t) => t.name).sort();
+  return {
+    server_version: SERVER_VERSION,
+    tool_count: names.length,
+    tool_names: names,
+    self_check: (
+      'Compare `tool_names` with the tools you can actually call. Anything listed ' +
+      'here that you cannot call means YOUR tool list is stale — it was fetched ' +
+      'before this server was last updated, and the missing tool does exist.'
+    ),
+    if_stale: (
+      'Tell the user to reconnect the connector (toggle it off and on, or remove ' +
+      'and re-add it). A plain "refresh" is not always enough: some clients ' +
+      're-read their own cached registry rather than re-requesting the tool list. ' +
+      'This server is stateless and never caches — it cannot push a change ' +
+      'notification, so a client only learns by asking again. Meanwhile you can ' +
+      'reach any missing capability through api_request using the endpoint index ' +
+      'below.'
+    ),
+  };
+}
+
 export const getApiReference = defineTool({
   name: 'get_api_reference',
   description:
     'Discover the full ApparelHub agent API: returns a compact index of every ' +
     'endpoint (path, methods, summary) from the live OpenAPI spec. Use this when ' +
     'no dedicated tool covers what you need, then call it with api_request. ' +
-    'Read-only.',
+    'Read-only.\n\n' +
+    'Also returns `connector`, which reports what THIS server actually serves: ' +
+    'its version, and the name of every tool. **If a capability seems missing, ' +
+    'check that first.** A tool listed in `connector.tool_names` that you cannot ' +
+    'call means your own tool list is stale, not that the tool is unbuilt — say ' +
+    'so and tell the user to reconnect, rather than reporting the feature as ' +
+    'missing.',
   inputSchema: z.object({
     filter: z
       .string()
@@ -73,6 +127,9 @@ export const getApiReference = defineTool({
       version: str(info, 'version'),
       total: endpoints.length,
       endpoints,
+      // Deliberately NOT gated behind a `filter` — a stale client asking about
+      // one namespace still needs to be able to discover that it is stale.
+      connector: await connectorSelfReport(),
       hint: 'Call api_request({ method, path }) to invoke any of these. Paths are relative under /agents/v1.',
     };
   },
