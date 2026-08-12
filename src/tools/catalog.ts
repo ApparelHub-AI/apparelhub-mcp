@@ -171,6 +171,14 @@ function mapVariant(raw: unknown): Record<string, unknown> {
     color_hex: str(raw, 'color_hex', 'hex', 'color_code'),
     size: str(raw, 'size'),
     cost: num(raw, 'cost', 'price'),
+    // Provenance of `cost`. Without it an agent cannot tell a live catalog price
+    // from a snapshot captured the last time this blank was built, and would
+    // compare providers as though both numbers were equally current.
+    //   live        - read from the provider catalog on this request
+    //   cached      - snapshot from a previous build; see cost_captured_at
+    //   unavailable - no cost known, `cost` is absent
+    cost_source: str(raw, 'cost_source'),
+    cost_captured_at: str(raw, 'cost_captured_at'),
   };
 }
 

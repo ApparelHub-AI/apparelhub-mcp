@@ -111,6 +111,37 @@ describe('get_garment_details', () => {
     expect(res.warnings[0]).toContain('AQUA');
   });
 
+  // apparelhub-mcp#171 / platform cost-visibility work: `cost` alone cannot tell a
+  // live catalog price from a snapshot captured the last time a blank was built.
+  // An agent comparing providers needs the provenance or it treats both as equally
+  // current. mapVariant whitelists fields, so an unmapped one is silently dropped.
+  it('surfaces cost provenance so a cached price is not mistaken for a live one', async () => {
+    const merchandise = { providers: [{ uuid: 'py-uuid', name: 'Printify' }] };
+    const detail = {
+      name: 'Cotton Tee',
+      provider_ref_id: '77',
+      variants: [
+        {
+          id: 'v1', color: 'Black', size: 'M', price: 11.36,
+          cost_source: 'cached', cost_captured_at: '2026-08-12T14:03:11',
+        },
+        { id: 'v2', color: 'White', size: 'L', cost_source: 'unavailable', cost_captured_at: null },
+      ],
+    };
+    const { api } = apiSequence([merchandise, detail]);
+    const res = (await getGarmentDetails.handler(
+      { provider: 'Printify', product_ref_id: '77' },
+      fakeContext(api),
+    )) as any;
+    expect(res.variants[0]).toMatchObject({
+      cost: 11.36,
+      cost_source: 'cached',
+      cost_captured_at: '2026-08-12T14:03:11',
+    });
+    expect(res.variants[1].cost_source).toBe('unavailable');
+    expect(res.variants[1].cost).toBeUndefined();
+  });
+
   // #111 follow-up: Gelato's top-level template_details lists placements with NO dims;
   // the real dims live on variants[].templates. print_templates must carry those dims,
   // not an empty recommended_image_size.
