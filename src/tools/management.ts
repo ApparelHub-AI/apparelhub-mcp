@@ -53,6 +53,7 @@ function mapStoreSettings(raw: unknown): Record<string, unknown> {
     hold_below_margin_pct: num(raw, 'hold_below_margin_pct'),
     hold_on_negative_margin: bool(raw, 'hold_on_negative_margin'),
     hold_first_time_customer: bool(raw, 'hold_first_time_customer'),
+    hold_channel_risk_review: bool(raw, 'hold_channel_risk_review'),
     auto_reconcile_orders: bool(raw, 'auto_reconcile_orders'),
     notify_on_new_order: bool(raw, 'notify_on_new_order'),
     notify_on_shipment: bool(raw, 'notify_on_shipment'),
@@ -127,7 +128,9 @@ export const updateStoreSettings = defineTool({
     'changed. fulfillment_mode: "auto" (auto-pilot: paid -> draft -> auto-confirm -> production), ' +
     '"confirm" (auto-draft, you confirm each order), "review" (held before submission for approval). ' +
     'The hold_* guardrails escalate an otherwise-auto/confirm order to a pre-submission review. Set ' +
-    'hold_orders_above_amount / hold_below_margin_pct to null to disable that guardrail.',
+    'hold_orders_above_amount / hold_below_margin_pct to null to disable that guardrail. ' +
+    'hold_channel_risk_review is ON by default and OVERRIDES fulfillment_mode (including "auto"): an ' +
+    'order the sales channel is reviewing is never sent to fulfillment while it may still be voided.',
   inputSchema: z.object({
     store_uuid: z.string().min(1).describe('The store uuid to update.'),
     fulfillment_mode: z
@@ -152,6 +155,14 @@ export const updateStoreSettings = defineTool({
       .describe('Auto-hold orders below this profit-margin percent. null disables the guardrail.'),
     hold_on_negative_margin: z.boolean().optional().describe('Auto-hold orders that would lose money.'),
     hold_first_time_customer: z.boolean().optional().describe('Auto-hold the first order from a new customer.'),
+    hold_channel_risk_review: z
+      .boolean()
+      .optional()
+      .describe(
+        'ON by default. Hold an order the SALES CHANNEL has flagged as under its own risk review, so ' +
+        'it is never sent to fulfillment while the channel may still void it. Unlike the other ' +
+        'guardrails this one OVERRIDES fulfillment_mode, including "auto". Turning it off restores ' +
+        'the chosen workflow for those orders.'),
     auto_reconcile_orders: z
       .boolean()
       .optional()
