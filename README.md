@@ -41,7 +41,7 @@ running on your own machine.
 ### Recommended: the hosted connector
 
 ```
-https://mcp.apparelhub.ai/mcp
+https://mcp.apparelhub.ai
 ```
 
 Add that URL to any MCP client that supports remote servers, sign in to ApparelHub, and approve.
@@ -56,7 +56,7 @@ Node, no Python, no Pillow, no tesseract.
 **Claude Code**
 
 ```bash
-claude mcp add --transport http apparelhub https://mcp.apparelhub.ai/mcp
+claude mcp add --transport http apparelhub https://mcp.apparelhub.ai
 ```
 
 Then run `/mcp` and choose **Authenticate**.
@@ -68,7 +68,7 @@ Then run `/mcp` and choose **Authenticate**.
   "mcpServers": {
     "apparelhub": {
       "type": "http",
-      "url": "https://mcp.apparelhub.ai/mcp"
+      "url": "https://mcp.apparelhub.ai"
     }
   }
 }
@@ -76,6 +76,10 @@ Then run `/mcp` and choose **Authenticate**.
 
 **claude.ai** — add it as a custom connector under Settings → Connectors, paste the same URL, then
 authorize when prompted.
+
+The bare origin above is the server's canonical address: it is the `resource` identifier its own
+OAuth metadata advertises. A path is not routed on, so an existing config pointing at
+`https://mcp.apparelhub.ai/mcp` keeps working and needs no change.
 
 #### What the handshake actually does
 
