@@ -22,6 +22,17 @@ export interface MockupParams {
 export interface MockupResult {
   job_uuid: string;
   preview_url?: string;
+  /**
+   * Present when the design behind this mockup has an opaque background and
+   * will therefore print as a coloured rectangle on a placed print
+   * (apparelhub-ai#1151). Computed server side and returned by the poll.
+   *
+   * This defect has already shipped through an unattended run: a scheduled
+   * build produced products whose printed artwork carried the green screen it
+   * was generated on, because nothing checked. Carrying it here is what lets a
+   * caller see it BEFORE the product is created.
+   */
+  design_check?: Record<string, unknown>;
 }
 
 export interface MockupDeps {
@@ -73,6 +84,9 @@ export async function runMockup(
     const status = str(s, 'status', 'processing_status') ?? 'unknown';
     const previews = asArray(isRecord(s) ? (s.previews ?? s.previews_by_job) : undefined);
     const previewUrl = firstPreviewUrl(previews);
+    // #1151 — absent when there is nothing to say, which is the common case.
+    const designCheck =
+      isRecord(s) && isRecord(s.design_check) ? (s.design_check as Record<string, unknown>) : undefined;
 
     if (status === 'failed') {
       throw new AhError({
@@ -84,12 +98,12 @@ export async function runMockup(
     // BOTH gates: status completed AND a preview_url actually populated.
     if (status === 'completed' && previewUrl) {
       await deps.progress?.report(100, 'Mockup ready.');
-      return { job_uuid: jobUuid, preview_url: previewUrl };
+      return { job_uuid: jobUuid, preview_url: previewUrl, design_check: designCheck };
     }
     if (Date.now() - start >= timeoutMs) {
       // Return the job so the caller can still create the product; display image self-heals later.
       await deps.progress?.report(100, 'Mockup still processing; proceeding.');
-      return { job_uuid: jobUuid, preview_url: previewUrl };
+      return { job_uuid: jobUuid, preview_url: previewUrl, design_check: designCheck };
     }
     poll += 1;
     await deps.progress?.report(Math.min(90, 20 + poll * 6), `Rendering mockup (poll ${poll})...`);
