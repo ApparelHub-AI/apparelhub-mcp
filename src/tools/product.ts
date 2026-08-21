@@ -36,6 +36,26 @@ interface GarmentInfo {
   name: string | undefined;
 }
 
+/**
+ * The one line an agent needs when the platform says this design will print as
+ * a rectangle (apparelhub-ai#1151).
+ *
+ * A warning rather than a refusal on purpose. An unattended run that stops dead
+ * is worse than one that ships something it flagged clearly, and someone may
+ * genuinely want a design that is a photograph. The remedy is named explicitly
+ * because "fix the background" is not actionable on its own.
+ */
+function designCheckWarning(check: Record<string, unknown>): string {
+  const message =
+    str(check, 'message') ??
+    'This design has a solid background, so it will print as a coloured rectangle on the garment.';
+  const imageUuid = str(isRecord(check.next) ? check.next : undefined, 'image_uuid');
+  const remedy = imageUuid
+    ? ` Call process_transparency (or remove_background) on design ${imageUuid} and render the mockup again.`
+    : ' Remove the background and render the mockup again.';
+  return message + remedy;
+}
+
 function mapMatrix(raw: unknown): MatrixVariant[] {
   return asArray(raw).map((v) => ({
     // Printify puts the variant id under `provider_ref_id` (a numeric string) with NO
@@ -538,6 +558,7 @@ export const shipProduct = defineTool({
     }
 
     let previewJobUuid: string | undefined;
+    let designCheck: Record<string, unknown> | undefined;   // #1151
     if (input.generate_mockup ?? true) {
       const m = await runMockup(
         ctx.api,
@@ -553,6 +574,13 @@ export const shipProduct = defineTool({
         { progress: ctx.progress, signal: ctx.signal, workspace: ws },
       );
       previewJobUuid = m.job_uuid;
+      // #1151: an opaque background on a placed print renders as a coloured
+      // rectangle on the garment. Surfaced BEFORE the product is created, and
+      // as a warning rather than a refusal, because an unattended run that
+      // stops dead is worse than one that ships something it flagged. This has
+      // already happened for real: a scheduled build shipped products with the
+      // green screen printed in, because nothing checked.
+      designCheck = m.design_check;
     }
 
     await ctx.progress.report(55, 'Creating product...');
@@ -672,7 +700,8 @@ export const shipProduct = defineTool({
       placements_covered: printData.map((t) => t.provider_ref_id),
       ...(threadColors ? { thread_colors: threadColors } : {}),
       ...(prep.background ? { fill_background: prep.background } : {}),
-      warnings,
+      ...(designCheck ? { design_check: designCheck } : {}),
+      warnings: designCheck ? [...warnings, designCheckWarning(designCheck)] : warnings,
     };
   },
 });
@@ -761,6 +790,7 @@ export const createProduct = defineTool({
       mockupVariantIds = mockupIdsCoveringColors(garment.matrix);
     }
     let previewJobUuid: string | undefined;
+    let designCheck: Record<string, unknown> | undefined;   // #1151
     let mockupStatus: 'generated' | 'skipped' = 'skipped';
     if (wantMockup && mockupVariantIds.length) {
       const m = await runMockup(
@@ -776,6 +806,7 @@ export const createProduct = defineTool({
       );
       previewJobUuid = m.job_uuid;
       mockupStatus = 'generated';
+      designCheck = m.design_check;   // #1151, same reasoning as ship_product
     } else if (wantMockup) {
       warnings.push(
         'generate_mockup was requested but no representative variant ids could be derived for this garment, so it will use the raw design as its display image. Pass mockup_variant_ids, or use ship_product (it resolves variants then generates the mockup).',
@@ -807,7 +838,8 @@ export const createProduct = defineTool({
       placements_covered: printData.map((t) => t.provider_ref_id),
       ...(threadColors ? { thread_colors: threadColors } : {}),
       ...(prep.background ? { fill_background: prep.background } : {}),
-      warnings,
+      ...(designCheck ? { design_check: designCheck } : {}),
+      warnings: designCheck ? [...warnings, designCheckWarning(designCheck)] : warnings,
     };
   },
 });
