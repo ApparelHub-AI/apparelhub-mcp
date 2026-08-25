@@ -82,6 +82,7 @@ export function createServer(config: Config, deps: ServerDeps = {}): CreatedServ
     'Tool failures return structured error codes — attribute failures by CODE, never by guesswork. ' +
     '`platform_rate_limited` means this key hit ApparelHub\'s request throttle: back off for retry_after seconds (switching models will not help). ' +
     '`model_rate_limited` means one specific model\'s provider throttled: the built-in fallback ladder already retries other models, so only back off when it too is exhausted. ' +
+    '`provider_rate_limited` means a FULFILLMENT provider (Printify, Gelato) throttled us: wait retry_after and retry the SAME request, and never ask the user for a new credential over it. ' +
     '`request_not_sent` means the call never reached ApparelHub — do not attribute it to ApparelHub at all, and if several unrelated tools fail at the same moment, suspect the calling runtime or its network first.';
 
   // Display metadata (MCP `Implementation`). Without it a client has only
