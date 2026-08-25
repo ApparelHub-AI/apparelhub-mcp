@@ -190,6 +190,32 @@ describe('mapHttpError', () => {
     expect(e.suggestion).toMatch(/back off/i);
     expect(e.suggestion).toMatch(/switching models will not help/i);
   });
+
+  // apparelhub-ai#1168: a FULFILLMENT PROVIDER throttling a credential check is a
+  // third, distinct 429. Reading it as platform_rate_limited tells the agent to
+  // back off its own key, which is not the thing being throttled.
+  it('429 provider_rate_limited is attributed to the provider, not this key', () => {
+    const e = mapHttpError(
+      429,
+      { error: 'provider_rate_limited', provider: 'Printify', retry_after: 30 },
+      undefined,
+    );
+    expect(e.code).toBe('provider_rate_limited');
+    expect(e.code).not.toBe('platform_rate_limited');
+    expect(e.source).toBe('Printify');
+    expect(e.retryAfter).toBe(30);
+    expect(e.message).toMatch(/Printify/);
+  });
+
+  it('429 provider_rate_limited never reads as a bad credential', () => {
+    // The whole point of #1168: a throttle must not send anyone to replace a
+    // token that was fine.
+    const e = mapHttpError(429, { error: 'provider_rate_limited', provider: 'Printify' }, '12');
+    expect(e.suggestion).toMatch(/not a bad token/i);
+    expect(e.suggestion).not.toMatch(/switching models/i);
+    expect(e.retryAfter).toBe(12); // falls back to the Retry-After header
+  });
+
   it('500 -> upstream_unavailable', () => {
     expect(mapHttpError(503, {}).code).toBe('upstream_unavailable');
   });

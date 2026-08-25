@@ -299,8 +299,28 @@ export function mapHttpError(
     });
   }
   if (status === 429) {
-    // Honest attribution (epic #66 phase 2): a 429 is one of TWO different things, and an agent
+    // Honest attribution (epic #66 phase 2): a 429 is one of THREE different things, and an agent
     // must be able to tell them apart.
+    if (errorCode === 'provider_rate_limited') {
+      // A FULFILLMENT PROVIDER (Printify, Gelato) throttled a credential check or
+      // catalog call (platform contract, apparelhub-ai#1168:
+      // {"error": "provider_rate_limited", "provider": "<name>", "retry_after": <seconds>}).
+      // ApparelHub accepted the request fine and this key is not throttled, so
+      // backing off the key -- the advice the platform_rate_limited branch gives --
+      // would be acting on a wrong diagnosis.
+      const provider = extractField(body, 'provider');
+      return new AhError({
+        httpStatus: status,
+        code: 'provider_rate_limited',
+        source: provider,
+        message: provider
+          ? `${provider} is rate limiting us right now.`
+          : (message ?? 'The fulfillment provider is rate limiting us right now.'),
+        retryAfter: extractNumber(body, 'retry_after') ?? parseRetryAfter(retryAfterHeader),
+        suggestion:
+          'Wait retry_after seconds and retry the SAME request. Do not ask the user for a new credential: this is the provider throttling us, not a bad token and not ApparelHub\'s request throttle.',
+      });
+    }
     if (errorCode === 'model_rate_limited') {
       // A specific MODEL's upstream provider throttled the generation (platform contract:
       // {"error": "model_rate_limited", "source": "<model name>", "retry_after": <seconds>}).
