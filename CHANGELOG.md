@@ -9,6 +9,17 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.13.8]
+
+### Changed
+- README cross-links the [recipes repo](https://github.com/ApparelHub-AI/apparelhub-recipes)
+  in the surface overview, which now reads skill / MCP server / recipes rather than
+  skill / MCP server.
+
+  The recipes repo had no inbound link from here, so the organization profile was
+  the only path to it. Docs only: no tool was added, removed, or changed, and the
+  tool surface stays at v1, so no agent needs to re-grant anything.
+
 ## [0.13.2]
 
 ### Added
