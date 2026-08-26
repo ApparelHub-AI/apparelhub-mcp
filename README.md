@@ -245,9 +245,9 @@ with `APPARELHUB_MCP_TELEMETRY=off`.
 The hosted connector additionally records one operational metric per request (outcome, latency, and
 for a tool call the tool name). It carries no per-identity dimension and no user data.
 
-## Skill vs. MCP
+## Skill vs. MCP vs. recipes
 
-ApparelHub ships the same knowledge in two forms:
+ApparelHub ships the agent surface in three forms:
 
 - The **[markdown skill](https://github.com/ApparelHub-AI/apparelhub-skills)** is the
   lowest-friction way to use ApparelHub from Claude Code — it teaches the agent the REST API and
@@ -255,9 +255,14 @@ ApparelHub ships the same knowledge in two forms:
 - This **MCP server** turns that knowledge into a typed, callable tool surface (with the
   systems-of-action tools) that works across any MCP-capable agent, and, through the hosted
   connector, in chat surfaces that cannot run a skill or a local process at all.
+- The **[recipes](https://github.com/ApparelHub-AI/apparelhub-recipes)** are end-to-end operating
+  blueprints you drop into your agent's runtime: a charter the agent follows, a memory model it
+  keeps across runs, and the prompts to start it. They drive this tool surface, with money and
+  go-live gates on by default.
 
 Use the skill for a quick start in Claude Code; use the MCP server when you want typed tools, the
-higher-order workflows, or a client other than Claude Code.
+higher-order workflows, or a client other than Claude Code; use a recipe when you want the agent
+to run a whole store pattern rather than answer one request at a time.
 
 ## Development
 
