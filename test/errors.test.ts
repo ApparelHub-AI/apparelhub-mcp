@@ -158,6 +158,37 @@ describe('mapHttpError', () => {
     expect(e.code).toBe('conflict');
     expect(e.message).toContain('sales_channel_uniqueness');
   });
+  it('409 keeps the broad conflict code so existing callers still match', () => {
+    // upload's resume path treats a 409 as benign by matching code === 'conflict'.
+    // Narrowing the code to the API's own would silently reroute that.
+    const e = mapHttpError(409, { error: 'replacement_exists', message: 'already exists' });
+    expect(e.code).toBe('conflict');
+  });
+  it('409 preserves the API error code in apiCode, under either spelling', () => {
+    // Without this the discriminator was unrecoverable: it was folded into
+    // `message` only when the body had NO message of its own.
+    const withMessage = mapHttpError(409, {
+      error_code: 'images_version_conflict',
+      message: 'stale version',
+      current_version: 9,
+    });
+    expect(withMessage.apiCode).toBe('images_version_conflict');
+    expect(withMessage.message).toBe('stale version');
+
+    const legacySpelling = mapHttpError(409, { error: 'images_version_conflict', message: 'x' });
+    expect(legacySpelling.apiCode).toBe('images_version_conflict');
+  });
+  it('409 with no code leaves apiCode unset', () => {
+    expect(mapHttpError(409, { message: 'something conflicted' }).apiCode).toBeUndefined();
+  });
+  it('apiCode is internal: it does not leak into the agent-facing error payload', () => {
+    const payload = mapHttpError(409, {
+      error_code: 'images_version_conflict',
+      message: 'stale',
+    }).toPayload();
+    expect(payload.error).not.toHaveProperty('apiCode');
+    expect(payload.error.code).toBe('conflict');
+  });
   it('422 -> unprocessable', () => {
     expect(mapHttpError(422, { error: 'edit not supported on this source' }).code).toBe(
       'unprocessable',

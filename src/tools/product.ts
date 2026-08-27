@@ -1134,6 +1134,261 @@ export const updateProduct = defineTool({
   },
 });
 
+// Listing imagery (#181). Kept OUT of update_product deliberately: images carry
+// their own validation, their own ORDERING semantics, and an optimistic-concurrency
+// token none of update_product's other fields have. Folding them in would have given
+// one tool two conflict models, and a caller changing a price would be handed an
+// images_version they never asked about.
+
+/** Where a listing image came from. The platform's `source` enum. */
+const IMAGE_SOURCE = z.enum(['mockup', 'upload', 'ai_mockup', 'print_file', 'unknown']);
+
+/** The platform's cap on stored images per product. Mirrored here so an over-long
+ *  list is refused at the tool boundary with the real number, rather than after a
+ *  round trip. The platform re-checks it — this is a courtesy, not the guard. */
+const MAX_LISTING_IMAGES = 20;
+
+/** The platform's per-URL length cap. */
+const MAX_IMAGE_URL_LENGTH = 512;
+
+/**
+ * Read a product's current listing imagery. Also the re-read after a version
+ * conflict, which is why it returns the version alongside the images.
+ */
+async function readProductImages(
+  ctx: ToolContext,
+  productUuid: string,
+  workspace: string | undefined,
+): Promise<{
+  images: unknown[];
+  images_version: number | undefined;
+  display_image: string | undefined;
+}> {
+  const r = await ctx.api.get(`product/${enc(productUuid)}`, {
+    workspace,
+    signal: ctx.signal,
+  });
+  return {
+    // `images` is the structured list; `gallery_images` is the deprecated flat
+    // URL array kept for back-compat. Prefer the structured one, fall back so a
+    // product served by an older platform build still reads sensibly.
+    images: isRecord(r) && Array.isArray(r.images) ? r.images : asArray(r, 'gallery_images'),
+    images_version: num(r, 'images_version'),
+    display_image: str(r, 'display_image'),
+  };
+}
+
+/** Normalize one image entry from a platform read into a stable agent-facing shape. */
+function mapListingImage(raw: unknown): Record<string, unknown> {
+  if (typeof raw === 'string') {
+    // The deprecated flat form: a bare URL with no provenance.
+    return { url: raw, source: 'unknown', ai_generated: null };
+  }
+  return {
+    url: str(raw, 'url'),
+    source: str(raw, 'source') ?? 'unknown',
+    // Tri-state, NOT a boolean with a default. `null` means "nobody has said",
+    // which is different from "no" — coercing it to false would assert a
+    // provenance claim the platform never made.
+    ai_generated: isRecord(raw) && typeof raw.ai_generated === 'boolean' ? raw.ai_generated : null,
+    thumbnail_url: str(raw, 'thumbnail_url'),
+    alt: str(raw, 'alt'),
+    added_at: str(raw, 'added_at'),
+    image_uuid: str(raw, 'image_uuid'),
+    preview_uuid: str(raw, 'preview_uuid'),
+  };
+}
+
+/**
+ * Is this the platform's optimistic-concurrency refusal, as opposed to any other 409?
+ *
+ * The HTTP mapper generalises every 409 to `conflict` (other callers depend on
+ * that), so the specific condition is read from `apiCode`, which preserves the
+ * API's own code. The message is checked as a fallback: a 409 whose body carries
+ * only a message would otherwise be indistinguishable, and mistaking a genuine
+ * version conflict for an unrelated one would let a stale write through.
+ */
+function isImagesVersionConflict(err: unknown): boolean {
+  if (!(err instanceof AhError) || err.httpStatus !== 409) return false;
+  return err.apiCode === 'images_version_conflict' || /images_version_conflict/i.test(err.message);
+}
+
+export const setProductImages = defineTool({
+  name: 'set_product_images',
+  description:
+    "Set an existing product's listing images: attach an uploaded photo or a generated " +
+    'lifestyle shot, reorder them, and choose the cover. Use this AFTER the product exists — ' +
+    'create_product / ship_product pick the initial mockup themselves.\n\n' +
+    '⚠️ THE LIST REPLACES, IT DOES NOT MERGE. What you send becomes the whole gallery, in the ' +
+    'order given. To add one image, READ the current list first and send it back with the new ' +
+    'entry in it — sending the new entry alone deletes every other image. Pass ' +
+    '`images: null` to reset the gallery back to the product\'s provider mockups.\n\n' +
+    '⚠️ ORDER IS FUNCTIONAL, NOT COSMETIC. Channels cap how many images a listing may carry and ' +
+    'TRUNCATE IN GALLERY ORDER, so position decides what actually ships: TikTok Shop takes 9, ' +
+    'Wix 15, Shopify and WooCommerce are unlimited. On a capped channel an image in position 10 ' +
+    'is not a lower-priority image, it is an absent one. Put the images that must survive first. ' +
+    `The platform stores at most ${MAX_LISTING_IMAGES}.\n\n` +
+    'Each entry carries provenance. `source` says where the file came from ' +
+    '(mockup / upload / ai_mockup / print_file / unknown). `ai_generated` is SEPARATE and ' +
+    'tri-state on purpose: an uploaded photo may itself have been AI-generated and the platform ' +
+    'cannot detect that, so only you can say. Set it truthfully — true, false, or leave it unset ' +
+    'when you genuinely do not know. Do not guess it from `source`.\n\n' +
+    '`cover` sets the display image independently of order, so the cover need not be first. A ' +
+    'cover that is not in the gallery is added to it. Replace the gallery without naming a cover ' +
+    'and the cover follows to the new first image.\n\n' +
+    'CONCURRENCY: this reads the product first and passes its version back with the write, so a ' +
+    'change someone else made in between is REFUSED rather than silently overwritten. On a ' +
+    'conflict the tool re-reads and returns `conflict: true` with the current images — it does ' +
+    'NOT retry, because the list you built was based on a gallery that no longer exists. Rebuild ' +
+    'from `current_images` and call again.',
+  inputSchema: z.object({
+    product_uuid: z.string().min(1).describe('The product whose listing images to set.'),
+    images: z
+      .array(
+        z.object({
+          url: z
+            .string()
+            .min(1)
+            .max(MAX_IMAGE_URL_LENGTH)
+            .describe('Publicly reachable image URL.'),
+          source: IMAGE_SOURCE.optional().describe(
+            'Where the file came from. `mockup` = a provider mockup render, `upload` = a file ' +
+              'the merchant supplied (see upload_design), `ai_mockup` = an AI-generated ' +
+              'lifestyle/staged shot, `print_file` = the raw artwork. Defaults to `unknown` ' +
+              'rather than being guessed. NOTE: a gallery of nothing but `print_file` artwork ' +
+              'is refused (no_shippable_gallery_image) — raw artwork is not a listing photo.',
+          ),
+          ai_generated: z
+            .boolean()
+            .nullable()
+            .optional()
+            .describe(
+              'Was this image produced by a generative model? Independent of `source`: an ' +
+                'uploaded photo can be AI-generated. Leave unset/null when unknown — null means ' +
+                '"not stated", which is not the same as false.',
+            ),
+        }),
+      )
+      .max(
+        MAX_LISTING_IMAGES,
+        `At most ${MAX_LISTING_IMAGES} images can be stored on a product.`,
+      )
+      .nullable()
+      .optional()
+      .describe(
+        'The COMPLETE ordered gallery, replacing whatever is there. Null resets to the ' +
+          "product's provider mockups. Omit to change only the cover.",
+      ),
+    cover: z
+      .string()
+      .min(1)
+      .max(MAX_IMAGE_URL_LENGTH)
+      .optional()
+      .describe(
+        'URL of the image to show as the listing cover. Independent of gallery order. Added to ' +
+          'the gallery if it is not already in it.',
+      ),
+    workspace: z.string().optional().describe('Workspace uuid (agency accounts).'),
+  }),
+  annotations: { openWorldHint: true },
+  handler: async (input, ctx) => {
+    if (input.images === undefined && input.cover === undefined) {
+      throw new AhError({
+        code: 'bad_request',
+        message: 'Nothing to change: provide `images`, `cover`, or both.',
+      });
+    }
+
+    // Duplicate URLs are refused by the platform (duplicate_gallery_image). Catching
+    // it here names the offending URL, which the round trip does not.
+    if (Array.isArray(input.images)) {
+      const seen = new Set<string>();
+      for (const img of input.images) {
+        if (seen.has(img.url)) {
+          throw new AhError({
+            code: 'duplicate_gallery_image',
+            message: `The same image appears twice in the gallery: ${img.url}`,
+            suggestion:
+              'Each image may appear once. Remove the duplicate entry and retry — position, ' +
+              'not repetition, is what controls prominence.',
+          });
+        }
+        seen.add(img.url);
+      }
+    }
+
+    // Read first: this is where the concurrency token comes from. It also means a
+    // caller changing only the cover does not have to have read the product.
+    const before = await readProductImages(ctx, input.product_uuid, input.workspace);
+
+    const body: Record<string, unknown> = {};
+    if (input.images !== undefined) {
+      body.gallery_images =
+        input.images === null
+          ? null
+          : input.images.map((img) => ({
+              url: img.url,
+              source: img.source ?? 'unknown',
+              // Sent as-is including null: the platform's tri-state.
+              ai_generated: img.ai_generated ?? null,
+            }));
+    }
+    if (input.cover !== undefined) body.display_image = input.cover;
+    // Only claim a version we actually read. Sending a fabricated one would turn
+    // the guard off in exactly the case it exists for.
+    if (before.images_version !== undefined) {
+      body.expected_images_version = before.images_version;
+    }
+
+    try {
+      await ctx.api.patch(`product/${enc(input.product_uuid)}`, {
+        body,
+        workspace: input.workspace,
+        signal: ctx.signal,
+      });
+    } catch (err) {
+      if (!isImagesVersionConflict(err)) throw err;
+      // Someone else changed the imagery between our read and our write. Re-read and
+      // hand back the truth rather than retrying: the list the caller built describes
+      // a gallery that no longer exists, so replaying it would discard whatever the
+      // other writer did — the exact silent clobber the version token prevents.
+      const current = await readProductImages(ctx, input.product_uuid, input.workspace);
+      return {
+        product_uuid: input.product_uuid,
+        conflict: true,
+        applied: false,
+        expected_images_version: before.images_version,
+        current_images_version: current.images_version,
+        current_images: current.images.map(mapListingImage),
+        current_cover: current.display_image,
+        message:
+          'The listing images changed since they were read, so nothing was written. This is ' +
+          'not a transient failure — retrying the same list would overwrite that change.',
+        suggestion:
+          'Rebuild the gallery from `current_images` (re-applying your intended edit on top of ' +
+          'it), then call set_product_images again. If the change was made by a person, say what ' +
+          'changed before overwriting it.',
+        product_url: viewUrl.product(input.product_uuid),
+      };
+    }
+
+    // Re-read rather than echoing the request. The platform reorders nothing, but it
+    // DOES auto-insert a cover that was not in the gallery and moves the cover when the
+    // gallery is replaced, so what was sent is not reliably what is now stored.
+    const after = await readProductImages(ctx, input.product_uuid, input.workspace);
+    return {
+      product_uuid: input.product_uuid,
+      conflict: false,
+      applied: true,
+      images: after.images.map(mapListingImage),
+      images_version: after.images_version,
+      cover: after.display_image,
+      image_count: after.images.length,
+      product_url: viewUrl.product(input.product_uuid),
+    };
+  },
+});
+
 export const unsyncFromChannel = defineTool({
   name: 'unsync_from_channel',
   description:
@@ -1306,6 +1561,7 @@ export const productTools: ToolDef[] = [
   syncToFulfillment,
   syncToChannel,
   updateProduct,
+  setProductImages,
   unsyncFromChannel,
   deleteProduct,
   diagnoseTiktokListings,
