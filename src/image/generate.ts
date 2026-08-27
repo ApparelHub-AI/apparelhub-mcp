@@ -16,11 +16,24 @@ import type { ProgressReporter } from '../progress.js';
 // ApiClient already retries transient 5xx/429, so the poll loop here stays simple.
 
 export interface GenerateOptions {
-  prompt: string;
+  /** Optional ONLY for a listing-image request, where the style preset supplies the prompt. */
+  prompt?: string;
   source: string;
   size?: string;
   sourceImageUuid?: string;
+  /** Listing photography: edit THIS product's own rendered mockup (#183). */
+  sourceProductUuid?: string;
+  /** Listing-photo preset (on_model | detail | flat_lay | lifestyle). Composes the prompt. */
+  listingStyle?: string;
+  /** Which of the product's existing listing images to edit. Defaults to its best mockup. */
+  sourceImageUrl?: string;
   workspace?: string;
+}
+
+/** Does this request edit an existing image? Both an explicit source image and a listing-photo
+ *  request do — and an edit can only ever fall back to an edit-capable model. */
+export function isEditRequest(opts: GenerateOptions): boolean {
+  return Boolean(opts.sourceImageUuid || opts.sourceProductUuid);
 }
 
 export interface GeneratedImage {
@@ -65,11 +78,17 @@ export async function runGeneration(
   deps: GenerateDeps = {},
 ): Promise<GeneratedImage> {
   const body: Record<string, unknown> = {
-    prompt: opts.prompt,
     source: opts.source,
     size: opts.size ?? '1024x1024',
   };
+  // Omitted entirely rather than sent empty for a preset-only listing request: the platform folds
+  // any prompt in as EXTRA GUIDANCE ahead of its fidelity clause, so a placeholder would land
+  // inside the merchant's real generation prompt rather than being ignored.
+  if (opts.prompt) body.prompt = opts.prompt;
   if (opts.sourceImageUuid) body.source_image_uuid = opts.sourceImageUuid;
+  if (opts.sourceProductUuid) body.source_product_uuid = opts.sourceProductUuid;
+  if (opts.listingStyle) body.style = opts.listingStyle;
+  if (opts.sourceImageUrl) body.source_image_url = opts.sourceImageUrl;
 
   await deps.progress?.report(10, `Generating with ${opts.source}...`);
   const res = await api.post('images/generate', {
@@ -157,7 +176,7 @@ export async function runGenerationWithFallback(
           sweepExtended = true;
           // An edit can only fall back to an edit-capable model; a text-to-image-only model would
           // spend a rung on a guaranteed rejection.
-          queue.push(...contentBlockSweep({ edit: Boolean(opts.sourceImageUuid), exclude: queue }));
+          queue.push(...contentBlockSweep({ edit: isEditRequest(opts), exclude: queue }));
         }
         trail.push({ source, reason, ...(code ? { code } : {}) });
         const remaining = queue.length - i - 1;

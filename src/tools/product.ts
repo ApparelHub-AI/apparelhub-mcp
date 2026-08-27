@@ -11,6 +11,8 @@ import {
 } from '../knowledge/embroidery.js';
 import { resolveVariants, type MatrixVariant, type VariantId } from '../knowledge/variants.js';
 import { runMockup } from '../image/mockup.js';
+import { runGenerationWithFallback } from '../image/generate.js';
+import { fallbackLadder } from '../knowledge/sources.js';
 import { resolveImageUrl } from './design.js';
 import type { ToolContext } from './context.js';
 
@@ -1554,6 +1556,167 @@ export const diagnoseTiktokListings = defineTool({
   },
 });
 
+// ---------------------------------------------------------------------------
+// Listing photography (#183)
+// ---------------------------------------------------------------------------
+
+const LISTING_IMAGE_STYLE = z.enum(['on_model', 'detail', 'flat_lay', 'lifestyle']);
+
+/** The platform refuses when a product has no mockup to edit. That is the refusal an agent is
+ *  most likely to hit and it is ACTIONABLE (render a mockup first), so it gets its own code
+ *  instead of surfacing as a generic validation failure. */
+function isNoMockupRefusal(err: unknown): boolean {
+  return err instanceof AhError && /no mockup/i.test(err.message);
+}
+
+export const generateListingImage = defineTool({
+  name: 'generate_listing_image',
+  description:
+    'Generate listing photography for an existing product — an on-model shot, a detail crop, a ' +
+    'flat lay, or the product in a real setting.\n\n' +
+    "HOW IT WORKS: this EDITS the product's own rendered mockup. It is not text-to-image, and " +
+    'that is the point — the photo shows the actual colourway and the actual printed design, so ' +
+    'it depicts the product a shopper will receive.\n\n' +
+    '⚠️ A PRODUCT WITH NO MOCKUP IS REFUSED, not silently generated from scratch. A from-scratch ' +
+    'product photo invents a product that does not exist and publishes it as photography of one ' +
+    'that does — a listing-takedown and chargeback risk, not merely a quality problem. On ' +
+    '`product_has_no_mockup`, render a mockup preview first (ship_product / create_product do ' +
+    'this) and call again. Raw print artwork does not count as a mockup.\n\n' +
+    '`guidance` is EXTRA wording folded in on top of the chosen preset — it does NOT replace it, ' +
+    'and it cannot override the constraint that keeps the garment, colour and artwork unchanged. ' +
+    'Use it for setting or mood ("outdoors at golden hour"), not to restate the product.\n\n' +
+    "COST: this spends an image generation from the account's quota, like any other. Four styles " +
+    'across thirty products is 120 generations — more than some plans allow in total. Check the ' +
+    'plan before looping over a catalogue.\n\n' +
+    'By default the image is generated and RETURNED, not attached: putting a machine-made photo ' +
+    'on a live storefront is a separate decision from making one. Pass `attach: true` to append ' +
+    'it to the gallery — appended, so existing images are kept, unlike set_product_images which ' +
+    'replaces the whole gallery.',
+  inputSchema: z.object({
+    product_uuid: z
+      .string()
+      .min(1)
+      .describe('The product to photograph. Its existing mockup is what gets edited.'),
+    style: LISTING_IMAGE_STYLE.describe(
+      'Which preset to use. `on_model` = worn by a person; `detail` = close crop showing fabric ' +
+        'and print texture; `flat_lay` = styled flat, shot from above; `lifestyle` = the product ' +
+        'in a real setting. The preset supplies the prompt.',
+    ),
+    guidance: z
+      .string()
+      .max(500)
+      .optional()
+      .describe(
+        'Optional extra direction layered on top of the preset (setting, mood, lighting). ' +
+          'Truncated at 500 characters by the platform.',
+      ),
+    source_image_url: z
+      .string()
+      .min(1)
+      .max(MAX_IMAGE_URL_LENGTH)
+      .optional()
+      .describe(
+        "Which of the product's existing listing images to edit. Must be one of them and must " +
+          "not be raw print artwork. Defaults to the product's best mockup — usually leave unset.",
+      ),
+    attach: z
+      .boolean()
+      .optional()
+      .describe(
+        "Append the result to the product's listing gallery (default false). Existing images are " +
+          'kept. Leave false to review the image before it reaches a storefront.',
+      ),
+    set_as_cover: z
+      .boolean()
+      .optional()
+      .describe('When attaching, also make it the listing cover. Ignored unless `attach` is true.'),
+    workspace: z.string().optional().describe('Workspace uuid (agency accounts).'),
+  }),
+  annotations: { openWorldHint: true },
+  handler: async (input, ctx) => {
+    // An edit can only fall back to an edit-capable model; a text-to-image-only model would spend
+    // a rung on a guaranteed rejection.
+    const sources = fallbackLadder({ edit: true });
+    const started = Date.now();
+
+    let generated;
+    try {
+      generated = await runGenerationWithFallback(
+        ctx.api,
+        {
+          source: sources[0]!,
+          sources,
+          sourceProductUuid: input.product_uuid,
+          listingStyle: input.style,
+          // Omitted when absent so the preset stands alone: the platform folds any prompt into
+          // the merchant's real prompt as extra guidance, so filler would not be ignored.
+          ...(input.guidance ? { prompt: input.guidance } : {}),
+          ...(input.source_image_url ? { sourceImageUrl: input.source_image_url } : {}),
+          workspace: input.workspace,
+        },
+        { progress: ctx.progress, signal: ctx.signal },
+      );
+    } catch (err) {
+      if (isNoMockupRefusal(err)) {
+        throw new AhError({
+          code: 'product_has_no_mockup',
+          message:
+            'This product has no mockup to photograph, so listing imagery was refused rather ' +
+            'than invented from scratch.',
+          suggestion:
+            'Render a mockup preview for the product first, then call generate_listing_image ' +
+            'again. Raw print artwork does not count as a mockup.',
+          httpStatus: 400,
+        });
+      }
+      throw err;
+    }
+
+    const result: Record<string, unknown> = {
+      product_uuid: input.product_uuid,
+      style: input.style,
+      image_uuid: generated.image_uuid,
+      image_url: generated.image_url,
+      source_used: generated.source_used,
+      fallback_trail: generated.fallback_trail,
+      generation_latency_ms: Date.now() - started,
+      metered: 'image_generation',
+      attached: false,
+    };
+
+    if (!input.attach) {
+      result.next_step =
+        'Review the image, then attach it with attach: true (or set_product_images for full ' +
+        'control over gallery order).';
+      return result;
+    }
+
+    const r = await ctx.api.post(`product/${enc(input.product_uuid)}/listing-images`, {
+      body: {
+        url: generated.image_url,
+        source: 'ai_mockup',
+        // The one path where the client genuinely knows: it just generated this image.
+        ai_generated: true,
+        image_uuid: generated.image_uuid,
+        ...(input.set_as_cover ? { set_as_cover: true } : {}),
+      },
+      workspace: input.workspace,
+      signal: ctx.signal,
+    });
+
+    result.attached = true;
+    if (isRecord(r)) {
+      const images = asArray(r, 'images');
+      result.images = images.map(mapListingImage);
+      result.images_version = num(r, 'images_version');
+      result.cover = str(r, 'display_image');
+      result.image_count = images.length;
+    }
+    result.product_url = viewUrl.product(input.product_uuid);
+    return result;
+  },
+});
+
 export const productTools: ToolDef[] = [
   shipProduct,
   createProduct,
@@ -1562,6 +1725,7 @@ export const productTools: ToolDef[] = [
   syncToChannel,
   updateProduct,
   setProductImages,
+  generateListingImage,
   unsyncFromChannel,
   deleteProduct,
   diagnoseTiktokListings,
