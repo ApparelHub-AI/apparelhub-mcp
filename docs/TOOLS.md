@@ -39,6 +39,7 @@ the human-readable summary. Read tools are read-only; mutating tools default to 
 |---|---|
 | `ship_product` | **Atomic.** Design → mockup → create → variants → associate → sync (fulfillment then channels, draft). Enforces pricing floors + variant guards. Streams progress. |
 | `update_product` | Update name/description/price. |
+| `set_product_images` | Set an existing listing's images: attach, reorder, choose the cover. The list REPLACES the gallery, and order decides what survives a channel's image cap. Version-checked, so a concurrent change is refused rather than overwritten. |
 | `delete_product` | Hard delete (default) or archive. |
 | `create_product` | *(split)* Create the product shell with correct field names + pricing floor. |
 | `add_variants` | *(split)* Resolve + add variants; warns on the AQUA-vs-Navy trap. |

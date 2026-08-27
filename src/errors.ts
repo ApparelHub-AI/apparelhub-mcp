@@ -20,6 +20,13 @@ export interface AhErrorInit {
   httpStatus?: number;
   /** For model_rate_limited: the model name whose provider is throttling. */
   source?: string;
+  /**
+   * The API's own error code, when the broad `code` above deliberately generalises
+   * it (e.g. every 409 maps to `conflict`). Lets a tool branch on the specific
+   * condition without narrowing the broad code that other callers already match.
+   * INTERNAL: not part of the agent-facing error payload.
+   */
+  apiCode?: string;
 }
 
 export class AhError extends Error {
@@ -28,6 +35,8 @@ export class AhError extends Error {
   readonly suggestion?: string;
   readonly httpStatus?: number;
   readonly source?: string;
+  /** The API's specific error code when `code` is a deliberate generalisation. */
+  readonly apiCode?: string;
 
   constructor(init: AhErrorInit) {
     super(init.message);
@@ -37,6 +46,7 @@ export class AhError extends Error {
     this.suggestion = init.suggestion;
     this.httpStatus = init.httpStatus;
     this.source = init.source;
+    this.apiCode = init.apiCode;
   }
 
   toPayload(): { error: ToolErrorShape } {
@@ -284,10 +294,25 @@ export function mapHttpError(
     });
   }
   if (status === 409) {
+    // Preserve the API's own conflict code when it gave one. Collapsing every 409
+    // to `conflict` threw away the only thing a caller could branch on, and the
+    // code was doubly unrecoverable: it was folded into `message` ONLY when the
+    // body had no message of its own, so the discriminator vanished precisely in
+    // the well-formed case. An optimistic-concurrency refusal and "this design is
+    // still in use" are different conditions with different remedies.
+    //
+    // `error_code` is read as well as `error` because the API is not uniform: the
+    // structured 400s use `error`, while newer endpoints report `error_code`.
+    // Matching only one spelling makes the branch silently stop working.
+    const conflictCode = errorCode ?? extractField(body, 'error_code');
     return new AhError({
       httpStatus: status,
+      // The broad code is UNCHANGED on purpose. Callers already branch on
+      // `conflict` (a resumed upload treats it as benign), so narrowing it here
+      // would silently reroute existing behaviour.
       code: 'conflict',
-      message: message ?? errorCode ?? 'The request conflicts with the current state.',
+      message: message ?? conflictCode ?? 'The request conflicts with the current state.',
+      apiCode: conflictCode,
       suggestion: 'Inspect the conflict and surface it to the user; do not force past it.',
     });
   }

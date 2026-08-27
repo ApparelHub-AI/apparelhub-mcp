@@ -9,6 +9,52 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.14.0]
+
+### Added
+- `set_product_images` — set an existing product's listing images: attach an uploaded
+  photo or a generated lifestyle shot, reorder them, and choose the cover.
+
+  An agent could generate a design, upload artwork, create a product and sync it to a
+  channel, but could not change the listing imagery afterwards. `update_product` builds
+  its changeset from name/description/price/tiktok_listing only, so the capability
+  existed at the HTTP layer and was simply not reachable.
+
+  A separate tool rather than more fields on `update_product`. Images carry their own
+  validation, their own ORDERING semantics, and an optimistic-concurrency token that
+  none of `update_product`'s other fields have — folding them in would have given one
+  tool two conflict models, and a caller changing a price would be handed an
+  `images_version` they never asked about.
+
+  The list REPLACES the gallery rather than merging into it, which the description
+  says twice because the failure is silent and destructive: sending one new image
+  deletes every other one. Ordering is described as functional, not cosmetic, because
+  channels cap listing images and truncate in gallery order (TikTok Shop 9, Wix 15,
+  Shopify and WooCommerce unlimited) — on a capped channel, position 10 is not a
+  lower-priority image, it is an absent one.
+
+  `ai_generated` is tri-state and independent of `source` on purpose. An uploaded photo
+  may itself be AI-generated and the platform cannot detect that, so `null` means "not
+  stated" and is preserved as such rather than coerced to `false`, which would assert a
+  provenance claim nobody made.
+
+  On a version conflict the tool re-reads and returns the current gallery with
+  `applied: false`; it deliberately does NOT retry. The list the caller built describes
+  a gallery that no longer exists, so replaying it would discard whatever the other
+  writer did — the exact silent clobber the version token exists to prevent.
+
+### Fixed
+- A 409's own error code is no longer discarded. `mapHttpError` folded it into the
+  message ONLY when the body had no message of its own, so the discriminator vanished
+  precisely in the well-formed case and every conflict became indistinguishable.
+
+  The API's code is now preserved on `AhError.apiCode`. The broad `code` stays
+  `conflict` deliberately: callers already branch on it (a resumed upload treats a 409
+  as benign), so narrowing it would have silently rerouted existing behaviour. Both
+  `error` and `error_code` body spellings are read, since the API is not uniform
+  between them. `apiCode` is internal and does not appear in the agent-facing error
+  payload, so the wire contract is unchanged.
+
 ## [0.13.8]
 
 ### Changed
