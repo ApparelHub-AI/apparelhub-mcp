@@ -19,7 +19,8 @@ surface.
 
 A thin wrapper around a REST API just renames HTTP calls. These tools are at the **workflow
 level**: one `ship_product` call resolves variants, generates and waits for a mockup (through the
-two-phase completion gate), creates the product with the right field names, adds every variant,
+waiting until its images are actually published), creates the product with the right field names,
+adds every variant,
 associates it with a store, and syncs to fulfillment and channels in the correct order, refusing a
 negative-margin price and warning on known variant traps along the way. The scar tissue lives in
 the code, not in your agent's context.

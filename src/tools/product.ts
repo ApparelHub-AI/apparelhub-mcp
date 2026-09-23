@@ -20,7 +20,7 @@ import type { ToolContext } from './context.js';
 // scar-tissue baked in:
 //   - Lesson 2: the create endpoint uses provider_uuid / product_ref_id / price / print_data,
 //     which DIFFER from the mockup endpoint's field names (image/mockup.ts handles that side).
-//   - Lesson 53: two-phase mockup poll (in runMockup).
+//   - Mockup poll waits for a published preview_url, not just status=completed (in runMockup).
 //   - Variants BEFORE sync; fulfillment sync BEFORE ecommerce sync; DRAFT (never live) default.
 //   - Pricing floors: refuse to create at a negative-margin price.
 //   - Lesson 7: AQUA-vs-Navy variant guard (in resolveVariants).

@@ -3,10 +3,20 @@ import { AhError } from '../errors.js';
 import { asArray, isRecord, str } from '../util/shape.js';
 import type { ProgressReporter } from '../progress.js';
 
-// Mockup generation with the TWO-PHASE completion gate (Lesson 53): a job reaches
-// status="completed" as soon as the provider finishes rendering, but the preview_url is only
-// populated once we've mirrored the image to our S3 — which can lag. Poll the SAME job until a
-// preview_url actually appears, not just until status=completed.
+// Mockup generation. status="completed" now means the mockups are PUBLISHED, not merely
+// rendered: publishing moved onto a background worker, and the platform only reports completed
+// once each preview that landed carries a preview_url. So the two conditions this loop waits on
+// normally arrive together.
+//
+// The preview_url check is kept anyway, deliberately. It costs nothing when both land at once,
+// and returning a job whose previews have no usable URL is the failure it exists to prevent —
+// worth guarding against a half-published job from an older run, or a provider path that has
+// not been migrated. Removing it buys nothing and risks exactly the broken product cards that
+// put it here.
+//
+// Historical (Lesson 53): publishing used to happen ON the poll, so preview_url could lag
+// completed by 20+ minutes because nothing advanced until somebody polled again. That gap is
+// gone, and a job now finishes even if the caller stops polling.
 //
 // Field names matter here (Lesson 2): the preview endpoint uses merchandise_provider_uuid +
 // provider_product_ref_id + `templates`, which differ from the product-create endpoint.
@@ -60,7 +70,9 @@ export async function runMockup(
   deps: MockupDeps = {},
 ): Promise<MockupResult> {
   const sleep = deps.sleep ?? defaultSleep;
-  const timeoutMs = deps.timeoutMs ?? 30 * 60 * 1000; // Lesson 53: the second phase can lag 20+ min.
+  // A generous CAP, not an expectation: jobs normally finish in well under a minute now.
+  // Left wide because exceeding it does not fail the run, it proceeds without the preview.
+  const timeoutMs = deps.timeoutMs ?? 30 * 60 * 1000;
   const intervalMs = deps.intervalMs ?? 8000;
 
   await deps.progress?.report(10, 'Starting mockup...');
@@ -95,7 +107,8 @@ export async function runMockup(
         suggestion: 'Retry, or verify the design + garment.',
       });
     }
-    // BOTH gates: status completed AND a preview_url actually populated.
+    // Completed AND a usable URL. These normally arrive together now; the second
+    // check is the safety net described at the top of this file, not a wait.
     if (status === 'completed' && previewUrl) {
       await deps.progress?.report(100, 'Mockup ready.');
       return { job_uuid: jobUuid, preview_url: previewUrl, design_check: designCheck };
