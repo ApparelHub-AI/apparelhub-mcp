@@ -41,6 +41,10 @@ jobs:
           if [ -z "${NODE_AUTH_TOKEN}" ]; then
             echo "::warning title=npm publish stubbed::NPM_TOKEN secret is not set. Running 'npm publish --dry-run' only. Add the NPM_TOKEN repo secret to enable real publishing."
             npm publish --dry-run --access public
+          elif npm view "$(node -p "require('./package.json').name")@$(node -p "require('./package.json').version")" version >/dev/null 2>&1; then
+            # Already on npm (a re-run after a later step failed). npm refuses to publish over
+            # an existing version, so skip instead of failing the whole job.
+            echo "Version already published to npm; skipping."
           else
             npm publish --provenance --access public
           fi
@@ -51,6 +55,15 @@ jobs:
       - name: Publish to the MCP registry
         if: env.HAS_NPM_TOKEN == 'true'
         run: |
+          # The registry validates against npm, and a fresh npm publish takes a short while to
+          # become visible. v0.15.2's first run failed with "version not found" for exactly this
+          # reason, so wait (up to 5 minutes) until npm serves the version before publishing.
+          PKG="$(node -p "require('./package.json').name")@$(node -p "require('./package.json').version")"
+          for i in $(seq 1 30); do
+            npm view "$PKG" version >/dev/null 2>&1 && break
+            echo "Waiting for $PKG to appear on npm ($i/30)..."; sleep 10
+          done
+          npm view "$PKG" version >/dev/null 2>&1 || { echo "::error::$PKG never appeared on npm"; exit 1; }
           curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
           ./mcp-publisher login github-oidc
           ./mcp-publisher publish
