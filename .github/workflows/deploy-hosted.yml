@@ -68,7 +68,7 @@ jobs:
           role-duration-seconds: 3600
 
       - name: Setup SAM CLI
-        uses: aws-actions/setup-sam@v2
+        uses: aws-actions/setup-sam@v3
         with:
           use-installer: true
 
