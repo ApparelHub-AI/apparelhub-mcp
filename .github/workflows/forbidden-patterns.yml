@@ -39,11 +39,24 @@ jobs:
           if [ "${#FILES[@]}" -eq 0 ]; then echo "no files to scan"; exit 0; fi
           fail=0
 
+          # glama.json is a maintainer-identity file: Glama requires it to name the
+          # maintainer's GitHub handle before an org-owned server can be claimed, and
+          # the maintainer's handle is intentionally public. It is exempt from the name
+          # check (1) below ONLY, and in exchange it may contain nothing but $schema and
+          # a maintainers list of GitHub handles, so it cannot carry any other content.
+          if [ -f glama.json ]; then
+            if ! python3 -c 'import json,re,sys; d=json.load(open("glama.json")); ok=set(d)<={"$schema","maintainers"} and isinstance(d.get("maintainers"),list) and d["maintainers"] and all(isinstance(m,str) and re.fullmatch(r"[A-Za-z0-9-]{1,39}",m) for m in d["maintainers"]); sys.exit(0 if ok else 1)'; then
+              echo "::error::glama.json may contain only \$schema and a maintainers list of GitHub handles."
+              fail=1
+            fi
+          fi
+          mapfile -t NAME_SCAN_FILES < <(printf '%s\n' "${FILES[@]}" | grep -vx 'glama.json' || true)
+
           # 1) Real names / account references. Pattern is the FORBIDDEN_TERMS
           #    repo secret (never in this public file); -q so a matched term is
           #    never printed to the (public) logs.
           if [ -n "${FORBIDDEN_TERMS:-}" ]; then
-            if grep -IlqE "$FORBIDDEN_TERMS" "${FILES[@]}" >/dev/null 2>&1; then
+            if grep -IlqE "$FORBIDDEN_TERMS" "${NAME_SCAN_FILES[@]}" >/dev/null 2>&1; then
               echo "::error::A forbidden term (real name / account reference, Rule 13) is present in a tracked file. Replace it with a generic placeholder (e.g. 'Acme Co'). The term list is the FORBIDDEN_TERMS repo secret — grep your working tree against your own copy of it to find the offender."
               fail=1
             fi
