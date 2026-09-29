@@ -1,0 +1,37 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.ApparelHub-AI/apparelhub-mcp",
+  "title": "ApparelHub",
+  "description": "Run a custom-merch store from an agent: design, build products, list on every channel, fulfill.",
+  "websiteUrl": "https://apparelhub.ai/agents",
+  "repository": {
+    "url": "https://github.com/ApparelHub-AI/apparelhub-mcp",
+    "source": "github"
+  },
+  "version": "0.15.2",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@apparelhub/mcp-server",
+      "version": "0.15.2",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "APPARELHUB_API_KEY",
+          "description": "ApparelHub Agent API key (create one at https://apparelhub.ai/developer/api-keys)",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        }
+      ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.apparelhub.ai"
+    }
+  ]
+}

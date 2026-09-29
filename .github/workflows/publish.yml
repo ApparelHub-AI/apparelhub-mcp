@@ -10,8 +10,8 @@ on:
     types: [published]
   workflow_dispatch:
 
-# SECURITY (public repo): `id-token: write` below is for npm provenance only (audience is
-# the npm registry, NOT AWS). Do not repurpose it to assume AWS roles, and never add a
+# SECURITY (public repo): `id-token: write` below is for npm provenance and for the MCP
+# registry's GitHub OIDC login only (audiences are the npm and MCP registries, NOT AWS). Do not repurpose it to assume AWS roles, and never add a
 # `pull_request` / `pull_request_target` trigger to a job that holds id-token in this repo.
 permissions:
   contents: read
@@ -21,6 +21,9 @@ jobs:
   publish:
     name: Build, test, publish
     runs-on: ubuntu-latest
+    env:
+      # Secrets can't be read in a step `if`; expose presence only (never the value).
+      HAS_NPM_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -41,3 +44,13 @@ jobs:
           else
             npm publish --provenance --access public
           fi
+
+      # List the release in the official MCP registry. Runs only after a REAL npm publish:
+      # the registry verifies the published npm tarball carries the matching mcpName, so
+      # publishing server.json after a dry-run would fail. Auth is GitHub OIDC (no secret).
+      - name: Publish to the MCP registry
+        if: env.HAS_NPM_TOKEN == 'true'
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish

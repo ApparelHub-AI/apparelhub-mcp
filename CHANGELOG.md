@@ -9,6 +9,15 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.15.2]
+
+### Added
+- Listing metadata for the official MCP registry (`mcpName` in `package.json`, plus `server.json`
+  describing both the npm package and the hosted connector at `https://mcp.apparelhub.ai`).
+  No change to the tool surface.
+- The release workflow now publishes `server.json` to the MCP registry after a real npm
+  publish, authenticating with GitHub OIDC (no stored credential).
+
 ## [0.14.0]
 
 ### Added
