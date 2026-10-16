@@ -9,6 +9,24 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.15.3]
+
+### Fixed
+- `process_transparency` no longer reports success when the keyer removed nothing. A
+  yellow-lime screen (for example `#CBCD5C`) is not green-dominant, so the dominance
+  fallback cleared 0 pixels and the untouched opaque square was upscaled, uploaded and
+  returned as a clean re-key. The keyed output is now measured before upload: an opaque
+  result fails with `transparency_not_applied` (nothing uploaded), and a partial key
+  returns `transparency_clean: false` with a `warning` instead of the success note.
+  `design_apparel` treats the new code like `transparency_failed` (keeps the raw design,
+  flagged). (apparelhub-ai#1289)
+- `sync_to_fulfillment` / `ship_product` report a provider rate-limit deferral as
+  `fulfillment_status: 'pending'` with `retry_after` and a do-not-retry warning. The
+  platform now finishes a rate-limited price update automatically (202, `deferred: true`)
+  instead of failing it; previously any 2xx was reported as `synced`. (apparelhub-ai#1266)
+
+No input schema or tool description changed.
+
 ## [0.15.2]
 
 ### Added
