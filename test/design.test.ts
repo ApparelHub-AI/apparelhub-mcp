@@ -234,6 +234,71 @@ describe('process_transparency', () => {
   });
 });
 
+describe('process_transparency: fails loud when nothing was keyed (apparelhub-ai#1289)', () => {
+  // The real case: a yellow-lime screen (#CBCD5C) is not green-dominant, so the dominance
+  // fallback cleared 0 pixels and the keyer exited 3. The old code uploaded the untouched
+  // opaque square and returned a success payload with a note claiming a safe re-key.
+  const limeImaging = (uploads: { n: number }) =>
+    fakeImaging({
+      makeTransparent: async (_in: string, opts?: { mode?: 'box' | 'dominance' }) => {
+        if (opts?.mode !== 'dominance') {
+          throw new AhError({ code: 'chroma_background', message: 'not pure green' });
+        }
+        return { outputPath: '/tmp/still-opaque.png', cornersClean: false, width: 1024, height: 1024 };
+      },
+      imageStats: async () => ({
+        width: 1024,
+        height: 1024,
+        mode: 'RGBA',
+        has_alpha: true,
+        transparent_ratio: 0,
+        corner_alpha: [255, 255, 255, 255],
+        premultiplied_white: true,
+      }),
+      ensureResolution: async () => {
+        uploads.n += 1; // must not even get this far
+        return { outputPath: '/tmp/still-opaque.png', upscaled: false };
+      },
+    });
+
+  it('returns a structured error and uploads nothing', async () => {
+    const { api, calls } = apiFrom([]);
+    const uploads = { n: 0 };
+    await expect(
+      processTransparency.handler(
+        { image_uuid: 'g1', image_url: 'https://cdn.example/x.png' },
+        fakeContext(api, limeImaging(uploads)),
+      ),
+    ).rejects.toMatchObject({ code: 'transparency_not_applied' });
+    expect(calls).toHaveLength(0);
+    expect(uploads.n).toBe(0);
+  });
+
+  it('design_apparel keeps the raw design flagged, never a success-looking key', async () => {
+    const { api } = apiFrom([jsonResponse(200, { image_uuid: 'g1', url: 'https://cdn.example/x.png' })]);
+    const res = (await designApparel.handler(
+      { prompt: 'x', source: 'OpenAI', verify_text: false },
+      fakeContext(api, limeImaging({ n: 0 })),
+    )) as any;
+    expect(res.designs[0]).toMatchObject({ design_uuid: 'g1', transparency_clean: false });
+    expect(res.designs[0].warning).toContain('transparency_not_applied');
+    expect(res.designs[0].transparency_note).toBeUndefined();
+  });
+
+  it('a partially keyed result succeeds but says plainly that it is not clean', async () => {
+    const { api } = apiFrom([jsonResponse(200, { image_uuid: 't3', url: 'https://cdn.example/t3.png' })]);
+    const imaging = fakeImaging({
+      makeTransparent: async () => ({ outputPath: '/tmp/partial.png', cornersClean: false, width: 900, height: 700 }),
+    });
+    const res = (await processTransparency.handler(
+      { image_uuid: 'g1', image_url: 'https://cdn.example/x.png' },
+      fakeContext(api, imaging),
+    )) as any;
+    expect(res).toMatchObject({ image_uuid: 't3', corners_clean: false, transparency_clean: false });
+    expect(res.warning).toContain('NOT clean');
+  });
+});
+
 describe('verify_design_text', () => {
   it('reports a spelling match when OCR is available', async () => {
     const ctx = fakeContext(undefined, fakeImaging({ ocr: async () => ({ available: true, text: 'STAY WILD' , confidence: null }) }));

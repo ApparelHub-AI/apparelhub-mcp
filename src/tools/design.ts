@@ -55,9 +55,19 @@ interface TransparencyOutcome {
   has_true_alpha: boolean;
   premultiplied_white: boolean;
   corners_clean: boolean;
+  /** True only when the keyed result has clean (transparent) corners. False means the design
+   *  may still print with part of its background: read `warning` before shipping it. */
+  transparency_clean: boolean;
+  /** Fraction of the keyed design that is transparent, when it could be measured. */
+  transparent_ratio?: number;
   keying_mode: 'box' | 'dominance';
   note?: string;
+  warning?: string;
 }
+
+/** Below this transparent fraction the keyer found no background at all (same floor the
+ *  platform keyer uses before it refuses with `no_background_found`). */
+const MIN_KEYED_TRANSPARENT_RATIO = 0.02;
 
 interface TransparencyOptions {
   mode?: 'box' | 'dominance';
@@ -94,6 +104,7 @@ async function processTransparencyImpl(
       !opts.force
     ) {
       keyingMode = 'dominance';
+      // Only claimed below once the result is verified clean (apparelhub-ai#1289).
       note =
         'The generator produced a tinted/muted green background (not pure #00FF00), so the standard keyer was blocked. Re-keyed in green-dominance mode, which strips a tinted green screen safely. If the design contains intentionally bright-green or lime elements, verify they were not affected (verify_design_quality).';
       await ctx.progress.report(55, 'Tinted background — re-keying in dominance mode...');
@@ -102,6 +113,40 @@ async function processTransparencyImpl(
       await ctx.imaging.cleanup([inPath]);
       throw err;
     }
+  }
+
+  // Verify the key actually happened BEFORE anything is uploaded (apparelhub-ai#1289). The
+  // keyer exits 3 ("written, corners not clear") for both a mostly-keyed design whose artwork
+  // touches a corner AND a design where it removed nothing at all. The second case is real:
+  // a yellow-lime screen (#CBCD5C) is not green-dominant (G barely exceeds R), so the
+  // dominance fallback cleared 0 pixels, and the old code upscaled + uploaded the untouched
+  // opaque square and returned a success payload claiming it had been re-keyed safely.
+  const stats = await ctx.imaging.imageStats(t.outputPath);
+  const transparentRatio = stats?.transparent_ratio;
+  const nothingKeyed =
+    transparentRatio !== undefined
+      ? transparentRatio < MIN_KEYED_TRANSPARENT_RATIO
+      : !t.cornersClean; // could not measure: unclean corners are the only evidence we have
+  if (nothingKeyed) {
+    await ctx.imaging.cleanup([inPath, t.outputPath]);
+    const pct = transparentRatio !== undefined ? `${(transparentRatio * 100).toFixed(1)}%` : 'unmeasured';
+    throw new AhError({
+      code: 'transparency_not_applied',
+      message:
+        `Background removal did not remove the background: after ${keyingMode}-mode keying the design is still opaque ` +
+        `(transparent: ${pct}, corners not clear). Nothing was uploaded; the original design is unchanged.`,
+      suggestion:
+        keyingMode === 'dominance'
+          ? 'The background is likely not green at all (for example a yellow-lime), so green-dominance keying cannot see it. Regenerate the design on a pure #00FF00 background, or upload an already-transparent file with upload_design.'
+          : 'The background does not match the key colour. Regenerate the design on a pure #00FF00 background, retry with background_mode=dominance for a tinted green, or upload an already-transparent file with upload_design.',
+    });
+  }
+  let warning: string | undefined;
+  if (!t.cornersClean) {
+    // Partially keyed. Usable, but never framed as a clean success.
+    warning =
+      'Transparency is NOT clean: at least one corner of the keyed design is still opaque, so part of the background may print as a visible block. Inspect it (verify_design_quality) before using it on a product.';
+    note = undefined; // the dominance note asserts a safe re-key, which this result does not show
   }
 
   // Resolution floor after keying: the flood-fill + tight-crop can shrink a design below the QC
@@ -138,11 +183,14 @@ async function processTransparencyImpl(
   return {
     image_uuid: str(res, 'image_uuid', 'uuid') ?? imageUuid,
     image_url: str(res, 'url', 'image_url') ?? url,
-    has_true_alpha: true,
+    has_true_alpha: stats ? stats.has_alpha && stats.transparent_ratio > 0 : true,
     premultiplied_white: true,
     corners_clean: t.cornersClean,
+    transparency_clean: t.cornersClean,
+    ...(transparentRatio !== undefined ? { transparent_ratio: transparentRatio } : {}),
     keying_mode: keyingMode,
     ...(note ? { note } : {}),
+    ...(warning ? { warning } : {}),
   };
 }
 
@@ -395,6 +443,7 @@ export const designApparel = defineTool({
           design.transparency_clean = t.corners_clean;
           design.keying_mode = t.keying_mode;
           if (t.note) design.transparency_note = t.note;
+          if (t.warning) design.warning = t.warning;
         } catch (err) {
           // Never abort an otherwise-good design over the keying step in an unattended run.
           // process_transparency already auto-recovers a tinted-green background (dominance mode),
@@ -405,7 +454,9 @@ export const designApparel = defineTool({
           // scheduled run RETRIES rather than silently shipping an unkeyed design.
           const degradable =
             err instanceof AhError &&
-            (err.code === 'local_tool_unavailable' || err.code === 'transparency_failed');
+            (err.code === 'local_tool_unavailable' ||
+              err.code === 'transparency_failed' ||
+              err.code === 'transparency_not_applied');
           if (degradable) {
             const e = err as AhError;
             design.transparency_clean = false;
