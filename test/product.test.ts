@@ -621,6 +621,42 @@ describe('sync_to_fulfillment', () => {
   });
 });
 
+describe('sync_to_fulfillment: provider rate-limit deferral (apparelhub-ai#1266)', () => {
+  it('reports pending, not synced, when the platform deferred the update', async () => {
+    const { api } = apiFrom([
+      {},
+      {
+        error: 'provider_rate_limited',
+        error_code: 'provider_rate_limited',
+        deferred: true,
+        retry_after: 57,
+        sync_status: 'Pending',
+        message: 'Paused for about 57 seconds; this will finish automatically.',
+      },
+    ]);
+    const res = (await syncToFulfillment.handler(
+      { product_uuid: 'p1', store_uuid: 's1' },
+      fakeContext(api),
+    )) as any;
+    expect(res.fulfillment_status).toBe('pending');
+    expect(res.deferred).toBe(true);
+    expect(res.retry_after).toBe(57);
+    expect(res.warning).toMatch(/Do NOT retry/);
+    expect(res.warning).toContain('Paused for about 57 seconds');
+  });
+
+  it('still reports synced on an ordinary success body', async () => {
+    const { api } = apiFrom([{}, { message: 'Product synced' }]);
+    const res = (await syncToFulfillment.handler(
+      { product_uuid: 'p1', store_uuid: 's1' },
+      fakeContext(api),
+    )) as any;
+    expect(res.fulfillment_status).toBe('synced');
+    expect(res.deferred).toBeUndefined();
+    expect(res.warning).toBeUndefined();
+  });
+});
+
 describe('sync_to_channel', () => {
   it('defaults to draft', async () => {
     const { api, calls } = apiFrom([{ listing_url: 'https://shop.example/y' }]);
