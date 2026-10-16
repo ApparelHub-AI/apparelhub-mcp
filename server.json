@@ -8,12 +8,12 @@
     "url": "https://github.com/ApparelHub-AI/apparelhub-mcp",
     "source": "github"
   },
-  "version": "0.15.2",
+  "version": "0.15.3",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@apparelhub/mcp-server",
-      "version": "0.15.2",
+      "version": "0.15.3",
       "transport": {
         "type": "stdio"
       },
