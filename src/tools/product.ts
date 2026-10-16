@@ -324,7 +324,7 @@ async function syncFulfillmentHealingThreadColors(
   storeUuid: string,
   productUuid: string,
   workspace?: string,
-): Promise<{ healedOptionId?: string }> {
+): Promise<FulfillmentSyncOutcome> {
   const syncOnce = () =>
     ctx.api.post(`store/${enc(storeUuid)}/products/${enc(productUuid)}/sync`, {
       query: { target: 'merchandise' },
@@ -332,8 +332,7 @@ async function syncFulfillmentHealingThreadColors(
       signal: ctx.signal,
     });
   try {
-    await syncOnce();
-    return {};
+    return readFulfillmentDeferral(await syncOnce());
   } catch (err) {
     const message = err instanceof AhError ? err.message : String(err);
     const expected = expectedThreadColorsIdFromError(message);
@@ -369,9 +368,39 @@ async function syncFulfillmentHealingThreadColors(
       workspace,
       signal: ctx.signal,
     });
-    await syncOnce();
-    return { healedOptionId: expected };
+    return { ...readFulfillmentDeferral(await syncOnce()), healedOptionId: expected };
   }
+}
+
+/** What a merchandise sync actually did. `deferred` is set when the provider rate-limited the
+ *  update and the platform will finish it automatically (apparelhub-ai#1266). */
+interface FulfillmentSyncOutcome {
+  healedOptionId?: string;
+  deferred?: { retryAfter?: number; message?: string };
+}
+
+/**
+ * Read a deferral out of a merchandise-sync response (apparelhub-ai#1266).
+ *
+ * When the fulfillment provider rate-limits a price update past what one request can wait, the
+ * platform answers 202 with `deferred: true` and finishes the update itself a minute or so later.
+ * That is NOT a completed sync: reporting `synced` here would tell an unattended agent the prices
+ * are live when they are still pending (and could still end up failed).
+ */
+function readFulfillmentDeferral(r: unknown): FulfillmentSyncOutcome {
+  if (!isRecord(r) || r.deferred !== true) return {};
+  const retryAfter = typeof r.retry_after === 'number' ? r.retry_after : undefined;
+  const message = str(r, 'message');
+  return { deferred: { ...(retryAfter !== undefined ? { retryAfter } : {}), ...(message ? { message } : {}) } };
+}
+
+function deferralNote(d: NonNullable<FulfillmentSyncOutcome['deferred']>): string {
+  const wait = d.retryAfter !== undefined ? `about ${d.retryAfter}s` : 'a short while';
+  return (
+    `The fulfillment provider rate-limited this update, so the platform deferred it and will finish it automatically in ${wait}. ` +
+    'Do NOT retry the sync now (that only hits the limit again); check the product later. It ends up Synced, or Failed with a reason.' +
+    (d.message ? ` Platform note: ${d.message}` : '')
+  );
 }
 
 /**
@@ -388,7 +417,7 @@ async function associateAndSyncFulfillment(
   storeUuid: string,
   productUuid: string,
   workspace?: string,
-): Promise<{ healedOptionId?: string }> {
+): Promise<FulfillmentSyncOutcome> {
   await ctx.api.post(`store/${enc(storeUuid)}/products`, {
     body: { product_uuids: [productUuid] },
     workspace,
@@ -643,7 +672,8 @@ export const shipProduct = defineTool({
           productUuid,
           ws,
         );
-        fulfillmentStatus = 'synced';
+        fulfillmentStatus = healed.deferred ? 'pending' : 'synced';
+        if (healed.deferred) warnings.push(deferralNote(healed.deferred));
         if (healed.healedOptionId) {
           warnings.push(
             `The fulfillment provider expects thread-colors option id "${healed.healedOptionId}" for this garment — auto-corrected on the product and re-synced.`,
@@ -948,7 +978,16 @@ export const syncToFulfillment = defineTool({
     return {
       product_uuid: input.product_uuid,
       store_uuid: input.store_uuid,
-      fulfillment_status: 'synced',
+      fulfillment_status: healed.deferred ? 'pending' : 'synced',
+      ...(healed.deferred
+        ? {
+            deferred: true,
+            ...(healed.deferred.retryAfter !== undefined
+              ? { retry_after: healed.deferred.retryAfter }
+              : {}),
+            warning: deferralNote(healed.deferred),
+          }
+        : {}),
       ...(healed.healedOptionId
         ? {
             note: `The fulfillment provider expects thread-colors option id "${healed.healedOptionId}" for this garment — auto-corrected on the product and re-synced.`,
