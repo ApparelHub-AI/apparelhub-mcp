@@ -38,6 +38,6 @@ The repo is private during early access. When it's made public:
 - Flip the npm publish on (add `NPM_TOKEN` as above).
 - List the server in the MCP registry / directory for discoverability.
 - Add the MCP install path to the apparelhub.ai `/agents` funnel (and/or a `/mcp` page) alongside
-  the skill (an `apparelhub-ui` change).
+  the skill (a platform web-app change).
 - Run the public-content scan before the first public tag (no real account data anywhere — names,
   uuids, store URLs; use generic placeholders like `your-store`, `Acme`, `<uuid>`).
