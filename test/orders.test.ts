@@ -57,6 +57,30 @@ describe('approve_order', () => {
     expect(calls[0]?.url).toContain('/orders/o1/approve');
   });
 
+  // apparelhub-ai#1300: approve returns 200 even when the auto-submit failed.
+  it('surfaces a failed auto-submit instead of reporting a clean approve', async () => {
+    const { api } = apiFrom([
+      {
+        success: true,
+        status: 'approved',
+        auto_submitted: false,
+        submit_error: 'Could not get a shipping address for this order from the channel.',
+        submit_error_kind: 'address_pending',
+      },
+    ]);
+    const res = (await approveOrder.handler({ order_uuid: 'o1' }, fakeContext(api))) as any;
+    expect(res.auto_submitted).toBe(false);
+    expect(res.submit_error).toContain('shipping address');
+    expect(res.submit_error_kind).toBe('address_pending');
+    expect(res.next_step).toContain('retries automatically');
+  });
+
+  it('a non-address failure tells the agent the order is NOT in production', async () => {
+    const { api } = apiFrom([{ auto_submitted: false, submit_error: 'boom', submit_error_kind: 'other' }]);
+    const res = (await approveOrder.handler({ order_uuid: 'o1' }, fakeContext(api))) as any;
+    expect(res.next_step).toContain('NOT sent to production');
+  });
+
   it('passes workspace= through to the request', async () => {
     const { api, calls } = apiFrom([{}]);
     await approveOrder.handler({ order_uuid: 'o1', workspace: 'w1' }, fakeContext(api));
@@ -129,6 +153,13 @@ describe('submit_order_to_fulfillment', () => {
     expect(res.auto_submitted).toBe(true);
     expect(res.provider_external_id).toBe('164539194');
     expect(calls[0]?.url).toContain('/orders/o1/submit-fulfillment');
+  });
+
+  // apparelhub-ai#1300: a body-less POST 500'd on the deployed API.
+  it('sends a JSON body', async () => {
+    const { api, calls } = apiFrom([{ success: true }]);
+    await submitOrderToFulfillment.handler({ order_uuid: 'o1' }, fakeContext(api));
+    expect(calls[0]?.init?.body).toBe('{}');
   });
 });
 

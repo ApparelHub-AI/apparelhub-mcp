@@ -89,7 +89,7 @@ function mapHold(raw: unknown): Record<string, unknown> {
 export const approveOrder = defineTool({
   name: 'approve_order',
   description:
-    'Approve an order that is awaiting approval, releasing it for fulfillment. For sales-channel (webhook) orders this also auto-submits the order to the fulfillment provider (Printful/Printify). Use when an order is held for review and the user wants to let it proceed.',
+    'Approve an order that is awaiting approval, releasing it for fulfillment. For sales-channel (webhook) orders this also auto-submits the order to the fulfillment provider (Printful/Printify). ALWAYS check auto_submitted in the result: false means the order is approved but NOT in production, and submit_error says why. Use when an order is held for review and the user wants to let it proceed.',
   inputSchema: orderInput,
   annotations: { idempotentHint: true, openWorldHint: true },
   handler: async (input, ctx) => {
@@ -99,6 +99,17 @@ export const approveOrder = defineTool({
     });
     const out = actionResult(input.order_uuid, raw);
     if (isRecord(raw) && raw.auto_submitted !== undefined) out.auto_submitted = raw.auto_submitted;
+    // apparelhub-ai#1300: approve succeeds even when the automatic submit to
+    // the provider fails. Dropping the error here is how an agent (and a
+    // merchant) believed a paid order was on its way when it was not.
+    if (isRecord(raw) && raw.auto_submitted === false) {
+      if (raw.submit_error !== undefined) out.submit_error = raw.submit_error;
+      if (raw.submit_error_kind !== undefined) out.submit_error_kind = raw.submit_error_kind;
+      out.next_step =
+        raw.submit_error_kind === 'address_pending'
+          ? 'The sales channel has not released the shipping address yet. ApparelHub retries automatically every hour; call submit_order_to_fulfillment later, or check_order_status to see if it went through.'
+          : 'The order is approved but NOT sent to production. Tell the user the reason, fix it, then call submit_order_to_fulfillment.';
+    }
     return out;
   },
 });
@@ -178,6 +189,10 @@ export const submitOrderToFulfillment = defineTool({
   annotations: { idempotentHint: true, openWorldHint: true },
   handler: async (input, ctx) => {
     const raw = await ctx.api.post(`orders/${enc(input.order_uuid)}/submit-fulfillment`, {
+      // A JSON body is required by deployed servers that predate
+      // apparelhub-ai#1300; without it the request 500s before the order is
+      // even looked up. Empty = use the stored/channel recipient.
+      body: {},
       workspace: input.workspace,
       signal: ctx.signal,
     });
