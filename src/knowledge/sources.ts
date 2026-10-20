@@ -57,6 +57,16 @@ export const EDIT_CAPABLE_SOURCES = new Set<string>([
   'Seedream 4.0', 'Seedream 4.5', 'Flux 2 Pro', 'Grok Imagine', 'Wan 2.7',
 ]);
 
+// Sources that can answer ONE request with a themed SET of designs (apparelhub-ai#1175). The
+// platform is the authority (GET /images/sources carries `supports_collection` per source) and
+// reduces `concepts` to 1 on anything else, so this set is used only to TELL the agent when that
+// happened, most often because the fallback ladder moved off Nano Banana. It never blocks a call.
+export const COLLECTION_CAPABLE_SOURCES = new Set<string>(['Nano Banana']);
+
+// The platform's cap: the primary design plus at most 6 harvested extras. Asking for more is not
+// an error on the platform, it is the cap, so the client clamps to match rather than refusing.
+export const MAX_CONCEPTS = 7;
+
 /** Pick a source. Nano Banana is the best all-rounder (photoreal + text + abstract). OpenAI is
  *  deliberately NEVER preferred (operator directive: it's the least-preferred model — its account
  *  is a shared billing surface and it only wins on nothing today). The user can always override

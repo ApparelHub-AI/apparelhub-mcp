@@ -27,6 +27,9 @@ export interface GenerateOptions {
   listingStyle?: string;
   /** Which of the product's existing listing images to edit. Defaults to its best mockup. */
   sourceImageUrl?: string;
+  /** Ask ONE generation for a themed set of designs (apparelhub-ai#1175). Sent only when > 1. The
+   *  platform clamps it and silently reduces it to 1 on a source that cannot answer with a set. */
+  concepts?: number;
   workspace?: string;
 }
 
@@ -40,6 +43,9 @@ export interface GeneratedImage {
   image_uuid: string;
   image_url: string;
   source_used: string;
+  /** The platform's advisory prompt-improvement block, when it returned one (apparelhub-ai#1146).
+   *  Passed through untouched: it is the only place an agent learns the prompt was a brand brief. */
+  prompt_improvement?: Record<string, unknown>;
 }
 
 /** One rung of a fallback attempt: the model that was tried and why it was abandoned. */
@@ -89,6 +95,8 @@ export async function runGeneration(
   if (opts.sourceProductUuid) body.source_product_uuid = opts.sourceProductUuid;
   if (opts.listingStyle) body.style = opts.listingStyle;
   if (opts.sourceImageUrl) body.source_image_url = opts.sourceImageUrl;
+  // Omitted at 1 so an ordinary generation's request body is byte-for-byte what it was before.
+  if (opts.concepts !== undefined && opts.concepts > 1) body.concepts = opts.concepts;
 
   await deps.progress?.report(10, `Generating with ${opts.source}...`);
   const res = await api.post('images/generate', {
@@ -108,11 +116,14 @@ export async function runGeneration(
     str(res, 'url', 'image_url', 'full_url') ?? str(gi, 'url', 'image_url', 'full_url');
   const status =
     str(res, 'processing_status', 'status') ?? str(gi, 'processing_status', 'status');
+  // Rides the 202 (the common path, the default source is slow) and the sync 200 alike.
+  const pi = isRecord(res) && isRecord(res.prompt_improvement) ? res.prompt_improvement : undefined;
+  const extra = pi ? { prompt_improvement: pi } : {};
 
   // Fast path: the image came back inline.
   if (directUrl && status !== 'pending' && status !== 'processing') {
     await deps.progress?.report(100, 'Design ready.');
-    return { image_uuid: uuid, image_url: directUrl, source_used: opts.source };
+    return { image_uuid: uuid, image_url: directUrl, source_used: opts.source, ...extra };
   }
 
   // Async path: poll to completion.
@@ -123,7 +134,7 @@ export async function runGeneration(
     });
   }
   const url = await pollGeneration(api, uuid, deps, opts.workspace);
-  return { image_uuid: uuid, image_url: url, source_used: opts.source };
+  return { image_uuid: uuid, image_url: url, source_used: opts.source, ...extra };
 }
 
 /**

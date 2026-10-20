@@ -171,7 +171,7 @@ environment.
 
 ## Tools
 
-121 tools. [`docs/TOOLS.md`](./docs/TOOLS.md) walks through the core groups; call `tools/list` from
+124 tools. [`docs/TOOLS.md`](./docs/TOOLS.md) walks through the core groups; call `tools/list` from
 your agent for the authoritative live schemas.
 
 - **Setup & connect** — `check_setup_readiness` (what the account has, what it needs, the single
@@ -179,8 +179,8 @@ your agent for the authoritative live schemas.
   `connect_sales_channel` (API-token providers connected entirely in chat), plus
   `start_channel_connect` / `check_connection_status` for the browser-based ones (Printful,
   Shopify, TikTok Shop, Fourthwall).
-- **Read** — `list_my_workspaces`, `list_my_stores`, `list_my_designs`, `list_my_products`,
-  `list_my_orders`, `get_order_details`.
+- **Read** — `list_my_workspaces`, `list_my_stores`, `list_my_designs`, `get_design_collection`,
+  `list_my_products`, `list_my_orders`, `get_order_details`.
 - **Catalog** — `browse_catalog`, `get_garment_details`, `find_garments` (search every connected
   provider at once for a capability), `recommend_garment`, `list_catalog_providers`.
 - **Design** — `design_apparel`, `iterate_design`, `upload_design` (bring artwork the merchant
