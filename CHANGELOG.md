@@ -9,6 +9,18 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.16.1]
+
+### Fixed
+- `approve_order` reports a failed automatic submit instead of a clean approve. For a
+  sales-channel order the approve also submits the order to the fulfillment provider and
+  returns success even when that submit fails; the tool dropped the error, so an agent
+  could tell a user an order was on its way when it was not in production. The result now
+  carries `submit_error`, `submit_error_kind` (`address_pending` | `other`) and a
+  `next_step`, and the description tells the agent to check `auto_submitted`.
+- `submit_order_to_fulfillment` sends a JSON body. The deployed API returned a server
+  error for a body-less request, so the tool meant to un-stick a stuck order could not.
+
 ## [0.16.0]
 
 ### Added
