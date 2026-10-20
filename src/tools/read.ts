@@ -173,6 +173,67 @@ export const listMyDesigns = defineTool({
   },
 });
 
+function mapCollectionDesign(raw: unknown): Record<string, unknown> {
+  return {
+    design_uuid: str(raw, 'uuid', 'design_uuid') ?? '',
+    // The product name and retail description the model wrote for this concept. Either may be
+    // null when the model wrote none, and they are passed through as-is, never filled in.
+    title: str(raw, 'title') ?? null,
+    concept_description: str(raw, 'concept_description') ?? null,
+    full_url: str(raw, 'url', 'full_url'),
+    thumbnail_url: str(raw, 'thumbnail_url'),
+    background_state: str(raw, 'background_state') ?? null,
+  };
+}
+
+export const getDesignCollection = defineTool({
+  name: 'get_design_collection',
+  description:
+    'List the OTHER designs that came out of the same generation as this one. When generate_image ' +
+    'is called with concepts > 1, one generation produces a themed set; every design is saved ' +
+    'separately and this is how you find its siblings. The design you ask about is never included, ' +
+    'and the list is oldest first. An ordinary design returns an empty list, which is the honest ' +
+    'answer, not an error (an inaccessible or unknown uuid also reads as empty, so an empty list ' +
+    'does not prove the design exists). Read-only and not metered. ' +
+    'Each entry carries title and concept_description: the product name and retail description ' +
+    'the model wrote for that concept. Use them to build products without asking the merchant to ' +
+    'retype copy the model already produced; either may be null and must never be invented. ' +
+    'background_state says whether the design can be lifted off its background: transparent is ' +
+    'ready to place, opaque_box can be keyed automatically (process_transparency), opaque_varied ' +
+    'cannot be separated and will print WITH its background. Asked for a set, the model often ' +
+    'answers with pictures of finished garments rather than flat art, and building a product from ' +
+    'one prints a garment onto a garment, so do NOT build a product from an opaque_varied design ' +
+    'without telling the user it will print with its background. Do not describe it as "a ' +
+    'photograph" either: legitimately textured art reports opaque_varied too.',
+  inputSchema: z.object({
+    design_uuid: z
+      .string()
+      .min(1)
+      .describe('Any design from the generation (usually the image_uuid generate_image returned).'),
+    workspace: z.string().optional().describe('Workspace uuid (agency accounts).'),
+  }),
+  annotations: { readOnlyHint: true, openWorldHint: true },
+  handler: async (input, ctx) => {
+    const raw = await ctx.api.get(
+      `images/generated/${encodeURIComponent(input.design_uuid)}/collection`,
+      { workspace: input.workspace, signal: ctx.signal },
+    );
+    const collection = asArray(raw, 'collection').map(mapCollectionDesign);
+    const out: Record<string, unknown> = {
+      design_uuid: input.design_uuid,
+      collection,
+      total: collection.length,
+    };
+    const prints = collection.filter((d) => d.background_state === 'opaque_varied').length;
+    if (prints > 0) {
+      out.warning =
+        `${prints} of ${collection.length} will print with their background (background_state ` +
+        'opaque_varied). Look at each before building a product from it, and tell the user.';
+    }
+    return out;
+  },
+});
+
 // ---------------------------------------------------------------------------
 // Products
 // ---------------------------------------------------------------------------
@@ -405,6 +466,7 @@ export const readTools: ToolDef[] = [
   listMyWorkspaces,
   listMyStores,
   listMyDesigns,
+  getDesignCollection,
   listMyProducts,
   listMyOrders,
   getOrderDetails,

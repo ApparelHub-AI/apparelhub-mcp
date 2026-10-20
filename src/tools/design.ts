@@ -6,8 +6,10 @@ import { runGenerationWithFallback } from '../image/generate.js';
 import {
   augmentPromptForTransparency,
   buildIterationPrompt,
+  COLLECTION_CAPABLE_SOURCES,
   EDIT_CAPABLE_SOURCES,
   fallbackLadder,
+  MAX_CONCEPTS,
   normalizeSource,
 } from '../knowledge/sources.js';
 import type { ToolContext } from './context.js';
@@ -283,7 +285,9 @@ async function verifyTextImpl(
 export const generateImage = defineTool({
   name: 'generate_image',
   description:
-    'Generate a design image (split primitive of design_apparel). Returns the raw generated image; follow with process_transparency for apparel that needs a transparent background. Rate-limit errors are classified (model_rate_limited = one model\'s provider vs platform_rate_limited = this key\'s ApparelHub throttle vs request_not_sent = the call never reached ApparelHub), and fallback_trail shows any model substitutions.',
+    'Generate a design image (split primitive of design_apparel). Returns the raw generated image; follow with process_transparency for apparel that needs a transparent background. Rate-limit errors are classified (model_rate_limited = one model\'s provider vs platform_rate_limited = this key\'s ApparelHub throttle vs request_not_sent = the call never reached ApparelHub), and fallback_trail shows any model substitutions. ' +
+    'When the platform has advice on the prompt it is returned as prompt_improvement (advisory, never applied for you). If its issues include "brand_brief", the prompt describes a whole brand, collection or storefront rather than one design, and improved_prompt is the single strongest design EXTRACTED from it: either generate that one design, or keep the brief and call again with concepts (4 is a good default) to get a themed set from one generation. ' +
+    'With concepts > 1 this still returns ONE image; the other designs from the same generation are saved to the workspace and read with get_design_collection(image_uuid).',
   inputSchema: z.object({
     prompt: z.string().min(1),
     source: z
@@ -306,10 +310,20 @@ export const generateImage = defineTool({
       .describe(
         'Disable the model-fallback ladder. By default a rate-limited/transient model transparently retries with a different model (see fallback_trail); set true to fail on the chosen source alone.',
       ),
+    concepts: z
+      .number()
+      .int()
+      .min(1)
+      .optional()
+      .describe(
+        `How many distinct design concepts to ask ONE generation for. Leave unset (1) for ordinary work. Raise it when the prompt is a whole brand or collection brief you want to keep (prompt_improvement reports "brand_brief"): the model is asked for a themed set instead of one image. Capped at ${MAX_CONCEPTS} (ask for more and you get ${MAX_CONCEPTS}); the model may return fewer. Only sources whose supports_collection is true can do it (Nano Banana today); on any other source, including one the fallback ladder moved to, it is silently reduced to 1 and this tool says so in a warning. Costs ONE image generation either way, because it is one model call; the extra designs cost nothing. Each extra design carries the product name and retail description the model wrote for it.`,
+      ),
     workspace: z.string().optional(),
   }),
   annotations: { openWorldHint: true },
   handler: async (input, ctx) => {
+    const concepts =
+      input.concepts !== undefined && input.concepts > 1 ? Math.min(input.concepts, MAX_CONCEPTS) : undefined;
     const augment = input.augment_prompt_for_transparency ?? true;
     const prompt = augment ? augmentPromptForTransparency(input.prompt) : input.prompt;
     // Normalize a near-miss source (case/spelling) to its canonical name, or reject it clearly (#70).
@@ -318,16 +332,42 @@ export const generateImage = defineTool({
     const started = Date.now();
     const g = await runGenerationWithFallback(
       ctx.api,
-      { prompt, source: sources[0]!, sources, size: input.size, workspace: input.workspace, noFallback: input.no_fallback },
+      {
+        prompt,
+        source: sources[0]!,
+        sources,
+        size: input.size,
+        workspace: input.workspace,
+        noFallback: input.no_fallback,
+        concepts,
+      },
       { progress: ctx.progress, signal: ctx.signal },
     );
-    return {
+    const out: Record<string, unknown> = {
       image_uuid: g.image_uuid,
       image_url: g.image_url,
       source_used: g.source_used,
       fallback_trail: g.fallback_trail,
       generation_latency_ms: Date.now() - started,
     };
+    if (g.prompt_improvement) out.prompt_improvement = g.prompt_improvement;
+    if (concepts !== undefined) {
+      out.concepts_requested = concepts;
+      if (COLLECTION_CAPABLE_SOURCES.has(g.source_used)) {
+        // The worker marks the primary complete BEFORE it saves the siblings, so a read made the
+        // instant this returns can come back short. Say so rather than let an empty list read as
+        // "the model made one design".
+        out.collection_note =
+          'The other designs from this generation are saved separately. Read them with get_design_collection(image_uuid). They are written just after this design completes, so if the list is empty or short right now, wait a few seconds and read again before concluding the model made fewer.';
+      } else {
+        out.warning =
+          `${g.source_used} cannot answer with a collection, so concepts was reduced to 1 and this is a single design.` +
+          (g.fallback_trail.length > 0
+            ? ' The fallback ladder moved off the collection-capable model; retry with source "Nano Banana" and no_fallback: true if the set matters.'
+            : ' Use source "Nano Banana" for a collection.');
+      }
+    }
+    return out;
   },
 });
 

@@ -9,6 +9,35 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.16.0]
+
+### Added
+- `generate_image` accepts `concepts`: ask ONE generation for a themed set of designs instead
+  of one. This exists for a brand brief the merchant wants to keep. Handing a whole brand,
+  collection or storefront to a single-image request either throws most of it away or comes
+  back as product photography; asking for a set lets the model answer the brief it was given.
+  Capped at 7 (the platform's cap, so the client clamps rather than refusing), and only a
+  source whose `supports_collection` is true can do it (Nano Banana today). On any other
+  source the platform quietly reduces it to 1, which includes a source the fallback ladder
+  moved to, so the tool now says so in a `warning` rather than let one design read as a set.
+  One model call, so one generation credit; the extras cost nothing. (apparelhub-ai#1175)
+- `generate_image` returns the platform's advisory `prompt_improvement` block. It was dropped
+  before, which hid the one signal that matters here: an `issues` entry of `brand_brief` means
+  the prompt is a whole brand rather than one design, and `improved_prompt` is the strongest
+  single design extracted from it. Never applied for you.
+- `get_design_collection(design_uuid)`: the other designs from the same generation, oldest
+  first, never including the one asked about. Each carries the product name and retail
+  description the model wrote (`title`, `concept_description`; null when absent, never
+  invented) and `background_state`. A set often comes back as pictures of finished garments,
+  so the tool warns when any design is `opaque_varied` (it will print with its background)
+  and its description tells the agent not to build from one without telling the user, and not
+  to call it "a photograph" either, because textured art reports the same state. An ordinary
+  design returns an empty list. Read-only, not metered. (apparelhub-ai#1174)
+
+### Changed
+- `generate_image` description and input schema changed. Hosts that remember per-tool
+  approvals (claude.ai "Always allow") may ask again after upgrading.
+
 ## [0.15.3]
 
 ### Fixed
