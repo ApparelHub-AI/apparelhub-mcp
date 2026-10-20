@@ -9,6 +9,15 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.16.2]
+
+### Added
+- `list_my_orders` and `get_order_details` pass through `needs_attention` when the platform
+  flags an order the merchant must act on: the fulfillment provider failed or cancelled it,
+  the buyer cancelled after production started, or it was paid but never sent to
+  production. Before this an agent saw an ordinary "cancelled" and had nothing to tell the
+  user. Both descriptions tell the agent to surface it.
+
 ## [0.16.1]
 
 ### Fixed
