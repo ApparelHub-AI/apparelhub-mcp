@@ -190,6 +190,33 @@ describe('list_my_orders', () => {
   });
 });
 
+describe('needs_attention (apparelhub-ai#1302)', () => {
+  const att = {
+    kind: 'provider_failed',
+    severity: 'error',
+    title: 'The provider could not process this order',
+    message: 'The provider rejected this order: No payment method added.',
+  };
+
+  it('list_my_orders passes it through, and omits it when null', async () => {
+    const raw = {
+      orders: [
+        { uuid: 'o1', status: 'cancelled', needs_attention: att },
+        { uuid: 'o2', status: 'cancelled', needs_attention: null },
+      ],
+    };
+    const res = (await listMyOrders.handler({}, fakeContext(apiReturning(raw)))) as any;
+    expect(res.orders[0].needs_attention).toEqual(att);
+    expect('needs_attention' in res.orders[1]).toBe(false);
+  });
+
+  it('get_order_details passes it through', async () => {
+    const raw = { order: { uuid: 'o9', status: 'cancelled', needs_attention: att } };
+    const res = (await getOrderDetails.handler({ order_uuid: 'o9' }, fakeContext(apiReturning(raw)))) as any;
+    expect(res.order.needs_attention).toEqual(att);
+  });
+});
+
 describe('get_order_details', () => {
   it('unwraps a {order:...} envelope and includes payment/fulfillment fields', async () => {
     const raw = {
