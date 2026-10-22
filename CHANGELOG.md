@@ -9,6 +9,14 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.16.3]
+
+### Added
+- `list_my_orders` and `get_order_details` return `ship_by_at`, the sales channel's ship-by
+  deadline in UTC (set for TikTok Shop orders), so an agent can warn before a late shipping
+  update counts against the shop. Both descriptions now name the new `needs_attention`
+  cases: a ship-by deadline that is close or missed, and a channel that refused the tracking.
+
 ## [0.16.2]
 
 ### Added
