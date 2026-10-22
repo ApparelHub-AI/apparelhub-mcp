@@ -14,7 +14,7 @@ import { asArray, bool, isRecord, num, str, total, viewUrl } from '../util/shape
 //     (auto|confirm|review), approval_authority (human|agent|rules), auto_fulfill_on_payment,
 //     require_payment_before_fulfill, hold_orders_above_amount (float|null), hold_below_margin_pct
 //     (float|null), hold_on_negative_margin, hold_first_time_customer, auto_reconcile_orders,
-//     notify_on_new_order, notify_on_shipment. Response = the full settings dict.
+//     notify_on_new_order, notify_on_shipment, notify_on_tracked_orders. Response = the full settings dict.
 //   - create_store POST store requires {name}; optional {description, logo, status}. It lands in
 //     the workspace the key is scoped to (?workspace=). New stores start CLOSED — connect a
 //     fulfillment provider then activate_store to make them ACTIVE.
@@ -57,6 +57,7 @@ function mapStoreSettings(raw: unknown): Record<string, unknown> {
     auto_reconcile_orders: bool(raw, 'auto_reconcile_orders'),
     notify_on_new_order: bool(raw, 'notify_on_new_order'),
     notify_on_shipment: bool(raw, 'notify_on_shipment'),
+    notify_on_tracked_orders: bool(raw, 'notify_on_tracked_orders'),
   };
   // Drop undefined keys so a partial live response reads clean.
   for (const k of Object.keys(out)) if (out[k] === undefined) delete out[k];
@@ -169,6 +170,10 @@ export const updateStoreSettings = defineTool({
       .describe('Periodically re-sync open sales-channel orders with their channel (manual reconcile always works regardless).'),
     notify_on_new_order: z.boolean().optional().describe('Send a notification when a new order arrives.'),
     notify_on_shipment: z.boolean().optional().describe('Send a notification when an order ships.'),
+    notify_on_tracked_orders: z
+      .boolean()
+      .optional()
+      .describe("Also notify about orders for the merchant's own products (not made in ApparelHub, fulfilled by their store). Off by default; the orders are recorded either way."),
     workspace: workspaceField,
   }),
   annotations: { idempotentHint: true, openWorldHint: true },

@@ -237,6 +237,32 @@ describe('ship_by_at (apparelhub-ai#1322)', () => {
   });
 });
 
+describe('fulfilled_by (apparelhub-ai#1330)', () => {
+  it("passes 'merchant' through, and omits it for ApparelHub-fulfilled orders", async () => {
+    const raw = {
+      orders: [
+        { uuid: 'o1', status: 'pending', fulfilled_by: 'merchant' },
+        { uuid: 'o2', status: 'pending', fulfilled_by: null },
+      ],
+    };
+    const res = (await listMyOrders.handler({}, fakeContext(apiReturning(raw)))) as any;
+    expect(res.orders[0].fulfilled_by).toBe('merchant');
+    expect('fulfilled_by' in res.orders[1]).toBe(false);
+  });
+
+  it('forwards the fulfilled_by filter', async () => {
+    const { api, calls } = apiRecording({ orders: [] });
+    await listMyOrders.handler({ fulfilled_by: 'merchant' }, fakeContext(api));
+    expect(new URL(calls[0].url).searchParams.get('fulfilled_by')).toBe('merchant');
+  });
+
+  it('get_order_details includes it', async () => {
+    const raw = { order: { uuid: 'o9', fulfilled_by: 'merchant' } };
+    const res = (await getOrderDetails.handler({ order_uuid: 'o9' }, fakeContext(apiReturning(raw)))) as any;
+    expect(res.order.fulfilled_by).toBe('merchant');
+  });
+});
+
 describe('get_order_details', () => {
   it('unwraps a {order:...} envelope and includes payment/fulfillment fields', async () => {
     const raw = {
