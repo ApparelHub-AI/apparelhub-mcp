@@ -373,6 +373,11 @@ function mapOrderListItem(raw: unknown): Record<string, unknown> {
   // sets one on every order and counts a late shipping update against the shop.
   const shipBy = str(raw, 'ship_by_at');
   if (shipBy) out.ship_by_at = shipBy;
+  // apparelhub-ai#1330: 'merchant' marks an order for the merchant's own
+  // products (listings brought in from their channel, not made in ApparelHub).
+  // Their store fulfils it; ApparelHub only records it.
+  const fulfilledBy = str(raw, 'fulfilled_by');
+  if (fulfilledBy) out.fulfilled_by = fulfilledBy;
   const customer = str(raw, 'customer_name', 'recipient_name');
   if (customer) out.customer_name = customer;
   const shipments = asArray(isRecord(raw) ? raw.shipments : undefined);
@@ -396,13 +401,17 @@ function mapOrderDetail(raw: unknown): Record<string, unknown> {
 export const listMyOrders = defineTool({
   name: 'list_my_orders',
   description:
-    "List the merchant's recent orders across channels. An order carrying `needs_attention` is one the merchant must act on (the fulfillment provider failed or cancelled it, the buyer cancelled after production started, it was paid but never sent to production, the sales channel's ship-by deadline is close or missed, or the channel refused the tracking): always tell the user about those, with the `message`. `ship_by_at` is the channel's ship-by deadline (UTC) when it has one. Read-only.",
+    "List the merchant's recent orders across channels. An order with `fulfilled_by: 'merchant'` is for the merchant's own products (brought in from their sales channel, not made in ApparelHub): their store fulfils it, ApparelHub only records it, and approve / submit / confirm / cancel / hold / record-payment refuse it with `fulfilled_by_merchant`; tell the user to act on it in their store. Pass fulfilled_by to list only those ('merchant') or only ApparelHub-fulfilled orders ('apparelhub'). An order carrying `needs_attention` is one the merchant must act on (the fulfillment provider failed or cancelled it, the buyer cancelled after production started, it was paid but never sent to production, the sales channel's ship-by deadline is close or missed, or the channel refused the tracking): always tell the user about those, with the `message`. `ship_by_at` is the channel's ship-by deadline (UTC) when it has one. Read-only.",
   inputSchema: z.object({
     status: z
       .enum(['pending', 'in_production', 'shipped', 'delivered', 'cancelled'])
       .optional(),
     store_uuid: z.string().optional(),
     since: z.string().optional().describe('ISO date lower bound where supported.'),
+    fulfilled_by: z
+      .enum(['merchant', 'apparelhub'])
+      .optional()
+      .describe("'merchant' = orders for the merchant's own products, fulfilled by their store; 'apparelhub' = orders ApparelHub fulfils. Omit for both."),
     limit: z.number().int().positive().max(100).optional(),
     workspace: z.string().optional(),
   }),
@@ -412,6 +421,7 @@ export const listMyOrders = defineTool({
       query: {
         status: input.status,
         store_uuid: input.store_uuid,
+        fulfilled_by: input.fulfilled_by,
         since: input.since,
         limit: input.limit,
       },

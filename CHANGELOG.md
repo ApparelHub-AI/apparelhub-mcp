@@ -9,6 +9,18 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.18.0]
+
+### Added
+- Orders for the merchant's own products (apparelhub-ai#1330). Once a merchant brings in their
+  channel catalog, an order for one of those products is recorded, marked
+  `fulfilled_by: 'merchant'` on `list_my_orders` and `get_order_details`. Their store fulfils it;
+  ApparelHub never sends it to a fulfillment provider, and the fulfillment actions (approve,
+  submit, confirm, cancel, hold, record payment) refuse it with `fulfilled_by_merchant`.
+- `list_my_orders` takes `fulfilled_by` (`merchant` | `apparelhub`) to list one kind only.
+- `update_store_settings` / `get_store_settings`: `notify_on_tracked_orders`, whether to notify
+  about those orders (off by default; they are recorded either way).
+
 ## [0.17.0]
 
 ### Added
