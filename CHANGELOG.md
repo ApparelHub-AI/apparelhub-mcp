@@ -9,6 +9,30 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.17.0]
+
+### Added
+- Catalog import: tracked listings (apparelhub-ai#1326, #1328). An established seller already
+  has products live on a sales channel that ApparelHub never made; these tools let an agent
+  bring them in and see the merchant's whole catalog. Read-only against the channel: nothing is
+  written to the merchant's store, and those products keep being fulfilled exactly as today
+  (ApparelHub never fulfils them). Listings ApparelHub created are recognised and linked to
+  their product rather than duplicated. WooCommerce and TikTok Shop today; any other channel
+  answers `catalog_read_unsupported`.
+  - `import_channel_catalog(store_uuid, integration_uuid)` starts a background import and
+    returns the run to poll. If one is already running for that channel it returns THAT run
+    (`already_running: true`) instead of erroring, because starting a second is exactly what
+    the platform refuses. `integration_inactive` and `catalog_read_unsupported` come back as
+    their own error codes with the real next step (reconnect; do not retry).
+  - `get_catalog_import_run(store_uuid, run_uuid)`: status and counts (seen, created, updated,
+    ours, removed, images_fetched). A failed run states `error`; what was read is kept and
+    nothing is marked removed on a partial pass. Read-only.
+  - `list_tracked_listings(store_uuid, integration?, scope?, include_removed?, limit?, offset?)`:
+    the listings plus each channel's `catalog_read` and `last_run`, so it doubles as the
+    "can this channel be imported?" check before any import. `scope: "external"` is what the
+    merchant sold before ApparelHub. Read-only. The description tells the agent tracked
+    listings are not ApparelHub products: no sync, price cascade or fulfilment.
+
 ## [0.16.3]
 
 ### Added
