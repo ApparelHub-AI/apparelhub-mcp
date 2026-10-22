@@ -23,7 +23,8 @@ this package implements tool surface **v1**.
     returns the run to poll. If one is already running for that channel it returns THAT run
     (`already_running: true`) instead of erroring, because starting a second is exactly what
     the platform refuses. `integration_inactive` and `catalog_read_unsupported` come back as
-    their own error codes with the real next step (reconnect; do not retry).
+    their own error codes with the real next step (reconnect; do not retry), and so does
+    `wrong_workspace` (retry with the `workspace` the message names; every tool takes `workspace`).
   - `get_catalog_import_run(store_uuid, run_uuid)`: status and counts (seen, created, updated,
     ours, removed, images_fetched). A failed run states `error`; what was read is kept and
     nothing is marked removed on a partial pass. Read-only.

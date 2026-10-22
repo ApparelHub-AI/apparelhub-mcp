@@ -127,6 +127,22 @@ describe('import_channel_catalog', () => {
     expect(err.suggestion).toMatch(/reconnect/i);
   });
 
+  it('turns wrong_workspace into a retry-with-workspace instruction, keeping the uuid', async () => {
+    const { api } = client([
+      jsonResponse(409, {
+        error: 'wrong_workspace',
+        message: "This store is in the 'Acme Co' workspace. Retry the same call with workspace=w2.",
+        retry_with: { workspace: 'w2' },
+      }),
+    ]);
+    const err = (await importChannelCatalog
+      .handler({ store_uuid: 's-1', integration_uuid: 'int-1' }, fakeContext(api))
+      .catch((e: unknown) => e)) as AhError;
+    expect(err.code).toBe('wrong_workspace');
+    expect(err.message).toContain('workspace=w2');
+    expect(err.suggestion).toMatch(/workspace/);
+  });
+
   it('leaves a 404 as not_found', async () => {
     const { api } = client([
       jsonResponse(404, { error: 'integration_not_found', message: 'Not connected.' }),

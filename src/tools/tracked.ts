@@ -113,6 +113,11 @@ const REFUSALS: Record<string, { message: string; suggestion: string }> = {
     suggestion:
       'Ask the merchant to reconnect the channel (start_channel_connect / check_connection_status), then start the import again.',
   },
+  wrong_workspace: {
+    message: 'This store is in a different workspace than the one this call was scoped to.',
+    suggestion:
+      'Retry the same call with workspace set to the uuid the message names (the API also returns it as retry_with.workspace). Nothing was started.',
+  },
   catalog_read_unsupported: {
     message: 'Catalog import is not available for this sales channel yet.',
     suggestion:
