@@ -159,6 +159,19 @@ Agency (Enterprise) accounts only. These need an **account-wide** API key — a 
 | `sync_orders` / `estimate_order_costs` / `get_orders_summary` / `list_pending_fulfillments` | Pull orders from channels; estimate costs; dashboard summary; pending queue. |
 | `archive_product` / `restore_product` | Archive a product (409 if it has pending orders) or restore it. |
 
+## Catalog import (tracked listings)
+
+Bring the products a merchant already sells on a connected channel into ApparelHub as tracked
+listings. Read-only against the channel: nothing is written to the merchant's store, and those
+products keep being fulfilled exactly as today. Tracked listings are not ApparelHub products (no
+sync, price cascade or fulfilment). WooCommerce and TikTok Shop today.
+
+| Tool | Summary |
+|---|---|
+| `import_channel_catalog` | Start a background import for one channel; returns the run to poll. If an import is already running for that channel, returns that run (`already_running: true`). `integration_inactive` (reconnect first) and `catalog_read_unsupported` (do not retry) come back as their own codes. |
+| `get_catalog_import_run` | Run status (queued/running/completed/failed) and counts. A failed run states `error`; nothing is marked removed on a partial pass. Read-only. |
+| `list_tracked_listings` | The imported listings (`scope` all/external/ours, `include_removed`, paging) plus each channel's `catalog_read` and `last_run`. Read-only. |
+
 ## API escape hatch
 
 | Tool | Summary |

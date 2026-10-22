@@ -171,7 +171,7 @@ environment.
 
 ## Tools
 
-124 tools. [`docs/TOOLS.md`](./docs/TOOLS.md) walks through the core groups; call `tools/list` from
+127 tools. [`docs/TOOLS.md`](./docs/TOOLS.md) walks through the core groups; call `tools/list` from
 your agent for the authoritative live schemas.
 
 - **Setup & connect** — `check_setup_readiness` (what the account has, what it needs, the single
@@ -202,6 +202,11 @@ your agent for the authoritative live schemas.
   `channel_performance`, `channel_opportunities`, `channel_coverage`, `listing_changes` (did the
   last edit actually work), `describe_listing_attributes`, `set_listing_attributes`,
   `set_channel_settings`, `import_size_measurements`.
+- **Catalog import (tracked listings)** — bring what a merchant already sells on a channel in,
+  read-only: `import_channel_catalog` (start; returns the run already going if there is one),
+  `get_catalog_import_run` (poll), `list_tracked_listings` (the listings plus each channel's
+  `catalog_read` and last run). Nothing is written to the merchant's store and those products
+  keep shipping as today. WooCommerce and TikTok Shop.
 - **Analytics** — `analytics_summary`, `analytics_timeseries`, `analytics_breakdown`,
   `analytics_ops`, `analytics_portfolio`.
 - **Collections** — `list_collections`, `get_collection`, `create_collection`, `update_collection`,
