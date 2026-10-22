@@ -369,6 +369,10 @@ function mapOrderListItem(raw: unknown): Record<string, unknown> {
   // an agent can tell the user instead of reading an ordinary "cancelled".
   const attention = isRecord(raw) ? raw.needs_attention : undefined;
   if (isRecord(attention)) out.needs_attention = attention;
+  // apparelhub-ai#1322: the sales channel's ship-by deadline (UTC). TikTok Shop
+  // sets one on every order and counts a late shipping update against the shop.
+  const shipBy = str(raw, 'ship_by_at');
+  if (shipBy) out.ship_by_at = shipBy;
   const customer = str(raw, 'customer_name', 'recipient_name');
   if (customer) out.customer_name = customer;
   const shipments = asArray(isRecord(raw) ? raw.shipments : undefined);
@@ -392,7 +396,7 @@ function mapOrderDetail(raw: unknown): Record<string, unknown> {
 export const listMyOrders = defineTool({
   name: 'list_my_orders',
   description:
-    "List the merchant's recent orders across channels. An order carrying `needs_attention` is one the merchant must act on (the fulfillment provider failed or cancelled it, the buyer cancelled after production started, or it was paid but never sent to production): always tell the user about those, with the `message`. Read-only.",
+    "List the merchant's recent orders across channels. An order carrying `needs_attention` is one the merchant must act on (the fulfillment provider failed or cancelled it, the buyer cancelled after production started, it was paid but never sent to production, the sales channel's ship-by deadline is close or missed, or the channel refused the tracking): always tell the user about those, with the `message`. `ship_by_at` is the channel's ship-by deadline (UTC) when it has one. Read-only.",
   inputSchema: z.object({
     status: z
       .enum(['pending', 'in_production', 'shipped', 'delivered', 'cancelled'])
@@ -422,7 +426,7 @@ export const listMyOrders = defineTool({
 export const getOrderDetails = defineTool({
   name: 'get_order_details',
   description:
-    'Full detail for one order: line items, payment + fulfillment status, and shipments/tracking. If `needs_attention` is present the order will not complete on its own; tell the user its `title` and `message`. Read-only.',
+    'Full detail for one order: line items, payment + fulfillment status, shipments/tracking, and `ship_by_at` (the sales channel\'s ship-by deadline, UTC) when the channel has one. If `needs_attention` is present the order will not complete on its own; tell the user its `title` and `message`. Read-only.',
   inputSchema: z.object({
     order_uuid: z.string().min(1).describe('The order uuid (from list_my_orders).'),
     workspace: z.string().optional(),

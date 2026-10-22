@@ -217,6 +217,26 @@ describe('needs_attention (apparelhub-ai#1302)', () => {
   });
 });
 
+describe('ship_by_at (apparelhub-ai#1322)', () => {
+  it('passes the ship-by deadline through, and omits it when absent', async () => {
+    const raw = {
+      orders: [
+        { uuid: 'o1', status: 'in_production', ship_by_at: '2026-10-21T06:59:59' },
+        { uuid: 'o2', status: 'in_production', ship_by_at: null },
+      ],
+    };
+    const res = (await listMyOrders.handler({}, fakeContext(apiReturning(raw)))) as any;
+    expect(res.orders[0].ship_by_at).toBe('2026-10-21T06:59:59');
+    expect('ship_by_at' in res.orders[1]).toBe(false);
+  });
+
+  it('get_order_details includes it', async () => {
+    const raw = { order: { uuid: 'o9', ship_by_at: '2026-10-21T06:59:59' } };
+    const res = (await getOrderDetails.handler({ order_uuid: 'o9' }, fakeContext(apiReturning(raw)))) as any;
+    expect(res.order.ship_by_at).toBe('2026-10-21T06:59:59');
+  });
+});
+
 describe('get_order_details', () => {
   it('unwraps a {order:...} envelope and includes payment/fulfillment fields', async () => {
     const raw = {
