@@ -238,12 +238,16 @@ describe('set_order_payment_method', () => {
 
 describe('sync_orders', () => {
   it('POSTs orders/sync scoped to a store', async () => {
-    const { api, calls } = apiReturning({ message: 'Sync complete.', synced_count: 3, errors: [] });
+    const shopify = [{ store: 'Acme', processed: 1, skipped_already_present: 2,
+      not_eligible_reasons: { fulfilled_upstream: 1 }, truncated: false, errors: [] }];
+    const { api, calls } = apiReturning({ message: 'Sync complete.', synced_count: 3, shopify, errors: [] });
     const res = (await syncOrders.handler({ store_uuid: 's1' }, fakeContext(api))) as any;
     expect(calls[0]!.init!.method).toBe('POST');
     expect(calls[0]!.url).toContain('/orders/sync');
     expect(JSON.parse(calls[0]!.init!.body as string)).toEqual({ store_uuid: 's1' });
-    expect(res).toMatchObject({ synced_count: 3, errors: [] });
+    // The per-shop Shopify detail is passed through untouched: the agent must be
+    // able to explain WHY an order was or was not imported, not just a count.
+    expect(res).toMatchObject({ synced_count: 3, shopify, errors: [] });
   });
 
   it('sends an empty body (all stores) when no store_uuid', async () => {

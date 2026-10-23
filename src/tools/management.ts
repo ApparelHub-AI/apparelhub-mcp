@@ -375,8 +375,13 @@ export const setOrderPaymentMethod = defineTool({
 export const syncOrders = defineTool({
   name: 'sync_orders',
   description:
-    'Pull the latest orders from connected fulfillment providers. Pass store_uuid to sync one store; ' +
-    'omit it to sync all of your stores. Use to refresh orders that have not come through yet.',
+    'Import orders that never reached ApparelHub and refresh order status from fulfillment providers. ' +
+    'For each connected Shopify shop it imports recent orders a webhook should have delivered, scoped to ' +
+    'orders placed after the shop was connected and excluding cancelled or already-fulfilled ones (an ' +
+    'imported paid order is sent to the fulfillment provider like a live one). Pass store_uuid to sync one ' +
+    'store; omit it for all stores. Read `shopify[]`: `processed` imported now, `not_eligible_reasons` why ' +
+    'others were left alone, `truncated` means run again, `outcome: "auth_revoked"` carries a reconnect_url ' +
+    'the merchant must open. Report `errors[]`.',
   inputSchema: z.object({
     store_uuid: z.string().optional().describe('Scope the sync to one store (omit for all stores).'),
     workspace: workspaceField,
@@ -392,6 +397,7 @@ export const syncOrders = defineTool({
     });
     return {
       synced_count: num(raw, 'synced_count') ?? 0,
+      shopify: asArray(isRecord(raw) ? raw.shopify : undefined),
       errors: asArray(isRecord(raw) ? raw.errors : undefined),
       message: str(raw, 'message'),
     };

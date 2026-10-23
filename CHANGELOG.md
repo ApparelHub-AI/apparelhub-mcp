@@ -9,6 +9,18 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.18.1]
+
+### Changed
+- `sync_orders` now also imports orders that never reached ApparelHub from each connected
+  Shopify shop (apparelhub-ai#1355; the Shopify review found an order that only existed on
+  Shopify). The import is scoped to orders placed after the shop was connected and excludes
+  cancelled or already-fulfilled ones, because an imported paid order is sent to the fulfillment
+  provider like a live one. The result passes through the API's per-shop `shopify[]` detail
+  (`processed`, `skipped_already_present`, `not_eligible_reasons`, `truncated`, and the
+  `auth_revoked` outcome with its `reconnect_url`) so the agent can explain what happened.
+  The description told agents the tool only refreshed fulfillment-provider status.
+
 ## [0.18.0]
 
 ### Added
