@@ -13,7 +13,7 @@ import { asArray, bool, isRecord, num, str, total } from '../util/shape.js';
 //   - Tracked, never fulfilled. Those products keep shipping exactly as they do today.
 //   - A listing ApparelHub created is recognised and linked to its product, not duplicated.
 //   - Images are the channel's own URLs, referenced rather than copied.
-// Available where the channel reports catalog_read (WooCommerce and TikTok Shop today; the
+// Available where the channel reports catalog_read (Shopify, WooCommerce, Wix and TikTok Shop; the
 // GET /store/{uuid} capability map and the catalog's `channels` both carry it); anything else
 // answers catalog_read_unsupported.
 
@@ -121,7 +121,7 @@ const REFUSALS: Record<string, { message: string; suggestion: string }> = {
   catalog_read_unsupported: {
     message: 'Catalog import is not available for this sales channel yet.',
     suggestion:
-      'Do not retry. Catalog import works where the channel reports catalog_read: true (WooCommerce and TikTok Shop today; list_tracked_listings shows it per channel). Tell the merchant it is not available for this channel yet.',
+      'Do not retry. Catalog import works where the channel reports catalog_read: true (Shopify, WooCommerce, Wix and TikTok Shop; list_tracked_listings shows it per channel). Tell the merchant it is not available for this channel yet.',
   },
 };
 
@@ -135,7 +135,7 @@ export const importChannelCatalog = defineTool({
     'products keep being fulfilled exactly as they are today (ApparelHub never fulfils them). ' +
     'Tell the merchant both of those things before you start. Listings ApparelHub created are ' +
     "recognised and linked to their product, not duplicated. Images stay the channel's own URLs. " +
-    'Available where the channel reports catalog_read: true (WooCommerce and TikTok Shop today). ' +
+    'Available where the channel reports catalog_read: true (Shopify, WooCommerce, Wix and TikTok Shop). ' +
     'To check first, call list_tracked_listings(store_uuid): its `channels` list every connected ' +
     'channel with catalog_read and last_run, even before any import. The import runs in the background: this returns a run to ' +
     'poll with get_catalog_import_run every few seconds until completed or failed, then read the ' +

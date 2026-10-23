@@ -9,6 +9,12 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.19.1]
+
+### Changed
+- Catalog import (`import_channel_catalog`, `list_tracked_listings`) now covers Shopify and Wix as well as
+  WooCommerce and TikTok Shop. Tool descriptions updated; no schema change.
+
 ## [0.19.0]
 
 ### Added
