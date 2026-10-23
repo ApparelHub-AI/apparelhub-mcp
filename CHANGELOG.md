@@ -9,6 +9,16 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.19.0]
+
+### Added
+- `get_order_details` returns `cost` and `profit` (this order's own figures, once the provider
+  has priced it) and, for an order whose checkout was split across several of the merchant's
+  stores, `checkout_split` (apparelhub-ai#1347): the number of orders in the split and the whole
+  checkout's `profit`. Each split order holds only its share of the sale, so its own profit can
+  be negative while the sale made money; report `checkout_split.profit` for the sale, and do not
+  add it up across the orders in the split.
+
 ## [0.18.1]
 
 ### Changed

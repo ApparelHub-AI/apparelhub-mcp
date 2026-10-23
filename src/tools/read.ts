@@ -387,7 +387,7 @@ function mapOrderListItem(raw: unknown): Record<string, unknown> {
 }
 
 function mapOrderDetail(raw: unknown): Record<string, unknown> {
-  return {
+  const out: Record<string, unknown> = {
     ...mapOrderListItem(raw),
     payment_status: str(raw, 'payment_status'),
     payment_method: str(raw, 'payment_method'),
@@ -396,6 +396,21 @@ function mapOrderDetail(raw: unknown): Record<string, unknown> {
     created: str(raw, 'created', 'created_at'),
     updated: str(raw, 'updated', 'updated_at'),
   };
+  // What the order cost the merchant and what it made, from the server's own
+  // figures. Omitted until the provider has priced the order.
+  const cost = num(raw, 'cost_total');
+  if (cost !== undefined && cost > 0) {
+    out.cost = cost;
+    const profit = num(raw, 'profit_margin');
+    if (profit !== undefined) out.profit = profit;
+  }
+  // apparelhub-ai#1347: one storefront checkout split across several of the
+  // merchant's stores becomes one order per store, each with only its share of
+  // the sale, so `profit` above can be negative while the sale made money.
+  // `checkout_split.profit` is the whole checkout's. Passed through untouched.
+  const split = isRecord(raw) ? raw.checkout_split : undefined;
+  if (isRecord(split)) out.checkout_split = split;
+  return out;
 }
 
 export const listMyOrders = defineTool({
@@ -436,7 +451,7 @@ export const listMyOrders = defineTool({
 export const getOrderDetails = defineTool({
   name: 'get_order_details',
   description:
-    'Full detail for one order: line items, payment + fulfillment status, shipments/tracking, and `ship_by_at` (the sales channel\'s ship-by deadline, UTC) when the channel has one. If `needs_attention` is present the order will not complete on its own; tell the user its `title` and `message`. Read-only.',
+    'Full detail for one order: line items, payment + fulfillment status, shipments/tracking, and `ship_by_at` (the sales channel\'s ship-by deadline, UTC) when the channel has one. If `needs_attention` is present the order will not complete on its own; tell the user its `title` and `message`. `cost` and `profit` are this order\'s own figures once the provider has priced it. If `checkout_split` is present, the buyer\'s checkout was split into `checkout_split.order_count` orders across the merchant\'s stores and this order holds only its share: when asked how the sale did, report `checkout_split.profit` (the whole checkout), and never add it up across the orders in the split. Read-only.',
   inputSchema: z.object({
     order_uuid: z.string().min(1).describe('The order uuid (from list_my_orders).'),
     workspace: z.string().optional(),
