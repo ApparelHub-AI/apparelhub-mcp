@@ -351,3 +351,32 @@ describe('list_my_products — listing health', () => {
     expect(ch.health).toBeUndefined();
   });
 });
+
+describe('profit and checkout_split (apparelhub-ai#1347)', () => {
+  const split = {
+    order_count: 2,
+    profit: 0.22,
+    profit_complete: true,
+    checkout_total: 76.29,
+    orders: [
+      { uuid: 'o9', profit: -7.11, is_current: true },
+      { uuid: 'o8', profit: 7.33, is_current: false },
+    ],
+  };
+
+  it('returns the order profit and the whole checkout profit for a split order', async () => {
+    const raw = { order: { uuid: 'o9', cost_total: 22.82, profit_margin: -7.11, checkout_split: split } };
+    const res = (await getOrderDetails.handler({ order_uuid: 'o9' }, fakeContext(apiReturning(raw)))) as any;
+    expect(res.order.cost).toBe(22.82);
+    expect(res.order.profit).toBe(-7.11);
+    expect(res.order.checkout_split).toEqual(split);
+  });
+
+  it('omits checkout_split for an order that was not split, and profit until priced', async () => {
+    const raw = { order: { uuid: 'o9', cost_total: 0, profit_margin: 0, checkout_split: null } };
+    const res = (await getOrderDetails.handler({ order_uuid: 'o9' }, fakeContext(apiReturning(raw)))) as any;
+    expect('checkout_split' in res.order).toBe(false);
+    expect('profit' in res.order).toBe(false);
+    expect('cost' in res.order).toBe(false);
+  });
+});
