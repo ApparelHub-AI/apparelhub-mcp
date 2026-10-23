@@ -1,6 +1,6 @@
 {
   "name": "@apparelhub/mcp-server",
-  "version": "0.19.0",
+  "version": "0.19.1",
   "mcpName": "io.github.ApparelHub-AI/apparelhub-mcp",
   "description": "ApparelHub MCP server: workflow-level tools that let an AI agent design apparel, build products, and sync them to sales channels through the ApparelHub platform.",
   "type": "module",
