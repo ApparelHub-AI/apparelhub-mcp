@@ -3,6 +3,8 @@ import {
   importChannelCatalog,
   getCatalogImportRun,
   listTrackedListings,
+  bindTrackedListing,
+  unbindTrackedListing,
   trackedListingTools,
 } from '../src/tools/tracked.js';
 import { allTools } from '../src/tools/index.js';
@@ -262,5 +264,82 @@ describe('tool surface', () => {
     expect(importChannelCatalog.description).toMatch(/nothing is written to the merchant's store/i);
     expect(importChannelCatalog.description).toMatch(/fulfilled exactly as they are today/);
     expect(listTrackedListings.description).toMatch(/NOT APPARELHUB PRODUCTS/);
+  });
+});
+
+describe('bind_tracked_listing / unbind_tracked_listing (#1332)', () => {
+  const input = { store_uuid: 's1', listing_uuid: 'l1', product_uuid: 'p1' };
+
+  it('previews first and stops with what is still unmapped', async () => {
+    const { api, calls } = client([
+      jsonResponse(200, {
+        dry_run: true, ready: false,
+        mapped: [{ external_variant_id: '901', variant_uuid: 'v1' }],
+        unmapped: [{ external_variant_id: 'pink', title: 'Pink / XS' }],
+        product_variants: [{ uuid: 'v1', color: 'Black', size: 'M' }],
+      }),
+    ]);
+    const res = (await bindTrackedListing.handler(input, fakeContext(api))) as any;
+    expect(res.bound).toBe(false);
+    expect(res.unmapped).toEqual([{ external_variant_id: 'pink', title: 'Pink / XS' }]);
+    expect(res.next_step).toMatch(/variant_map/);
+    expect(calls).toHaveLength(1);                                  // never bound for real
+    expect(JSON.parse(String(calls[0].init?.body))).toMatchObject({ product_uuid: 'p1', dry_run: true });
+  });
+
+  it('binds for real once the preview is ready, with the same map', async () => {
+    const { api, calls } = client([
+      jsonResponse(200, { dry_run: true, ready: true, mapped: [], unmapped: [], product_variants: [] }),
+      jsonResponse(200, {
+        binding: { product_uuid: 'p1', variants: [] },
+        listing: { uuid: 'l1', bound: true, made_in_apparelhub: false, product_uuid: 'p1' },
+      }),
+    ]);
+    const res = (await bindTrackedListing.handler({ ...input, variant_map: { pink: 'v1' } }, fakeContext(api))) as any;
+    expect(res.bound).toBe(true);
+    expect(res.listing.bound).toBe(true);
+    expect(res.listing.made_in_apparelhub).toBe(false);
+    const real = JSON.parse(String(calls[1].init?.body));
+    expect(real).toEqual({ product_uuid: 'p1', variant_map: { pink: 'v1' } });  // no dry_run
+    expect(calls[1].url).toMatch(/\/store\/s1\/catalog\/l1\/bind$/);
+  });
+
+  it('a blocked preview says how to fix it and does not bind', async () => {
+    const { api, calls } = client([
+      jsonResponse(200, { dry_run: true, ready: false, mapped: [], unmapped: [], product_variants: [],
+        blocked: { error: 'product_not_synced_to_provider', message: 'Sync first.' } }),
+    ]);
+    const res = (await bindTrackedListing.handler(input, fakeContext(api))) as any;
+    expect(res.bound).toBe(false);
+    expect(res.next_step).toMatch(/sync_to_fulfillment/);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('turns a refusal into its next step', async () => {
+    const { api } = client([
+      jsonResponse(409, { error: 'listing_already_bound', message: 'That listing is already bound.' }),
+    ]);
+    await expect(bindTrackedListing.handler(input, fakeContext(api))).rejects.toMatchObject({
+      code: 'listing_already_bound',
+      suggestion: expect.stringMatching(/unbind_tracked_listing/),
+    });
+  });
+
+  it('unbinds with DELETE', async () => {
+    const { api, calls } = client([jsonResponse(200, { message: 'Unbound.' })]);
+    const res = (await unbindTrackedListing.handler({ store_uuid: 's1', listing_uuid: 'l1' }, fakeContext(api))) as any;
+    expect(res.unbound).toBe(true);
+    expect(calls[0].init?.method).toBe('DELETE');
+  });
+
+  it('list_tracked_listings carries bound and binding', async () => {
+    const { api } = client([jsonResponse(200, {
+      listings: [{ uuid: 'l1', bound: true, made_in_apparelhub: false, product_uuid: 'p1',
+        binding: { product_uuid: 'p1', product_name: 'Moonlit Tee', variants: [] } }],
+      channels: [],
+    })]);
+    const res = (await listTrackedListings.handler({ store_uuid: 's1' }, fakeContext(api))) as any;
+    expect(res.listings[0].bound).toBe(true);
+    expect(res.listings[0].binding.product_name).toBe('Moonlit Tee');
   });
 });

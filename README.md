@@ -206,7 +206,9 @@ your agent for the authoritative live schemas.
   read-only: `import_channel_catalog` (start; returns the run already going if there is one),
   `get_catalog_import_run` (poll), `list_tracked_listings` (the listings plus each channel's
   `catalog_read` and last run). Nothing is written to the merchant's store and those products
-  keep shipping as today. Shopify, WooCommerce, Wix and TikTok Shop.
+  keep shipping as today. Shopify, WooCommerce, Wix and TikTok Shop. To have ApparelHub fulfil one,
+  `bind_tracked_listing` binds it to an ApparelHub product (their listing is not changed);
+  `unbind_tracked_listing` undoes it.
 - **Analytics** — `analytics_summary`, `analytics_timeseries`, `analytics_breakdown`,
   `analytics_ops`, `analytics_portfolio`.
 - **Collections** — `list_collections`, `get_collection`, `create_collection`, `update_collection`,

@@ -89,6 +89,9 @@ export function mapTrackedListing(raw: unknown): Record<string, unknown> {
     product_sku: str(raw, 'product_sku') ?? null,
     variants: asArray(isRecord(raw) ? raw.variants : undefined).map(mapVariant),
     made_in_apparelhub: bool(raw, 'made_in_apparelhub') ?? productUuid !== null,
+    // Bound (#1332): the merchant's own listing, fulfilled by an ApparelHub product.
+    bound: bool(raw, 'bound') ?? false,
+    binding: isRecord(raw) && isRecord(raw.binding) ? raw.binding : null,
     product_uuid: productUuid,
     first_seen_at: str(raw, 'first_seen_at') ?? null,
     last_seen_at: str(raw, 'last_seen_at') ?? null,
@@ -291,8 +294,131 @@ export const listTrackedListings = defineTool({
   },
 });
 
+// Make a tracked listing fulfillable (#1332): bind it to one of our products. The merchant's
+// channel listing is never written to; orders for it are then fulfilled through the product.
+const BIND_REFUSALS: Record<string, string> = {
+  product_not_synced_to_provider:
+    'Sync the product to its fulfillment provider first (sync_to_fulfillment), then bind again.',
+  variants_not_synced_to_provider:
+    'Some of the product\'s variants are not set up with the fulfillment provider. Re-sync the product to fulfillment, then bind again.',
+  product_not_active: 'Activate the product (update_product status ACTIVE), then bind again.',
+  product_not_in_store: 'Use a product that is in this same store, or add it to the store first.',
+  product_has_no_variants: 'Add variants to the product (add_variants), then bind again.',
+  listing_made_in_apparelhub: 'Nothing to do: ApparelHub made this listing and already fulfils it.',
+  listing_already_bound: 'It is already bound. Call unbind_tracked_listing first to bind a different product.',
+  listing_removed: 'The listing is no longer on the channel, so there is nothing to fulfil. Re-import to refresh.',
+  listing_not_bound: 'Nothing to do: the listing is not bound.',
+};
+
+function bindRefusal(err: unknown): never {
+  if (err instanceof AhError && err.apiCode && BIND_REFUSALS[err.apiCode]) {
+    throw new AhError({
+      httpStatus: err.httpStatus,
+      code: err.apiCode,
+      message: err.message,
+      suggestion: BIND_REFUSALS[err.apiCode],
+    });
+  }
+  throw err;
+}
+
+export const bindTrackedListing = defineTool({
+  name: 'bind_tracked_listing',
+  description:
+    "Make a tracked listing (a product the merchant already sells on their channel that ApparelHub " +
+    "did not make) FULFILLABLE by binding it to an ApparelHub product, so ApparelHub sends that " +
+    "listing's orders to the product's fulfillment provider as ordinary orders. Build the product " +
+    "first the normal way (their artwork on one of our blanks, variants added, synced to " +
+    "fulfillment), in the same store. The merchant's channel listing is NOT changed, and while " +
+    "bound the product cannot be synced to that channel (it would duplicate their listing). Tell " +
+    "the merchant both things. Every variant on the listing must map to one of the product's " +
+    "variants: options are auto-matched by name ('Black / Medium' -> Black, M) and variant_map " +
+    "supplies or overrides the rest. This tool PREVIEWS first and only binds when everything maps " +
+    "and the product can be made; otherwise it returns bound: false with `unmapped` (the channel " +
+    "variants left) and `product_variants` (the choices). Ask the merchant or choose by option " +
+    "names, then call again with variant_map. TikTok Shop listings carry no option names, so they " +
+    "always need variant_map. Find listing_uuid with list_tracked_listings (scope 'external').",
+  inputSchema: z.object({
+    store_uuid: z.string().min(1).describe('The store uuid.'),
+    listing_uuid: z.string().min(1).describe('The tracked listing uuid (list_tracked_listings).'),
+    product_uuid: z.string().min(1).describe('The ApparelHub product that will fulfil it (same store).'),
+    variant_map: z
+      .record(z.string(), z.string())
+      .optional()
+      .describe(
+        "Channel variant id -> ApparelHub variant uuid, for options that do not auto-match. A " +
+          'listing with no variants is keyed by its own external_id.',
+      ),
+    workspace: workspaceField,
+  }),
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  handler: async (input, ctx) => {
+    const path = `store/${enc(input.store_uuid)}/catalog/${enc(input.listing_uuid)}/bind`;
+    const body: Record<string, unknown> = { product_uuid: input.product_uuid };
+    if (input.variant_map && Object.keys(input.variant_map).length) body.variant_map = input.variant_map;
+    try {
+      const preview = await ctx.api.post(path, {
+        body: { ...body, dry_run: true },
+        workspace: input.workspace,
+        signal: ctx.signal,
+      });
+      if (isRecord(preview) && preview.ready !== true) {
+        const blocked = isRecord(preview.blocked) ? preview.blocked : null;
+        const code = blocked ? str(blocked, 'error') : undefined;
+        return {
+          bound: false,
+          unmapped: asArray(preview.unmapped),
+          mapped: asArray(preview.mapped),
+          product_variants: asArray(preview.product_variants),
+          blocked,
+          next_step: blocked
+            ? (code && BIND_REFUSALS[code]) || str(blocked, 'message')
+            : 'Choose a product variant for each entry in `unmapped` (ask the merchant if the option names do not make it obvious), then call bind_tracked_listing again with variant_map.',
+        };
+      }
+      const raw = await ctx.api.post(path, { body, workspace: input.workspace, signal: ctx.signal });
+      return {
+        bound: true,
+        binding: isRecord(raw) && isRecord(raw.binding) ? raw.binding : null,
+        listing: mapTrackedListing(isRecord(raw) ? raw.listing : undefined),
+        note:
+          "Orders for this listing are now fulfilled by ApparelHub through this product. The merchant's listing on the channel was not changed.",
+      };
+    } catch (err) {
+      return bindRefusal(err);
+    }
+  },
+});
+
+export const unbindTrackedListing = defineTool({
+  name: 'unbind_tracked_listing',
+  description:
+    "Undo bind_tracked_listing. The listing is tracked again and its new orders are recorded as " +
+    "fulfilled by the merchant's own store (fulfilled_by: 'merchant'), not sent to a provider. " +
+    'Orders already submitted are not affected. Nothing changes on the channel.',
+  inputSchema: z.object({
+    store_uuid: z.string().min(1).describe('The store uuid.'),
+    listing_uuid: z.string().min(1).describe('The bound listing uuid.'),
+    workspace: workspaceField,
+  }),
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  handler: async (input, ctx) => {
+    try {
+      await ctx.api.del(`store/${enc(input.store_uuid)}/catalog/${enc(input.listing_uuid)}/bind`, {
+        workspace: input.workspace,
+        signal: ctx.signal,
+      });
+      return { unbound: true, note: "New orders for this listing are recorded as fulfilled by the merchant's store." };
+    } catch (err) {
+      return bindRefusal(err);
+    }
+  },
+});
+
 export const trackedListingTools: ToolDef[] = [
   importChannelCatalog,
   getCatalogImportRun,
   listTrackedListings,
+  bindTrackedListing,
+  unbindTrackedListing,
 ];
