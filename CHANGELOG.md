@@ -9,6 +9,17 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.20.0]
+
+### Added
+- `bind_tracked_listing`: make a tracked listing (a product the merchant already sells that
+  ApparelHub did not make) fulfillable by binding it to an ApparelHub product, so its orders go
+  to that product's fulfillment provider. Previews first and only binds when every channel
+  variant maps and the product can be made; otherwise returns the unmapped variants and the
+  choices. The merchant's channel listing is never changed.
+- `unbind_tracked_listing`: undo it; new orders are recorded as fulfilled by the merchant again.
+- `list_tracked_listings` returns `bound` and `binding` per listing.
+
 ## [0.19.1]
 
 ### Changed
