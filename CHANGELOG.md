@@ -9,6 +9,700 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.20.0]
+
+### Added
+- `bind_tracked_listing`: make a tracked listing (a product the merchant already sells that
+  ApparelHub did not make) fulfillable by binding it to an ApparelHub product, so its orders go
+  to that product's fulfillment provider. Previews first and only binds when every channel
+  variant maps and the product can be made; otherwise returns the unmapped variants and the
+  choices. The merchant's channel listing is never changed.
+- `unbind_tracked_listing`: undo it; new orders are recorded as fulfilled by the merchant again.
+- `list_tracked_listings` returns `bound` and `binding` per listing.
+
+## [0.19.1]
+
+### Changed
+- Catalog import (`import_channel_catalog`, `list_tracked_listings`) now covers Shopify and Wix as well as
+  WooCommerce and TikTok Shop. Tool descriptions updated; no schema change.
+
+## [0.19.0]
+
+### Added
+- `get_order_details` returns `cost` and `profit` (this order's own figures, once the provider
+  has priced it) and, for an order whose checkout was split across several of the merchant's
+  stores, `checkout_split` (apparelhub-ai#1347): the number of orders in the split and the whole
+  checkout's `profit`. Each split order holds only its share of the sale, so its own profit can
+  be negative while the sale made money; report `checkout_split.profit` for the sale, and do not
+  add it up across the orders in the split.
+
+## [0.18.1]
+
+### Changed
+- `sync_orders` now also imports orders that never reached ApparelHub from each connected
+  Shopify shop (apparelhub-ai#1355; the Shopify review found an order that only existed on
+  Shopify). The import is scoped to orders placed after the shop was connected and excludes
+  cancelled or already-fulfilled ones, because an imported paid order is sent to the fulfillment
+  provider like a live one. The result passes through the API's per-shop `shopify[]` detail
+  (`processed`, `skipped_already_present`, `not_eligible_reasons`, `truncated`, and the
+  `auth_revoked` outcome with its `reconnect_url`) so the agent can explain what happened.
+  The description told agents the tool only refreshed fulfillment-provider status.
+
+## [0.18.0]
+
+### Added
+- Orders for the merchant's own products (apparelhub-ai#1330). Once a merchant brings in their
+  channel catalog, an order for one of those products is recorded, marked
+  `fulfilled_by: 'merchant'` on `list_my_orders` and `get_order_details`. Their store fulfils it;
+  ApparelHub never sends it to a fulfillment provider, and the fulfillment actions (approve,
+  submit, confirm, cancel, hold, record payment) refuse it with `fulfilled_by_merchant`.
+- `list_my_orders` takes `fulfilled_by` (`merchant` | `apparelhub`) to list one kind only.
+- `update_store_settings` / `get_store_settings`: `notify_on_tracked_orders`, whether to notify
+  about those orders (off by default; they are recorded either way).
+
+## [0.17.0]
+
+### Added
+- Catalog import: tracked listings (apparelhub-ai#1326, #1328). An established seller already
+  has products live on a sales channel that ApparelHub never made; these tools let an agent
+  bring them in and see the merchant's whole catalog. Read-only against the channel: nothing is
+  written to the merchant's store, and those products keep being fulfilled exactly as today
+  (ApparelHub never fulfils them). Listings ApparelHub created are recognised and linked to
+  their product rather than duplicated. WooCommerce and TikTok Shop today; any other channel
+  answers `catalog_read_unsupported`.
+  - `import_channel_catalog(store_uuid, integration_uuid)` starts a background import and
+    returns the run to poll. If one is already running for that channel it returns THAT run
+    (`already_running: true`) instead of erroring, because starting a second is exactly what
+    the platform refuses. `integration_inactive` and `catalog_read_unsupported` come back as
+    their own error codes with the real next step (reconnect; do not retry), and so does
+    `wrong_workspace` (retry with the `workspace` the message names; every tool takes `workspace`).
+  - `get_catalog_import_run(store_uuid, run_uuid)`: status and counts (seen, created, updated,
+    ours, removed, images_fetched). A failed run states `error`; what was read is kept and
+    nothing is marked removed on a partial pass. Read-only.
+  - `list_tracked_listings(store_uuid, integration?, scope?, include_removed?, limit?, offset?)`:
+    the listings plus each channel's `catalog_read` and `last_run`, so it doubles as the
+    "can this channel be imported?" check before any import. `scope: "external"` is what the
+    merchant sold before ApparelHub. Read-only. The description tells the agent tracked
+    listings are not ApparelHub products: no sync, price cascade or fulfilment.
+
+## [0.16.3]
+
+### Added
+- `list_my_orders` and `get_order_details` return `ship_by_at`, the sales channel's ship-by
+  deadline in UTC (set for TikTok Shop orders), so an agent can warn before a late shipping
+  update counts against the shop. Both descriptions now name the new `needs_attention`
+  cases: a ship-by deadline that is close or missed, and a channel that refused the tracking.
+
+## [0.16.2]
+
+### Added
+- `list_my_orders` and `get_order_details` pass through `needs_attention` when the platform
+  flags an order the merchant must act on: the fulfillment provider failed or cancelled it,
+  the buyer cancelled after production started, or it was paid but never sent to
+  production. Before this an agent saw an ordinary "cancelled" and had nothing to tell the
+  user. Both descriptions tell the agent to surface it.
+
+## [0.16.1]
+
+### Fixed
+- `approve_order` reports a failed automatic submit instead of a clean approve. For a
+  sales-channel order the approve also submits the order to the fulfillment provider and
+  returns success even when that submit fails; the tool dropped the error, so an agent
+  could tell a user an order was on its way when it was not in production. The result now
+  carries `submit_error`, `submit_error_kind` (`address_pending` | `other`) and a
+  `next_step`, and the description tells the agent to check `auto_submitted`.
+- `submit_order_to_fulfillment` sends a JSON body. The deployed API returned a server
+  error for a body-less request, so the tool meant to un-stick a stuck order could not.
+
+## [0.16.0]
+
+### Added
+- `generate_image` accepts `concepts`: ask ONE generation for a themed set of designs instead
+  of one. This exists for a brand brief the merchant wants to keep. Handing a whole brand,
+  collection or storefront to a single-image request either throws most of it away or comes
+  back as product photography; asking for a set lets the model answer the brief it was given.
+  Capped at 7 (the platform's cap, so the client clamps rather than refusing), and only a
+  source whose `supports_collection` is true can do it (Nano Banana today). On any other
+  source the platform quietly reduces it to 1, which includes a source the fallback ladder
+  moved to, so the tool now says so in a `warning` rather than let one design read as a set.
+  One model call, so one generation credit; the extras cost nothing. (apparelhub-ai#1175)
+- `generate_image` returns the platform's advisory `prompt_improvement` block. It was dropped
+  before, which hid the one signal that matters here: an `issues` entry of `brand_brief` means
+  the prompt is a whole brand rather than one design, and `improved_prompt` is the strongest
+  single design extracted from it. Never applied for you.
+- `get_design_collection(design_uuid)`: the other designs from the same generation, oldest
+  first, never including the one asked about. Each carries the product name and retail
+  description the model wrote (`title`, `concept_description`; null when absent, never
+  invented) and `background_state`. A set often comes back as pictures of finished garments,
+  so the tool warns when any design is `opaque_varied` (it will print with its background)
+  and its description tells the agent not to build from one without telling the user, and not
+  to call it "a photograph" either, because textured art reports the same state. An ordinary
+  design returns an empty list. Read-only, not metered. (apparelhub-ai#1174)
+
+### Changed
+- `generate_image` description and input schema changed. Hosts that remember per-tool
+  approvals (claude.ai "Always allow") may ask again after upgrading.
+
+## [0.15.3]
+
+### Fixed
+- `process_transparency` no longer reports success when the keyer removed nothing. A
+  yellow-lime screen (for example `#CBCD5C`) is not green-dominant, so the dominance
+  fallback cleared 0 pixels and the untouched opaque square was upscaled, uploaded and
+  returned as a clean re-key. The keyed output is now measured before upload: an opaque
+  result fails with `transparency_not_applied` (nothing uploaded), and a partial key
+  returns `transparency_clean: false` with a `warning` instead of the success note.
+  `design_apparel` treats the new code like `transparency_failed` (keeps the raw design,
+  flagged). (apparelhub-ai#1289)
+- `sync_to_fulfillment` / `ship_product` report a provider rate-limit deferral as
+  `fulfillment_status: 'pending'` with `retry_after` and a do-not-retry warning. The
+  platform now finishes a rate-limited price update automatically (202, `deferred: true`)
+  instead of failing it; previously any 2xx was reported as `synced`. (apparelhub-ai#1266)
+
+No input schema or tool description changed.
+
+## [0.15.2]
+
+### Added
+- Listing metadata for the official MCP registry (`mcpName` in `package.json`, plus `server.json`
+  describing both the npm package and the hosted connector at `https://mcp.apparelhub.ai`).
+  No change to the tool surface.
+- The release workflow now publishes `server.json` to the MCP registry after a real npm
+  publish, authenticating with GitHub OIDC (no stored credential).
+
+## [0.14.0]
+
+### Added
+- `set_product_images` — set an existing product's listing images: attach an uploaded
+  photo or a generated lifestyle shot, reorder them, and choose the cover.
+
+  An agent could generate a design, upload artwork, create a product and sync it to a
+  channel, but could not change the listing imagery afterwards. `update_product` builds
+  its changeset from name/description/price/tiktok_listing only, so the capability
+  existed at the HTTP layer and was simply not reachable.
+
+  A separate tool rather than more fields on `update_product`. Images carry their own
+  validation, their own ORDERING semantics, and an optimistic-concurrency token that
+  none of `update_product`'s other fields have — folding them in would have given one
+  tool two conflict models, and a caller changing a price would be handed an
+  `images_version` they never asked about.
+
+  The list REPLACES the gallery rather than merging into it, which the description
+  says twice because the failure is silent and destructive: sending one new image
+  deletes every other one. Ordering is described as functional, not cosmetic, because
+  channels cap listing images and truncate in gallery order (TikTok Shop 9, Wix 15,
+  Shopify and WooCommerce unlimited) — on a capped channel, position 10 is not a
+  lower-priority image, it is an absent one.
+
+  `ai_generated` is tri-state and independent of `source` on purpose. An uploaded photo
+  may itself be AI-generated and the platform cannot detect that, so `null` means "not
+  stated" and is preserved as such rather than coerced to `false`, which would assert a
+  provenance claim nobody made.
+
+  On a version conflict the tool re-reads and returns the current gallery with
+  `applied: false`; it deliberately does NOT retry. The list the caller built describes
+  a gallery that no longer exists, so replaying it would discard whatever the other
+  writer did — the exact silent clobber the version token exists to prevent.
+
+### Fixed
+- A 409's own error code is no longer discarded. `mapHttpError` folded it into the
+  message ONLY when the body had no message of its own, so the discriminator vanished
+  precisely in the well-formed case and every conflict became indistinguishable.
+
+  The API's code is now preserved on `AhError.apiCode`. The broad `code` stays
+  `conflict` deliberately: callers already branch on it (a resumed upload treats a 409
+  as benign), so narrowing it would have silently rerouted existing behaviour. Both
+  `error` and `error_code` body spellings are read, since the API is not uniform
+  between them. `apiCode` is internal and does not appear in the agent-facing error
+  payload, so the wire contract is unchanged.
+
+## [0.13.8]
+
+### Changed
+- README cross-links the [recipes repo](https://github.com/ApparelHub-AI/apparelhub-recipes)
+  in the surface overview, which now reads skill / MCP server / recipes rather than
+  skill / MCP server.
+
+  The recipes repo had no inbound link from here, so the organization profile was
+  the only path to it. Docs only: no tool was added, removed, or changed, and the
+  tool surface stays at v1, so no agent needs to re-grant anything.
+
+## [0.13.2]
+
+### Added
+- `get_api_reference` now returns a `connector` block reporting what THIS server
+  actually serves: `server_version`, `tool_count` and every `tool_names` entry,
+  plus what to conclude and what to tell the user.
+
+  This exists because an agent had no way to tell "the tool is not built" from
+  "my tool list is stale", and reported the first when the second was true. The
+  block rides an EXISTING tool on purpose: a client whose list is stale does not
+  have any tool added after that list was fetched, so a dedicated
+  `check_connector_version` tool would be invisible to precisely the clients that
+  need it. It works because a stale client holds old tool *descriptions* while the
+  server runs current *code*, so the block arrives in the response regardless.
+
+  The server cannot simply announce the change instead: MCP signals a changed tool
+  list with `notifications/tools/list_changed`, which needs an open stateful
+  session, and this server is deliberately stateless streamable-HTTP so it runs on
+  a Lambda Function URL. It has no channel to announce on; a client only ever
+  learns by asking again.
+
+  The tool list is injected by the registry at call time rather than imported.
+  Importing the tool index back into a tool module is a circular dependency that
+  passes every unit test and then breaks the bundled Lambda build — which is
+  exactly how the first attempt at this failed, caught by the deploy's own bundle
+  smoke check.
+
+### Note on 0.13.1
+- Published to npm but never deployed: its bundle did not load (the circular
+  import above). 0.13.2 is that change, fixed. Use 0.13.2 so the npm package and
+  the hosted server report the same version — which is the whole point of the
+  block they added.
+
+## [0.13.0]
+
+### Added
+- `import_size_measurements`: the blank's real per-size measurements from its
+  fulfillment provider, in the exact shape `size_chart_measurements` takes. US
+  apparel is graded down without a size chart, and until now the only way to give
+  one to a blank whose provider publishes no measurements was a template id copied
+  out of the channel's own admin — something an agent can never discover, verify or
+  correct, because the channel publishes no way to list them.
+- `available: false` is an ANSWER with a `reason`, not a failure. It distinguishes
+  "this provider has no size-guide API at all" (permanent — gate an Import
+  affordance on `source.publishes_size_guides` rather than a hardcoded provider
+  list) from "the provider has one, just not for this blank" (specific to the
+  product) and from a transient outage.
+- `source` names the provider and catalog item every table came from. These are
+  measurements a buyer makes a purchase decision on, published in the merchant's
+  name, so the agent can attribute them rather than presenting them as its own.
+- `notes` reports anything adjusted during import instead of adjusting it silently.
+
+### Changed
+- `set_listing_attributes` and `set_channel_settings` accept an OBJECT value, for
+  fields whose `value_type` is `object`. Previously typed `string | string[]`, so a
+  size chart was rejected by the schema before a request was ever made — the
+  feature was unreachable from an agent regardless of what the platform accepted.
+- `describe_listing_attributes` no longer describes brand and the size chart as
+  shop-wide. Both are per-PRODUCT: they describe the blank, so a shop selling two
+  blanks needs two values, and a shop-wide size chart would replace the accurate
+  per-garment one on every other listing at once. Brand has been described wrongly
+  since it moved scope.
+- Structured fields publish their shape in `channel_ref.object_schema`, and the
+  tool says to build the value from it rather than guessing.
+
+### Fixed
+- `describe_listing_attributes`, `set_listing_attributes`, `set_channel_settings`
+  and `list_my_products` silently dropped `integration_uuid` and `provider` from
+  every response — the shape helper takes `(object, ...keys)` and was being passed
+  a value, so its type guard failed and it returned `undefined`. An agent could not
+  tell which channel had answered, which is ambiguous on a store with more than one
+  connected. Now covered by a test, since nothing caught it for two releases.
+
+## [0.10.3]
+
+### Added
+- `listing_changes`: what has been changed on your listings, and whether it worked.
+  Every shopper-visible edit is recorded as it happens with the signal state that
+  prompted it, and gets a verdict on the ONE metric that change should have moved —
+  a title is judged on click-through, not revenue.
+- `unmeasurable` is documented as the DEFAULT verdict rather than an error, with
+  `verdict_reason` alongside it. On a low-traffic shop most verdicts will be
+  unmeasurable, and reading that as "the change had no effect" is the same
+  mistake as reading a missing metric as zero, one step later in the process.
+- `confounded` marks two edits that landed close enough that neither owns the
+  result. It is a refusal to guess, not a gap in the data.
+
+## [0.10.2]
+
+### Fixed
+- A listing is no longer called `dead` because the *shop* has no traffic. On a shop
+  whose best listing managed 26 views in a month, 8 of 22 listings were being offered
+  as safe to archive — the measurement was of the shop, not the designs.
+- Listings the channel has never reported are no longer invisible. Products synced to
+  a channel that reports nothing back now appear as `no_channel_data` rather than being
+  silently absent from the grid, so "22 listings" stops reading as "your whole catalogue".
+
+### Added
+- `channel_performance` and `channel_opportunities` return a top-level `shop` verdict.
+  Whether the shop is being served at all reframes every per-listing state beneath it,
+  so it is hoisted out of `summary` rather than left somewhere a caller has to go find.
+- `no_channel_data` routes to human review, never to archive and never to a listing
+  rewrite: a listing the channel behaves as though does not exist is almost always a
+  live/approval problem, and no amount of copy work touches that.
+
+## [0.10.1]
+### Added
+- `channel_performance` rows carry `provider`, `store_name` and `store_uuid`, and
+  both channel tools accept `provider` and `store` filters plus return
+  `channels_present`. An agent comparing two rows without knowing their channel
+  was drawing a conclusion it had no basis for — a channel product id is only
+  unique within its own channel.
+
+## [0.10.0]
+### Added
+- `channel_performance`, `channel_opportunities` and `channel_coverage`: what the
+  sales channel itself reports about each listing — impressions, clicks,
+  click-through rate, add-to-carts — plus a derived state saying what to do
+  about it. The order-based analytics tools only know what SOLD, so a listing
+  with heavy traffic and no sales was indistinguishable from one nobody had ever
+  seen.
+
+### Fixed
+- `auto_optimize_listings` no longer archives a listing that people are seeing
+  but not buying. It previously proposed `pause` for anything with zero recorded
+  sales, and the review-and-optimize recipe applies pause autonomously — so a
+  listing with thousands of impressions and no sales, which is proven demand
+  with a fixable listing, was being removed from the storefront. Only a listing
+  the channel reports as genuinely inert is archived now; proven-demand failures
+  route to `optimize_listing` and low-exposure ones to `increase_discovery`.
+- Where no demand data is available (tier lacks analytics, no connected channel
+  reports it, the shop needs reconnecting), the proposal is `review` and nothing
+  is applied. It does not fall back to the sales-only heuristic, which would
+  reintroduce the bug on exactly the channels that cannot see demand.
+
+### Changed
+- `analyze_what_works` includes a `channel_demand` block when available, and
+  says plainly when it is not, rather than presenting sales-only insight as the
+  whole picture.
+
+## [0.8.6]
+### Changed
+- `list_my_designs` now reports why a design has no image. A row still being
+  made carries `processing_status: "pending"`/`"processing"`; one that failed
+  carries `"failed"` plus `processing_error` and `processing_error_code`.
+  The mapper previously dropped all three, so an agent saw a design with a null
+  `full_url` and no way to tell a transient failure worth retrying from a
+  content block that will fail identically every time. The tool description now
+  says to branch on the code rather than match the message text.
+- A completed design is unchanged. The platform reports a null
+  `processing_status` for one, and the fields are omitted entirely in that case
+  rather than adding three nulls to every row of every listing.
+
+## [0.4.0] - 2026-07-11
+
+### Changed (major)
+
+**Composition + placement now run on the platform.** `ship_product` / `create_product` send the
+design + garment ref + print style to the platform's print-data preparation service and receive the
+fully-composed per-placement `print_data` (Garment Intelligence epic apparelhub-ai#549 Phase 3 +
+mcp#101). The client no longer holds the per-garment layout knowledge — so new placement
+calibrations reach every client as a platform data update, with no npm release.
+
+- **Removed** the bundled per-garment layout table + the local composition pipeline
+  (`knowledge/garments.ts` face layouts, the layout resolver, `image/dimensions.ts`, the Python
+  `recompose_fill.py`, and the `recomposeFill`/`solidFill` imaging methods). The resolution floor
+  (`ensure_resolution.py`) and chroma keying (`make_transparent`) stay client-side.
+- **Embroidery thread-color derivation stays client-side** (attached to the create payload as
+  before; the mockup stays options-free).
+- **Tool surface is byte-identical** — no schema/description changes, no Always-allow resets for
+  connector users.
+- **Source maps are no longer published** with the package.
+
+### Migration
+
+- `npx @apparelhub/mcp-server` now **requires** the platform print-data service (it is part of the
+  standard agent API your key already uses). Older 0.3.x releases keep composing locally with their
+  bundled tables — they just don't receive new placement improvements.
+
+## [0.3.14] - 2026-07-10
+
+### Changed
+
+**The hosted server now resolves garment print-geometry from the platform at runtime** (Garment
+Intelligence epic, apparelhub-ai#549 Phase 2b). When `MCP_SERVICE_KEY` is configured (the hosted
+deployment only), product composition resolves per-garment **face layouts + print-style routing +
+interior-surface blanking** from the platform's `garment_layouts` store instead of the bundled
+`knowledge/garments.ts` tables. New calibrations reach the hosted server the moment they land as DB
+rows — no npm release, no version skew across surfaces.
+
+- Local `npx` usage is **unchanged**: with no service key it always uses the bundled tables.
+- Graceful degradation: any resolve failure (endpoint unavailable, non-200, malformed body) falls
+  back to the bundled tables, so composition never breaks. Resolved layouts are cached per
+  `(provider, product_ref)` for the process lifetime.
+- **Tool surface is byte-identical** — schemas and descriptions are unchanged; this is a pure
+  internal-resolution swap.
+
+## [0.3.13] - 2026-07-10
+
+### Fixed
+
+Four more "print area != visible FACE" garment quirks, found by the proactive **Merch QC discovery
+sweep** (rendering a standardized QC probe on diverse garments and grading each by vision) and each
+grid-calibrated + live-verified clip-free. `faceLayoutFor` (knowledge/garments.ts) gains a branch
+per garment:
+
+- **Tote bags (Printful 274) top-favor the visible front.** The single `default` wrap area is the
+  front + back folded at the bottom, so a subject centered on the area is clipped at the fold. Art
+  now composes into the top ~45%; the pocket sibling gets the solid background.
+- **Softcover journals / notebooks (Printful 1013) print on the FRONT cover, clear of the spine.**
+  The `outside_cover` area is back + spine + front laid flat, so a centered design lands ON the
+  spine and is cut by the crease. Art now composes onto the right half (the front cover).
+- **Bucket hats (Printful 654) confine the design to the flat front crown.** The `outside_front`
+  area is a tightly-curved dome — a full-bleed design wraps over the crown top and down the brim.
+  Art now sits in the small flat front-facing band.
+- **Mugs / steins get a TIGHTER front-arc inset than a tall bottle.** A mug's front-facing arc is
+  only the central ~50% of the print width (horizontal-stripe-probe calibrated), so the general
+  cylinder inset (tuned for a tall water bottle) let a centered design wrap around the mug's sides
+  out of view. `MUG_RE` is checked before `CYLINDER_RE` and insets to the front arc.
+
+### Changed
+
+- **Interior / label surfaces on fill goods now print BLANK, never solid-filled.** `fetchGarment`
+  drops `inside_*`, `page*`, and `label_*` placements from the fill set (new `isInteriorPlacement`),
+  so a journal's inside cover + pages and a reversible bucket hat's inside faces are left unprinted
+  instead of getting inked with the design's background color. Exterior display/structural
+  placements (front/back/top/bottom/pocket, `outside_*`) are unaffected — "outside" never matches
+  "inside".
+
+Tool surface unchanged (internal fill-geometry knowledge only). No schema/description changes.
+
+## [0.3.12] - 2026-07-10
+
+### Added
+
+- **`list_my_products` now returns `created` and `updated` per product.** The underlying list
+  endpoint already provides them; the tool was dropping them. Exposing the timestamps lets a caller
+  reason about recency — e.g. a reconciler/scheduled job deciding whether the product set has been
+  stable long enough to self-terminate (nothing built or rebuilt within a grace window). Without
+  this a stable-completion self-delete couldn't verify its condition and had to stay running.
+
+## [0.3.11] - 2026-07-09
+
+### Fixed
+
+- **Backpack designs favor the top half so a subject isn't split by the pocket seam** (the SPAIN
+  backpack: the goalkeeper's body and "La Roja" straddled the front-pocket seam). A Printful 279
+  All-Over Print Backpack has a front pocket whose seam runs across the lower ~40% of the front
+  face — a design filling the front area is cut in half by it. `faceLayoutFor` now composes the
+  backpack design into the upper-body window ABOVE the seam; the background fills the rest of the
+  front and the pocket/top/bottom panels stay solid, so lettering and player bodies stay intact.
+  Grid-calibrated + live-verified: the full SPAIN crest sits in the upper body, nothing split.
+  (Abstract all-over patterns that read fine when split can still be printed full-bleed.)
+
+## [0.3.10] - 2026-07-09
+
+### Fixed
+
+- **Designs no longer clip at the top/bottom/sides of cylindrical drinkware** (the MOROCCO water
+  bottle: the flag star clipped at the top, "MOROCCO" clipped at the base). A water bottle / tumbler
+  / mug / glass print area WRAPS AROUND the tube — its top maps onto the shoulder/neck, its bottom
+  onto the base, and its left/right around the sides out of frontal view — so a design that fills
+  the area gets cut at every edge. `faceLayoutFor` now recognizes cylindrical drinkware and insets
+  the art into the flat frontal band with margin, so nothing touches a wrapping edge (grid-calibrated
+  + live-verified clip-free on the Slim Water Bottle). Same "print area != visible face" family as
+  the duffle and headphone ear cups.
+
+## [0.3.9] - 2026-07-09
+
+### Fixed
+
+- **Low-resolution QC block no longer strands an unattended run** (the NORWAY passport wallet, which
+  an hourly scheduled task skipped every run and could never finish). Two changes so a low-res
+  design AUTO-RECOVERS instead of dead-ending at the pre-flight QC gate:
+  - `process_transparency` now upscales its keyed result back to a resolution floor (2000px long
+    side, Lanczos, white-premultiplied). Keying + tight-crop can shrink a 1024×1024 design to
+    847×396 (min side < 600 = the QC gate's hard block); it now emerges print-ready, so a caller
+    that gates on `verify_design_quality` before building passes instead of skipping.
+  - `verify_design_quality` now treats low resolution as a **warn, never a hard block** — the build
+    pipeline upscales low-res designs to the print area (process_transparency here, ship_product's
+    placed-path resolution net downstream), so a low-res design must not make an unattended run skip
+    the item. The warn still surfaces it (regenerate the source for genuine large-format detail) and
+    the score stays ≥70 so the item builds.
+
+## [0.3.8] - 2026-07-09
+
+### Fixed
+
+- **Lettering never clipped at a face edge** (the BELGIUM headphones cut the "S" in SPAIN at the
+  oval edge). The headphone ear-cup art is now inset well inside the oval's safe area (56% width,
+  centered), so no lettering touches an edge; both cups still print. General rule for oval / irregular
+  faces: the composed art must sit fully within the printable silhouette with margin, never bled to
+  the edge.
+- **No white strip / no full-bleed-everywhere on duffles** (the NORWAY duffle). The fill sibling
+  logic now distinguishes DISPLAY faces from STRUCTURAL panels by whether a placement has its own
+  face layout: display faces (sock leg strips, both headphone cups) get the composed art; structural
+  panels (duffle sides/top/bottom/pocket, backpack top/bottom/pocket) get the SOLID background — never
+  the design plastered full-bleed (the previous same-size-sibling behavior would have stamped the
+  duffle's design onto every panel and clipped it) and never left blank/white. A duffle now prints as
+  a hero design on the front window with clean solid wrap panels, fully covered on every face.
+
+## [0.3.7] - 2026-07-09
+
+### Fixed
+
+- **No blank faces on multi-face / multi-piece merch** (the WC26 headphones + wallet + duffle
+  incidents), all grid-calibrated against the live providers:
+  - **Zipper / passport wallets** (Printify 708, ~2482x2756): the near-square print area is BOTH
+    exterior faces folded at the bottom — a centered design split across the spine. Fill/placed now
+    composes the design onto BOTH faces (front = top half upright, back = bottom half composed
+    rotated 180deg so it reads upright past the fold). `faceLayoutFor` returns MULTIPLE face rects;
+    `recompose_fill.py --face` is now REPEATABLE with an optional per-face `:1` rotate flag.
+  - **Headphone ear-cup shells** (Printify 1666, AirPods Max): each cup is a separate oval face
+    (Left + Right). The design printed on ONE cup only. It now composes inset to the oval safe area
+    and prints on BOTH cups; a `replicatePlacedAcrossPieces` helper also covers any other placed
+    non-apparel multi-piece good so no piece ships blank.
+  - **All-over duffles** (Printful 465): the front/back display areas wrap past the seams and
+    rounded ends, so a full-width design clipped its edges and left the far side / a white strip
+    bare. The design now composes into the central frontal window and the sides/top/bottom/pocket
+    get the shared solid background (no unprinted face).
+- **Resolution safety net — the missing "regenerate at higher resolution" step** (the WC26 NORWAY
+  passport-wallet QC block). A design generated at ~1024px, keyed and auto-cropped to its artwork
+  bbox, can shrink to e.g. 847x596; placed on a large print area the fulfillment platform's QC gate
+  BLOCKS it ("low resolution") with no automatic remediation, dead-ending the build. The PLACED
+  path now upscales the design (Lanczos, white-premultiplied) to the print area's resolution (new
+  `ensure_resolution.py`, floor clamped to [2000, 3000]px) so it clears the gate; fill/face
+  composition already produced a high-pixel canvas. A `warnings[]` note recommends regenerating for
+  genuine large-format detail. Products carry a `placements_covered` list in the result.
+
+### Changed
+
+- `FaceLayout` now models `faces: FaceRect[]` (one rect per physical face, each optionally
+  `rotate180`) instead of a single `face` + top-level `rotate180`. `recompose_fill.py` gains a
+  `--transparent` mode (per-face composition preserving transparency for placed wrap goods) and
+  repeatable `--face X:Y:W:H[:R]`.
+
+## [0.3.6] - 2026-07-09
+
+### Fixed
+
+- **Fill printing now knows the print area is not always the visible FACE** (the WC26
+  ENGLAND sock + drawstring incidents). Two wrap-style templates are face-calibrated (grid-file
+  preview renders against the live providers):
+  - **Printful sock leg placements**: the FRONT strips render the file **rotated 180°** (file-top
+    = toe) while the BACK strips render it upright (file-top = cuff), and the strip wraps the leg
+    tube so art at ~86% width clipped at the silhouette. Fill now composes a rotated file for the
+    fronts and an upright file for the backs, both confined to the central frontal band.
+  - **Drawstring-bag wrap areas** (Printify blueprint 414: 4950x11100 ~= 16.5"x37") are the front +
+    back folded at the bottom — centered art straddled the fold and printed cut off at the hem.
+    Fill now composes the art into the visible front (top band, clear of the drawstring channel
+    and grommet corners) while the background still fills the whole area (solid back).
+  - Unknown fill areas with an extreme aspect (<=1:2 / >=2.2:1) surface a **warning** to inspect
+    the mockup for wrap/fold cropping instead of silently center-composing.
+- **Fill goods now put a file on EVERY print placement, not just the chosen one.** The ENGLAND
+  sock printed 1 of its 4 leg strips (the other sock + both backs shipped as raw white fabric);
+  the SPAIN backpack's top/bottom/pocket placements were never printed (white bands). Same-size
+  sibling placements reuse the composed art file; differing siblings get ONE shared solid canvas
+  in the art's background color (`recompose_fill.py --solid`). Mockup previews cover the same
+  placement set.
+- **Single-dimension variant matching** (the MOROCCO clear-phone-case failure): garments whose
+  catalog has NO color dimension (clear cases: device sizes only) or NO size dimension resolve by
+  the dimension they DO have instead of failing the whole build with "No variants could be
+  resolved"; the requested name is kept as the variant label and a warning explains the match. The
+  zero-resolved error now also lists the catalog's actual color/size names so an unattended agent
+  can self-correct on the next call.
+
+## [0.3.5] - 2026-07-09
+
+### Fixed
+
+- Thread-colors option id for plain `embroidery_front` placements (bare `thread_colors`), and an
+  error-driven sync self-heal that rewrites the option id Printful names in its rejection. (See
+  release notes for #84.)
+
+## [0.3.4] - 2026-07-09
+
+### Fixed
+
+- Embroidery placements resolved from per-variant templates + thread colors attached at create;
+  fill-face printing (`print_style`) introduced for face goods. (See release notes for #83.)
+
+## [0.3.3] - 2026-07-09
+
+### Fixed
+
+- **Mockups didn't cover every color being imported.** `ship_product` generated the mockup from the
+  first 5 resolved variants — which for a multi-color order (e.g. Black + White) are all ONE color
+  (Black's sizes come first), so the White variants shipped with no mockup and the product gallery
+  only showed black. Mockups are now generated for **one representative variant per DISTINCT color**
+  (new `mockupIdsCoveringColors` helper), so the generated set covers every color the product
+  offers. `ship_product` "thinks ahead": it resolves your variants first, then renders one mockup
+  per imported color. `create_product`'s auto-derived mockup now also samples one-per-color from the
+  catalog (best-effort — it runs before variants exist, so for color-accurate mockups use
+  `ship_product` or pass `mockup_variant_ids` for your chosen colors).
+
+## [0.3.2] - 2026-07-09
+
+### Fixed
+
+- **Printify products came out with 0 variants** from `ship_product` / `create_product` / `add_variants`
+  (and `ship_product` failed outright with "No valid variants found matching the selection"). Printify's
+  variant matrix carries the variant id under **`provider_ref_id`** (a numeric string) with no
+  `id`/`variant_id`/`provider_variant_id` field, but `mapMatrix` didn't read `provider_ref_id`, so every
+  Printify variant resolved to id `0` and the platform rejected it. `mapMatrix` now includes
+  `provider_ref_id` in the lookup (mirroring `catalog.ts`'s `get_garment_details` mapper, which was
+  already correct — which is why that tool reported the right ids). Printful is unaffected (it has `id`,
+  read first). So color+size variant selection now works for Printify without passing explicit
+  `provider_variant_ids`.
+
+## [0.3.1] - 2026-07-08
+
+### Fixed
+
+- **The split-primitive path could never place a product on a store.** `create_product` makes a
+  STANDALONE product (on no store); the store association is `POST /store/<s>/products`, which
+  only `ship_product` ever did. `sync_to_fulfillment` skipped it, and `sync_to_channel` assumed the
+  product was already associated — so a caller that chained the primitives (notably an automated /
+  scheduled agent) hit **"product not associated with store"** at the channel-sync step and the
+  product was left created-but-unsynced. `sync_to_fulfillment` now associates the product with the
+  store (idempotently) before the merchandise sync, so it truly is "the required step before
+  sync_to_channel."
+- **`create_product` silently ignored `generate_mockup: true`** unless `mockup_variant_ids` was
+  also passed — but in the split-primitive flow variants are added AFTER create, so there were none
+  to name, and the product shipped with the raw design as its display image (no garment mockup).
+  `generate_mockup: true` now auto-derives representative variant ids from the garment catalog
+  (already fetched for pricing), so it renders a real mockup on its own. Falls back to the raw
+  design with an explicit `warnings[]` note only if no catalog variants are available.
+- **`add_variants` silently created 0-variant products.** When no requested color/size combination
+  resolved (the classic cause: assuming apparel sizes S/M/L/XL/2XL for a one-size garment like a
+  cap/beanie/phone case — sizes are matched exactly), it returned `variants_added: 0` with a
+  warning an automated caller would ignore. It now throws an actionable error listing the garment's
+  actual available colors and sizes and pointing at `get_garment_details`.
+
+### Changed
+
+- **`sync_to_channel` now self-heals the missing prerequisite.** If the channel sync fails with a
+  prerequisite-shaped client error (400/404/409/422 — the "not associated / not fulfillment-synced
+  yet" case), the tool associates the product with the store, syncs it to the fulfillment provider,
+  and retries the channel sync once, returning a `warnings[]` note that it did so. The clean,
+  explicit order is still `sync_to_fulfillment` → `sync_to_channel` (which now pays nothing extra on
+  the happy path); non-prerequisite errors (auth, rate limit, transient 5xx) still surface unchanged.
+- **Clarified the ordering in tool descriptions** so an agent (including a fresh, memory-less
+  scheduled run) can't miss it: `create_product` states it produces a standalone product and names
+  the required next steps; `sync_to_channel` states its prerequisite and the auto-heal fallback;
+  `sync_to_fulfillment` states it does the store association too; and `ship_product` recommends
+  itself for automated / scheduled runs since it guarantees the correct order in one call.
+
+## [0.3.0] - 2026-07-08
+
+### Added
+
+- **Fulfillment-issue tools** (platform epic apparelhub-ai#510): a post-sale problem-report group
+  for defects on fulfilled orders — the item doesn't match the approved mockup, print quality,
+  damaged in transit, wrong / missing item, late or lost. Printful/Printify accept problem
+  reports **only in their own dashboards, within 30 days of delivery** (resolved as a free
+  reprint or a wallet refund), so the tools compute the window, build the provider-ready report,
+  and track the claim to resolution instead of pretending to file via API.
+  - `report_fulfillment_issue` — open a tracked issue on an order (category, description,
+    affected line items, requested resolution) with the report deadline + days remaining
+    computed up front and a `next_step` pointing at the report/filing flow.
+  - `list_fulfillment_issues` — one order's issues plus its report-window eligibility, or the
+    workspace-wide issues inbox (`status` filter incl. `open_any` = open + filed upstream,
+    `store` filter, limit/offset paging). Read-only.
+  - `check_fulfillment_issue` — the full issue (items, evidence attachments, provider-claim
+    tracking, resolution) plus, by default, the provider-ready problem report: a copy-paste
+    `summary_text` and the provider dashboard deep-link.
+  - `resolve_fulfillment_issue` — one dispatcher for the rest of the lifecycle:
+    `submit_upstream` (record the provider filing + claim reference; returns the dashboard link),
+    `resolve` (close with a `resolution_type`), and `create_replacement` (one-click zero-charge
+    replacement/reship draft order built from the affected items). The platform's structured
+    replacement refusals (`recipient_unavailable`, `variant_unlinked`, `replacement_exists`)
+    surface honestly with what-to-do-instead guidance (create the order manually / reuse the
+    existing replacement) rather than a generic conflict.
+  - Evidence uploads are multipart and stay in the ApparelHub UI; the tools say so explicitly
+    instead of failing opaquely. Tool surface grows 74 → 78.
+
 ## [0.2.7] - 2026-07-07
 
 ### Fixed

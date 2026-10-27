@@ -1,6 +1,12 @@
 import type { ApiClient } from '../http/client.js';
 import { AhError } from '../errors.js';
-import { isFallbackableError } from '../knowledge/sources.js';
+import {
+  isFallbackableError,
+  isContentBlockError,
+  contentBlockSweep,
+  providerOf,
+  CONTENT_BLOCKED_ALL_MODELS,
+} from '../knowledge/sources.js';
 import { isRecord, str } from '../util/shape.js';
 import type { ProgressReporter } from '../progress.js';
 
@@ -10,17 +16,36 @@ import type { ProgressReporter } from '../progress.js';
 // ApiClient already retries transient 5xx/429, so the poll loop here stays simple.
 
 export interface GenerateOptions {
-  prompt: string;
+  /** Optional ONLY for a listing-image request, where the style preset supplies the prompt. */
+  prompt?: string;
   source: string;
   size?: string;
   sourceImageUuid?: string;
+  /** Listing photography: edit THIS product's own rendered mockup (#183). */
+  sourceProductUuid?: string;
+  /** Listing-photo preset (on_model | detail | flat_lay | lifestyle). Composes the prompt. */
+  listingStyle?: string;
+  /** Which of the product's existing listing images to edit. Defaults to its best mockup. */
+  sourceImageUrl?: string;
+  /** Ask ONE generation for a themed set of designs (apparelhub-ai#1175). Sent only when > 1. The
+   *  platform clamps it and silently reduces it to 1 on a source that cannot answer with a set. */
+  concepts?: number;
   workspace?: string;
+}
+
+/** Does this request edit an existing image? Both an explicit source image and a listing-photo
+ *  request do — and an edit can only ever fall back to an edit-capable model. */
+export function isEditRequest(opts: GenerateOptions): boolean {
+  return Boolean(opts.sourceImageUuid || opts.sourceProductUuid);
 }
 
 export interface GeneratedImage {
   image_uuid: string;
   image_url: string;
   source_used: string;
+  /** The platform's advisory prompt-improvement block, when it returned one (apparelhub-ai#1146).
+   *  Passed through untouched: it is the only place an agent learns the prompt was a brand brief. */
+  prompt_improvement?: Record<string, unknown>;
 }
 
 /** One rung of a fallback attempt: the model that was tried and why it was abandoned. */
@@ -59,11 +84,19 @@ export async function runGeneration(
   deps: GenerateDeps = {},
 ): Promise<GeneratedImage> {
   const body: Record<string, unknown> = {
-    prompt: opts.prompt,
     source: opts.source,
     size: opts.size ?? '1024x1024',
   };
+  // Omitted entirely rather than sent empty for a preset-only listing request: the platform folds
+  // any prompt in as EXTRA GUIDANCE ahead of its fidelity clause, so a placeholder would land
+  // inside the merchant's real generation prompt rather than being ignored.
+  if (opts.prompt) body.prompt = opts.prompt;
   if (opts.sourceImageUuid) body.source_image_uuid = opts.sourceImageUuid;
+  if (opts.sourceProductUuid) body.source_product_uuid = opts.sourceProductUuid;
+  if (opts.listingStyle) body.style = opts.listingStyle;
+  if (opts.sourceImageUrl) body.source_image_url = opts.sourceImageUrl;
+  // Omitted at 1 so an ordinary generation's request body is byte-for-byte what it was before.
+  if (opts.concepts !== undefined && opts.concepts > 1) body.concepts = opts.concepts;
 
   await deps.progress?.report(10, `Generating with ${opts.source}...`);
   const res = await api.post('images/generate', {
@@ -72,8 +105,8 @@ export async function runGeneration(
     signal: deps.signal,
   });
 
-  // A SYNCHRONOUS success (a model that isn't on the platform's async slow-list, e.g. OpenAI /
-  // Grok Imagine, or a slow model that slipped to the sync path) returns 200 with the image nested
+  // A SYNCHRONOUS success (a model that isn't on the platform's async slow-list, e.g. Grok Imagine
+  // — the only fast/sync source now — or a slow model that slipped to the sync path) returns 200 with the image nested
   // under `generated_image`, NOT top-level like the async 202 does. Read both shapes so a synchronous
   // success isn't misreported as generation_failed even though it saved (ApparelHub-AI/apparelhub-mcp#70).
   const gi = isRecord(res) && isRecord(res.generated_image) ? res.generated_image : undefined;
@@ -83,11 +116,14 @@ export async function runGeneration(
     str(res, 'url', 'image_url', 'full_url') ?? str(gi, 'url', 'image_url', 'full_url');
   const status =
     str(res, 'processing_status', 'status') ?? str(gi, 'processing_status', 'status');
+  // Rides the 202 (the common path, the default source is slow) and the sync 200 alike.
+  const pi = isRecord(res) && isRecord(res.prompt_improvement) ? res.prompt_improvement : undefined;
+  const extra = pi ? { prompt_improvement: pi } : {};
 
   // Fast path: the image came back inline.
   if (directUrl && status !== 'pending' && status !== 'processing') {
     await deps.progress?.report(100, 'Design ready.');
-    return { image_uuid: uuid, image_url: directUrl, source_used: opts.source };
+    return { image_uuid: uuid, image_url: directUrl, source_used: opts.source, ...extra };
   }
 
   // Async path: poll to completion.
@@ -98,7 +134,7 @@ export async function runGeneration(
     });
   }
   const url = await pollGeneration(api, uuid, deps, opts.workspace);
-  return { image_uuid: uuid, image_url: url, source_used: opts.source };
+  return { image_uuid: uuid, image_url: url, source_used: opts.source, ...extra };
 }
 
 /**
@@ -110,33 +146,64 @@ export async function runGeneration(
  *
  * The ladder is short (≤3 sync fallbacks), so the wall-clock cost of exhausting it is bounded even
  * though the first source may be an async-polled model.
+ *
+ * A CONTENT BLOCK takes a second, wider path. Content guards are provider-specific — a prompt one
+ * vendor refuses on recitation grounds routinely renders elsewhere — so on the first
+ * `content_blocked` the short ladder is EXTENDED IN PLACE with a provider-diverse sweep of every
+ * remaining model (contentBlockSweep). This is affordable precisely because a refusal is fast:
+ * ~4.2s measured, quicker than a ~6.0s success, since the model never generates anything.
  */
 export async function runGenerationWithFallback(
   api: ApiClient,
   opts: GenerateWithFallbackOptions,
   deps: GenerateDeps = {},
 ): Promise<GeneratedImageWithFallback> {
-  const sources = opts.sources.length ? opts.sources : [opts.source];
+  // A QUEUE, not a fixed list: a content block appends the full sweep to it mid-flight.
+  const queue = opts.sources.length ? [...opts.sources] : [opts.source];
   const trail: FallbackAttempt[] = [];
   let lastError: unknown;
+  let sweepExtended = false;
 
-  for (let i = 0; i < sources.length; i += 1) {
-    const source = sources[i]!;
+  for (let i = 0; i < queue.length; i += 1) {
+    const source = queue[i]!;
     try {
       const g = await runGeneration(api, { ...opts, source }, deps);
       // g.source_used is the model that actually produced the image (== source here).
       return { ...g, fallback_trail: trail };
     } catch (err) {
       lastError = err;
-      // noFallback: honor the caller's "this model only" — surface the error as-is.
+      // noFallback: honor the caller's "this model only" — surface the error as-is. Checked first
+      // so the opt-out suppresses the content-block sweep too, not just the ladder.
       if (opts.noFallback) throw err;
+
+      const code = err instanceof AhError ? err.code : undefined;
+      const reason = err instanceof AhError ? `${err.code}: ${err.message}` : String(err);
+
+      if (isContentBlockError(err)) {
+        // Extend once, on the FIRST block: every model not already queued, ordered so the next
+        // rungs land on different guards. Excluding the whole queue (not just what has been tried)
+        // keeps a model from being scheduled twice.
+        if (!sweepExtended) {
+          sweepExtended = true;
+          // An edit can only fall back to an edit-capable model; a text-to-image-only model would
+          // spend a rung on a guaranteed rejection.
+          queue.push(...contentBlockSweep({ edit: isEditRequest(opts), exclude: queue }));
+        }
+        trail.push({ source, reason, ...(code ? { code } : {}) });
+        const remaining = queue.length - i - 1;
+        await deps.progress?.report(
+          15,
+          `${source} refused this on content grounds; trying a different provider` +
+            `${remaining > 0 ? ` (${remaining} model${remaining === 1 ? '' : 's'} left)` : ''}...`,
+        );
+        continue;
+      }
+
       // A non-transient failure (validation/auth/forbidden/not_found) must surface immediately;
       // cycling models would not help and would hide the real cause. A platform_rate_limited
       // (ApparelHub's own per-key throttle) is deliberately NOT fallbackable either — every model
       // rides the same key, so it also surfaces here.
       if (!isFallbackableError(err)) throw err;
-      const code = err instanceof AhError ? err.code : undefined;
-      const reason = err instanceof AhError ? `${err.code}: ${err.message}` : String(err);
       trail.push({ source, reason, ...(code ? { code } : {}) });
       // Fall through to the next model (if any).
       await deps.progress?.report(15, `${source} unavailable (${reason}); trying next model...`);
@@ -146,6 +213,30 @@ export async function runGenerationWithFallback(
   // Every model in the ladder was tried and every one was rate-limited/transiently down.
   const summary = trail.map((t) => `${t.source} (${t.reason})`).join('; ');
   const base = lastError instanceof AhError ? lastError : undefined;
+
+  // EVERY model refused on content grounds. This is the one terminal state that makes abandoning
+  // the design legitimate, so it gets its own code and says so explicitly — a generic failure here
+  // reads as "something went wrong, retry", which is exactly the wrong next move.
+  if (trail.length > 0 && trail.every((t) => t.code === 'content_blocked')) {
+    const tried = trail.map((t) => {
+      const p = providerOf(t.source);
+      return p ? `${t.source} [${p}]` : t.source;
+    });
+    const providers = [...new Set(trail.map((t) => providerOf(t.source)).filter(Boolean))];
+    throw new AhError({
+      code: CONTENT_BLOCKED_ALL_MODELS,
+      httpStatus: base?.httpStatus,
+      message:
+        `Every available image model refused this prompt on content grounds ` +
+        `(${tried.length} model${tried.length === 1 ? '' : 's'} across ` +
+        `${providers.length} provider${providers.length === 1 ? '' : 's'}: ${tried.join(', ')}).`,
+      suggestion:
+        'The full model sweep is exhausted — this is the one case where abandoning the design is ' +
+        'the right call, and no amount of rewording the same idea will change it. If the design ' +
+        'still matters, change the SUBJECT: vary the motif and palette away from the recognisable ' +
+        'signature the guards are reacting to, rather than rephrasing the same request.',
+    });
+  }
   // Honest attribution when the WHOLE ladder was provider-throttled: the final error keeps the
   // precise model_rate_limited code so an agent reports "the model providers are rate limiting",
   // never "ApparelHub is rate limiting" (ApparelHub accepted every request).
@@ -195,6 +286,9 @@ async function pollGeneration(
       'unknown';
     const url = str(s, 'url') ?? str(gi, 'url') ?? str(data, 'url');
     const error = str(s, 'error') ?? str(gi, 'error') ?? str(data, 'error');
+    // Machine-readable failure code (apparelhub-ai#825). Absent on older platform builds and on
+    // failures recorded before it shipped, so every use below stays optional.
+    const errorCode = str(s, 'error_code') ?? str(gi, 'error_code') ?? str(data, 'error_code');
 
     if (status === 'failed') {
       // Async models report a provider rate limit as a structured error string (platform
@@ -218,6 +312,44 @@ async function pollGeneration(
             'Retry with a DIFFERENT source — the built-in fallback ladder does this automatically. This is the model provider throttling, not ApparelHub\'s request throttle.',
         });
       }
+      // The platform distinguishes three failure kinds that used to be one opaque string
+      // (apparelhub-ai#825), and they have three DIFFERENT remedies.
+      //
+      // `content_blocked` is the one caused by the prompt, but that does NOT make it terminal:
+      // content guards are provider-specific, so switching model is in fact the single most
+      // effective response. runGenerationWithFallback catches this code and sweeps every remaining
+      // model, provider-diverse. (The suggestion below used to say "do not switch model, because
+      // every model refuses the same request" — that was wrong, and it is what left agents
+      // rewording a prompt six times while nine other models sat untried.)
+      if (errorCode === 'content_blocked') {
+        throw new AhError({
+          code: 'content_blocked',
+          message: error ?? 'The image provider blocked this prompt on content-policy grounds.',
+          suggestion:
+            'One model refused this — that alone is NOT grounds to abandon the design. A different ' +
+            'provider often renders the same prompt, because these guards are provider-specific, ' +
+            'and the server sweeps the remaining models automatically. Only a ' +
+            'content_blocked_all_models result means every model refused. Common causes: a named ' +
+            'copyrighted character, a real brand mark, or a real person.',
+        });
+      }
+      if (errorCode === 'no_image_returned' || errorCode === 'text_response_instead_of_image') {
+        const rephrase = errorCode === 'text_response_instead_of_image';
+        throw new AhError({
+          code: errorCode,
+          message:
+            error ??
+            (rephrase
+              ? 'The model answered with text instead of an image.'
+              : 'The model finished without returning an image.'),
+          suggestion: rephrase
+            ? 'Rephrase the prompt as a description of a flat 2D graphic, or try a different ' +
+              'source — the fallback ladder does this automatically. Asking for 3D, video or ' +
+              'vector output commonly triggers this.'
+            : 'Retry, or try a different source — the fallback ladder does this automatically. ' +
+              'This is not a problem with the prompt.',
+        });
+      }
       throw new AhError({
         code: 'generation_failed',
         message: error ? `Generation failed: ${error}` : 'Generation failed.',
@@ -231,7 +363,7 @@ async function pollGeneration(
       throw new AhError({
         code: 'generation_timeout',
         message: `Generation did not complete within ${Math.round(timeoutMs / 1000)}s.`,
-        suggestion: 'Retry, or use a faster model (OpenAI, Grok Imagine, Flux 1.1 Pro).',
+        suggestion: 'Retry, or use the fast synchronous model (Grok Imagine).',
       });
     }
     poll += 1;

@@ -1,0 +1,546 @@
+import { describe, it, expect } from 'vitest';
+import {
+  channelPerformance,
+  channelOpportunities,
+  channelCoverage,
+  listingChanges,
+  channelTools,
+  importSizeMeasurements,
+  describeListingAttributes,
+  setListingAttributes,
+  setChannelSettings,
+} from '../src/tools/channel.js';
+import { findUnderperformers, type DemandSignal } from '../src/knowledge/insights.js';
+import { ApiClient } from '../src/http/client.js';
+import { fakeContext } from './helpers/ctx.js';
+import { jsonResponse, queueFetch, noSleep } from './helpers/fakeFetch.js';
+
+// Generic placeholders only (public repo): short ids, "Acme Co".
+
+function apiReturning(raw: unknown): ApiClient {
+  const { fetchImpl } = queueFetch([jsonResponse(200, raw)]);
+  return new ApiClient({
+    apiKey: 'k',
+    baseUrl: 'https://api.example.test/agents/v1',
+    userAgent: 't',
+    fetchImpl,
+    sleepImpl: noSleep,
+  });
+}
+
+function recording(raw: unknown = {}): { api: ApiClient; calls: { url: string }[] } {
+  const { fetchImpl, calls } = queueFetch([jsonResponse(200, raw)]);
+  const api = new ApiClient({
+    apiKey: 'k',
+    baseUrl: 'https://api.example.test/agents/v1',
+    userAgent: 't',
+    fetchImpl,
+    sleepImpl: noSleep,
+  });
+  return { api, calls };
+}
+
+const LISTINGS_PAYLOAD = {
+  date_basis: 'channel_local',
+  date_basis_note: 'Channel-local dates.',
+  range: { start: '2026-07-15', end: '2026-08-10' },
+  row_count: 120,
+  coverage: [
+    {
+      provider: 'TikTok Shop',
+      supported: true,
+      grain: 'product_day',
+      reported_metrics: ['impressions', 'clicks', 'units_sold'],
+      unreported_metrics: [],
+      status: 'ok',
+    },
+    {
+      provider: 'WooCommerce',
+      supported: false,
+      reported_metrics: [],
+      unreported_metrics: ['impressions', 'clicks'],
+      status: 'not_reported',
+    },
+  ],
+  listings: [
+    {
+      channel_product_ref: '111',
+      provider: 'TikTok Shop',
+      store_name: 'Acme Apparel',
+      store_uuid: 's1',
+      product_uuid: 'p-hot',
+      product_name: 'Acme Tee',
+      mapped_to_apparelhub: true,
+      state: 'conversion_blocked',
+      action: 'fix_listing_card',
+      reason: 'seen a lot, rarely clicked',
+      impressions: 5420,
+      clicks: 4,
+      units_sold: 0,
+      ctr: 0.0007,
+      days_observed: 27,
+    },
+    {
+      channel_product_ref: '222',
+      product_uuid: 'p-dead',
+      state: 'dead',
+      action: 'archive',
+      reason: 'no activity',
+      impressions: 2,
+      clicks: 0,
+      units_sold: 0,
+      days_observed: 27,
+    },
+  ],
+  summary: { counts: { conversion_blocked: 1, dead: 1 }, total: 2 },
+};
+
+describe('channel_performance', () => {
+  it('surfaces the seen-but-not-bought listing', async () => {
+    const out = (await channelPerformance.handler(
+      {},
+      fakeContext(apiReturning(LISTINGS_PAYLOAD)),
+    )) as Record<string, any>;
+    const hot = out.listings.find((l: any) => l.product_uuid === 'p-hot');
+    expect(hot.state).toBe('conversion_blocked');
+    expect(hot.impressions).toBe(5420);
+    expect(hot.units_sold).toBe(0);
+  });
+
+  it('carries coverage so a missing metric is never read as zero', async () => {
+    const out = (await channelPerformance.handler(
+      {},
+      fakeContext(apiReturning(LISTINGS_PAYLOAD)),
+    )) as Record<string, any>;
+    const woo = out.coverage.find((c: any) => c.provider === 'WooCommerce');
+    expect(woo.supported).toBe(false);
+    expect(woo.unreported_metrics).toContain('impressions');
+  });
+
+  it('states the date basis, since it differs from the order analytics', async () => {
+    const out = (await channelPerformance.handler(
+      {},
+      fakeContext(apiReturning(LISTINGS_PAYLOAD)),
+    )) as Record<string, any>;
+    expect(out.date_basis).toBe('channel_local');
+  });
+
+  it('passes the state filter through', async () => {
+    const { api, calls } = recording(LISTINGS_PAYLOAD);
+    await channelPerformance.handler({ state: 'conversion_blocked' }, fakeContext(api));
+    expect(calls[0].url).toContain('analytics/channel/listings');
+    expect(calls[0].url).toContain('state=conversion_blocked');
+  });
+
+  it('says which channel and store each row came from', () => {
+    // A channel product id is only unique within its channel, so a row without
+    // provenance cannot be safely compared to another.
+    return channelPerformance
+      .handler({}, fakeContext(apiReturning(LISTINGS_PAYLOAD)))
+      .then((out: any) => {
+        const hot = out.listings.find((l: any) => l.product_uuid === 'p-hot');
+        expect(hot.provider).toBe('TikTok Shop');
+        expect(hot.store_name).toBe('Acme Apparel');
+      });
+  });
+
+  it('passes the channel and store filters through', async () => {
+    const { api, calls } = recording(LISTINGS_PAYLOAD);
+    await channelPerformance.handler(
+      { provider: 'TikTok Shop', store: 's1' }, fakeContext(api));
+    expect(calls[0].url).toContain('provider=TikTok+Shop');
+    expect(calls[0].url).toContain('store=s1');
+  });
+
+  it('is read-only', () => {
+    expect(channelPerformance.annotations?.readOnlyHint).toBe(true);
+    expect(channelOpportunities.annotations?.readOnlyHint).toBe(true);
+    expect(channelCoverage.annotations?.readOnlyHint).toBe(true);
+  });
+});
+
+describe('channel_opportunities', () => {
+  it('separates fixable opportunities from the archivable set', async () => {
+    const payload = {
+      ...LISTINGS_PAYLOAD,
+      summary: {
+        counts: { conversion_blocked: 1, dead: 1 },
+        total: 2,
+        top_opportunities: [LISTINGS_PAYLOAD.listings[0]],
+        archivable: [LISTINGS_PAYLOAD.listings[1]],
+      },
+    };
+    const out = (await channelOpportunities.handler(
+      {},
+      fakeContext(apiReturning(payload)),
+    )) as Record<string, any>;
+    expect(out.top_opportunities).toHaveLength(1);
+    expect(out.top_opportunities[0].product_uuid).toBe('p-hot');
+    // the high-traffic listing must NOT be offered as archivable
+    expect(out.safe_to_archive.map((l: any) => l.product_uuid)).toEqual(['p-dead']);
+  });
+});
+
+describe('channel_coverage', () => {
+  it('flags shops that need reconnecting', async () => {
+    const out = (await channelCoverage.handler(
+      {},
+      fakeContext(
+        apiReturning({
+          coverage: [
+            { provider: 'TikTok Shop', supported: true, status: 'reconnect_required' },
+            { provider: 'WooCommerce', supported: false, status: 'not_reported' },
+          ],
+        }),
+      ),
+    )) as Record<string, any>;
+    expect(out.needs_reconnect).toHaveLength(1);
+    expect(out.needs_reconnect[0].provider).toBe('TikTok Shop');
+    expect(out.any_channel_reports_performance).toBe(true);
+  });
+});
+
+describe('tool surface', () => {
+  it('registers the channel tools', () => {
+    expect(channelTools.map((t) => t.name).sort()).toEqual([
+      'channel_coverage',
+      'channel_opportunities',
+      'channel_performance',
+      'describe_listing_attributes',
+      'import_size_measurements',
+      'listing_changes',
+      'set_channel_settings',
+      'set_listing_attributes',
+    ]);
+  });
+
+  it('marks exactly the read tools read-only', () => {
+    // Asserted on the ANNOTATION rather than the name, because that is what a
+    // client acts on: a write mistakenly carrying readOnlyHint can be
+    // auto-approved, and one of these writes records a legal attestation.
+    const readOnly = channelTools
+      .filter((t) => t.annotations?.readOnlyHint === true)
+      .map((t) => t.name)
+      .sort();
+    expect(readOnly).toEqual([
+      'channel_coverage',
+      'channel_opportunities',
+      'channel_performance',
+      'describe_listing_attributes',
+      'import_size_measurements',
+      'listing_changes',
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The archive bug. This is the reason the epic exists.
+// ---------------------------------------------------------------------------
+describe('findUnderperformers demand-awareness', () => {
+  const products = [
+    { product_uuid: 'p-hot', name: 'Acme Tee', status: 'active' },
+    { product_uuid: 'p-dead', name: 'Acme Mug', status: 'active' },
+  ];
+  const orders: any[] = []; // nothing sold
+
+  it('does NOT archive a listing with proven demand', () => {
+    const signals = new Map<string, DemandSignal>([
+      ['p-hot', { state: 'conversion_blocked', impressions: 5420, units_sold: 0 }],
+      ['p-dead', { state: 'dead', impressions: 2, units_sold: 0 }],
+    ]);
+    const proposals = findUnderperformers(products as any, orders, signals);
+    const hot = proposals.find((p) => p.product_uuid === 'p-hot');
+    expect(hot?.action).toBe('optimize_listing');
+    expect(hot?.action).not.toBe('pause');
+  });
+
+  it('archives only the genuinely inert listing', () => {
+    const signals = new Map<string, DemandSignal>([
+      ['p-hot', { state: 'conversion_blocked', impressions: 5420 }],
+      ['p-dead', { state: 'dead', impressions: 2 }],
+    ]);
+    const paused = findUnderperformers(products as any, orders, signals).filter(
+      (p) => p.action === 'pause',
+    );
+    expect(paused.map((p) => p.product_uuid)).toEqual(['p-dead']);
+  });
+
+  it('routes a starved listing to discovery, never to a rewrite or archive', () => {
+    const signals = new Map<string, DemandSignal>([
+      ['p-hot', { state: 'starved', impressions: 40 }],
+    ]);
+    const p = findUnderperformers(products as any, orders, signals).find(
+      (x) => x.product_uuid === 'p-hot',
+    );
+    expect(p?.action).toBe('increase_discovery');
+  });
+
+  it('proposes nothing for a winner', () => {
+    const signals = new Map<string, DemandSignal>([
+      ['p-hot', { state: 'winner', impressions: 9000 }],
+    ]);
+    const refs = findUnderperformers(products as any, orders, signals).map(
+      (p) => p.product_uuid,
+    );
+    expect(refs).not.toContain('p-hot');
+  });
+
+  it('NEVER falls back to archiving when there is no demand data', () => {
+    // The critical degradation. Without a signal the old code archived
+    // everything with zero sales; now it must refuse to judge.
+    const proposals = findUnderperformers(products as any, orders, undefined);
+    expect(proposals.every((p) => p.action === 'review')).toBe(true);
+    expect(proposals.some((p) => p.action === 'pause')).toBe(false);
+  });
+
+  it('treats a product missing from the signal map as unjudgeable', () => {
+    const signals = new Map<string, DemandSignal>([
+      ['p-dead', { state: 'dead', impressions: 1 }],
+    ]);
+    const hot = findUnderperformers(products as any, orders, signals).find(
+      (p) => p.product_uuid === 'p-hot',
+    );
+    expect(hot?.action).toBe('review');
+  });
+});
+
+describe('the shop-level finding is not buried', () => {
+  // An agent reading per-listing states on a shop nobody is being served will
+  // reach confident conclusions about listings that never had a fair hearing.
+  // The shop verdict has to sit where it cannot be scrolled past, which is why
+  // it is hoisted out of `summary` rather than left nested inside it.
+  const SHOP = {
+    state: 'no_channel_traffic',
+    peak_impressions: 26,
+    summary: 'Nothing in this shop is getting enough views to judge listings.',
+    suggested_focus: 'distribution',
+  };
+
+  it('channel_performance returns the shop verdict at the top level', async () => {
+    const api = apiReturning({ ...LISTINGS_PAYLOAD, summary: { shop: SHOP } });
+    const out: any = await channelPerformance.handler({} as any, fakeContext(api));
+    expect(out.shop).toEqual(SHOP);
+  });
+
+  it('channel_opportunities returns the shop verdict at the top level', async () => {
+    const api = apiReturning({ summary: { shop: SHOP, counts: {}, archivable: [] } });
+    const out: any = await channelOpportunities.handler({} as any, fakeContext(api));
+    expect(out.shop).toEqual(SHOP);
+    // The pairing that matters: an empty archive list next to a shop with no
+    // traffic means "unmeasurable", not "nothing is dead".
+    expect(out.safe_to_archive).toEqual([]);
+  });
+
+  it('omits the shop key rather than inventing a verdict', async () => {
+    const api = apiReturning({ ...LISTINGS_PAYLOAD });
+    const out: any = await channelPerformance.handler({} as any, fakeContext(api));
+    expect(out.shop).toBeUndefined();
+  });
+});
+
+describe('listing_changes: whether the last fix worked', () => {
+  const PAYLOAD = {
+    count: 2,
+    window_days: 7,
+    interventions: [
+      {
+        uuid: 'iv-1', kind: 'title', occurred_at: '2026-07-20T10:00:00',
+        before: 'Old', after: 'New', signal_state: 'conversion_blocked',
+        actor_kind: 'agent', target_metric: 'ctr',
+        verdict: 'improved', evidence: { relative_change: 0.42 },
+      },
+      {
+        uuid: 'iv-2', kind: 'price', occurred_at: '2026-07-21T10:00:00',
+        before: '25.00', after: '19.00', target_metric: 'units_sold',
+        verdict: 'unmeasurable', verdict_reason: 'no_shop_traffic',
+      },
+    ],
+    summary: {
+      total: 2, measurable: 1, counts: { improved: 1, unmeasurable: 1 },
+      headline: '1 of 1 judged changes improved the metric they targeted (2 recorded in total).',
+    },
+  };
+
+  it('returns the changes with their verdicts', async () => {
+    const api = apiReturning(PAYLOAD);
+    const out: any = await listingChanges.handler({} as any, fakeContext(api));
+    expect(out.change_count).toBe(2);
+    expect(out.changes[0].verdict).toBe('improved');
+    expect(out.changes[0].target_metric).toBe('ctr');
+  });
+
+  it('keeps the reason a verdict could not be reached', async () => {
+    // "unmeasurable" on its own is nearly as unhelpful as a wrong answer — the
+    // reason is what tells an agent whether to wait, reconnect, or stop
+    // recommending listing edits entirely.
+    const api = apiReturning(PAYLOAD);
+    const out: any = await listingChanges.handler({} as any, fakeContext(api));
+    expect(out.changes[1].verdict).toBe('unmeasurable');
+    expect(out.changes[1].verdict_reason).toBe('no_shop_traffic');
+  });
+
+  it('hoists how many changes could be judged at all', async () => {
+    // The denominator matters: "1 improved" next to "of 1 judged" reads very
+    // differently from "1 improved of 40 recorded, 39 unjudgeable".
+    const api = apiReturning(PAYLOAD);
+    const out: any = await listingChanges.handler({} as any, fakeContext(api));
+    expect(out.measurable).toBe(1);
+    expect(out.headline).toContain('judged');
+  });
+
+  it('passes the filters through', async () => {
+    const { api, calls } = recording(PAYLOAD);
+    await listingChanges.handler(
+      { days: 30, product: 'p-1', verdict: 'worsened' } as any, fakeContext(api));
+    expect(calls[0].url).toContain('analytics/interventions');
+    expect(calls[0].url).toContain('days=30');
+    expect(calls[0].url).toContain('product=p-1');
+    expect(calls[0].url).toContain('verdict=worsened');
+  });
+
+  it('is registered and read-only', () => {
+    expect(channelTools.map((t) => t.name)).toContain('listing_changes');
+    expect(listingChanges.annotations?.readOnlyHint).toBe(true);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// Size chart measurements. The provider's numbers are imported rather than
+// typed, and the value is an OBJECT — exactly what the old string-only schema
+// could not carry.
+// ---------------------------------------------------------------------------
+describe('size chart measurements', () => {
+  const TABLE = {
+    unit: 'inch',
+    sizes: ['S', 'M'],
+    columns: [{ label: 'Chest', values: { S: '18.25', M: '20.25' } }],
+  };
+
+  it('accepts a structured value on set_listing_attributes', async () => {
+    // ⛔ THE GATE. `values` used to be typed string | string[], so a size chart
+    // was rejected by the schema before a request was ever made — the feature
+    // was unreachable from an agent no matter what the platform accepted.
+    const parsed = setListingAttributes.inputSchema.safeParse({
+      store_uuid: 's-1',
+      product_uuid: 'p-1',
+      values: { size_chart_measurements: TABLE },
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  it('accepts a structured value on set_channel_settings too', () => {
+    const parsed = setChannelSettings.inputSchema.safeParse({
+      store_uuid: 's-1',
+      integration_uuid: 'i-1',
+      values: { default_size_measurements: TABLE },
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  it('still accepts the scalar and multi shapes', () => {
+    const parsed = setListingAttributes.inputSchema.safeParse({
+      store_uuid: 's-1',
+      product_uuid: 'p-1',
+      values: { material: 'Cotton', style: ['Casual', 'Streetwear'] },
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  it('imports the provider table and keeps its provenance', async () => {
+    const { api, calls } = recording({
+      available: true,
+      measurements: TABLE,
+      source: { provider: 'Printful', product_ref: '586', publishes_size_guides: true },
+    });
+    const out = (await importSizeMeasurements.handler(
+      { store_uuid: 's-1', product_uuid: 'p-1' },
+      fakeContext(api),
+    )) as Record<string, unknown>;
+
+    expect(calls[0].url).toContain('/products/p-1/size-measurements');
+    expect(out.available).toBe(true);
+    expect(out.measurements).toEqual(TABLE);
+    // Provenance travels with the numbers: they are a claim about a physical
+    // garment, published in the merchant's name.
+    expect((out.source as Record<string, unknown>).provider).toBe('Printful');
+  });
+
+  it('reports an unavailable import as an answer, with a reason', async () => {
+    const { api } = recording({
+      available: false,
+      reason: 'provider_publishes_no_size_guide',
+      message: 'That provider does not publish size guides through its API.',
+      source: { provider: 'Printify', publishes_size_guides: false },
+    });
+    const out = (await importSizeMeasurements.handler(
+      { store_uuid: 's-1', product_uuid: 'p-1' },
+      fakeContext(api),
+    )) as Record<string, unknown>;
+
+    expect(out.available).toBe(false);
+    // An agent branches on this, so it must survive normalisation.
+    expect(out.reason).toBe('provider_publishes_no_size_guide');
+    expect(out.message).toBeTruthy();
+    expect(out.measurements).toBeNull();
+  });
+
+  it('passes through what the import adjusted rather than dropping it', async () => {
+    const { api } = recording({
+      available: true,
+      measurements: TABLE,
+      source: { provider: 'Printful' },
+      notes: ['Dropped the "Height" measurement for "6", which is not a listed size.'],
+    });
+    const out = (await importSizeMeasurements.handler(
+      { store_uuid: 's-1', product_uuid: 'p-1' },
+      fakeContext(api),
+    )) as Record<string, unknown>;
+    expect((out.notes as unknown[]).length).toBe(1);
+  });
+
+  it('is marked read-only — importing must never look like a write', () => {
+    expect(importSizeMeasurements.annotations?.readOnlyHint).toBe(true);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// `str()` takes (object, ...keys). Passing it a VALUE makes its isRecord()
+// guard false and it silently returns undefined — so these fields were dropped
+// from every listing-attribute response for two releases, with nothing failing.
+// ---------------------------------------------------------------------------
+describe('normalisation keeps the fields the platform sent', () => {
+  it('describe_listing_attributes reports which channel answered', async () => {
+    const { api } = recording({
+      integration_uuid: 'i-1',
+      provider: 'TikTok Shop',
+      supported: true,
+      fields: [],
+      values: {},
+    });
+    const out = (await describeListingAttributes.handler(
+      { store_uuid: 's-1', product_uuid: 'p-1' },
+      fakeContext(api),
+    )) as Record<string, unknown>;
+    // Without this an agent cannot tell WHICH channel it just read, and a store
+    // with two connected channels becomes ambiguous.
+    expect(out.integration_uuid).toBe('i-1');
+    expect(out.provider).toBe('TikTok Shop');
+  });
+
+  it('set_listing_attributes reports which channel accepted the write', async () => {
+    const { api } = recording({
+      integration_uuid: 'i-1',
+      provider: 'TikTok Shop',
+      accepted: { material: 'Cotton' },
+      rejected: [],
+    });
+    const out = (await setListingAttributes.handler(
+      { store_uuid: 's-1', product_uuid: 'p-1', values: { material: 'Cotton' } },
+      fakeContext(api),
+    )) as Record<string, unknown>;
+    expect(out.integration_uuid).toBe('i-1');
+    expect(out.provider).toBe('TikTok Shop');
+  });
+});

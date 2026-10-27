@@ -89,7 +89,7 @@ function mapHold(raw: unknown): Record<string, unknown> {
 export const approveOrder = defineTool({
   name: 'approve_order',
   description:
-    'Approve an order that is awaiting approval, releasing it for fulfillment. For sales-channel (webhook) orders this also auto-submits the order to the fulfillment provider (Printful/Printify). Use when an order is held for review and the user wants to let it proceed.',
+    'Approve an order that is awaiting approval, releasing it for fulfillment. For sales-channel (webhook) orders this also auto-submits the order to the fulfillment provider (Printful/Printify). ALWAYS check auto_submitted in the result: false means the order is approved but NOT in production, and submit_error says why. Use when an order is held for review and the user wants to let it proceed.',
   inputSchema: orderInput,
   annotations: { idempotentHint: true, openWorldHint: true },
   handler: async (input, ctx) => {
@@ -99,6 +99,17 @@ export const approveOrder = defineTool({
     });
     const out = actionResult(input.order_uuid, raw);
     if (isRecord(raw) && raw.auto_submitted !== undefined) out.auto_submitted = raw.auto_submitted;
+    // apparelhub-ai#1300: approve succeeds even when the automatic submit to
+    // the provider fails. Dropping the error here is how an agent (and a
+    // merchant) believed a paid order was on its way when it was not.
+    if (isRecord(raw) && raw.auto_submitted === false) {
+      if (raw.submit_error !== undefined) out.submit_error = raw.submit_error;
+      if (raw.submit_error_kind !== undefined) out.submit_error_kind = raw.submit_error_kind;
+      out.next_step =
+        raw.submit_error_kind === 'address_pending'
+          ? 'The sales channel has not released the shipping address yet. ApparelHub retries automatically every hour; call submit_order_to_fulfillment later, or check_order_status to see if it went through.'
+          : 'The order is approved but NOT sent to production. Tell the user the reason, fix it, then call submit_order_to_fulfillment.';
+    }
     return out;
   },
 });
@@ -178,6 +189,10 @@ export const submitOrderToFulfillment = defineTool({
   annotations: { idempotentHint: true, openWorldHint: true },
   handler: async (input, ctx) => {
     const raw = await ctx.api.post(`orders/${enc(input.order_uuid)}/submit-fulfillment`, {
+      // A JSON body is required by deployed servers that predate
+      // apparelhub-ai#1300; without it the request 500s before the order is
+      // even looked up. Empty = use the stored/channel recipient.
+      body: {},
       workspace: input.workspace,
       signal: ctx.signal,
     });
@@ -189,6 +204,75 @@ export const submitOrderToFulfillment = defineTool({
       str(fulfillment, 'external_id') ?? str(payload, 'external_id', 'provider_external_id');
     if (externalId !== undefined) out.provider_external_id = externalId;
     return out;
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Draft-order item edit (apparelhub-ai#643)
+// ---------------------------------------------------------------------------
+
+/** Relay the edit_method envelope so the caller knows if the order was re-created. */
+function editResult(orderUuid: string, raw: unknown): Record<string, unknown> {
+  const out = actionResult(orderUuid, raw);
+  if (isRecord(raw)) {
+    if (raw.edit_method !== undefined) out.edit_method = raw.edit_method;
+    if (raw.in_place !== undefined) out.in_place = raw.in_place;
+    if (raw.fulfillment_external_id !== undefined) out.fulfillment_external_id = raw.fulfillment_external_id;
+    if (raw.previous_external_id !== undefined) out.previous_external_id = raw.previous_external_id;
+  }
+  return out;
+}
+
+export const addOrderItem = defineTool({
+  name: 'add_order_item',
+  description:
+    'Add an item (e.g. another variant of the same product) to a DRAFT order, before it is confirmed to production. ' +
+    'Optionally set custom_price (the new item\'s per-unit retail price) and/or shipping_cost (the order-level retail ' +
+    'shipping the customer pays — NOT the provider\'s cost); omit them and the variant price / existing shipping are kept. ' +
+    'Only works while the order is in "draft" status. Printful and Gelato edit the existing provider draft IN PLACE; ' +
+    'Printify has no edit API, so it CANCELS + RE-CREATES the order — the result then carries edit_method="recreated" ' +
+    'and a new fulfillment_external_id. Nothing is charged on a draft, so re-creation is safe. Returns 409 ' +
+    '"order_not_editable" if the order was already confirmed/submitted to production.',
+  inputSchema: z.object({
+    order_uuid: z.string().min(1).describe('The DRAFT order uuid (from list_my_orders / get_order_details).'),
+    variant_uuid: z.string().min(1).describe('The product variant to add (e.g. another color/size of the same product).'),
+    quantity: z.number().int().min(1).optional().describe('Quantity to add (default 1).'),
+    custom_price: z.number().min(0).optional().describe('Per-unit retail price for the new item. Omit to use the variant\'s own price.'),
+    shipping_cost: z.number().min(0).optional().describe('Order-level retail shipping price (what the customer pays, not the provider cost). Omit to keep the order\'s current shipping.'),
+    workspace: z.string().optional().describe('Workspace uuid (agency accounts). Omit for Default.'),
+  }),
+  annotations: { openWorldHint: true },
+  handler: async (input, ctx) => {
+    const body: Record<string, unknown> = { variant_uuid: input.variant_uuid, quantity: input.quantity ?? 1 };
+    if (input.custom_price !== undefined) body.custom_price = input.custom_price;
+    if (input.shipping_cost !== undefined) body.shipping_cost = input.shipping_cost;
+    const raw = await ctx.api.post(`orders/${enc(input.order_uuid)}/items`, {
+      body,
+      workspace: input.workspace,
+      signal: ctx.signal,
+    });
+    return editResult(input.order_uuid, raw);
+  },
+});
+
+export const removeOrderItem = defineTool({
+  name: 'remove_order_item',
+  description:
+    'Remove a line item from a DRAFT order (the order must keep at least one item). Same provider semantics as ' +
+    'add_order_item: Printful/Gelato edit in place, Printify cancels + re-creates. Only works while the order is a ' +
+    'draft. Get the order_item_id from get_order_details (each item carries an id).',
+  inputSchema: z.object({
+    order_uuid: z.string().min(1).describe('The DRAFT order uuid.'),
+    order_item_id: z.number().int().describe('The order item id to remove (from get_order_details items[].id).'),
+    workspace: z.string().optional().describe('Workspace uuid (agency accounts).'),
+  }),
+  annotations: { openWorldHint: true },
+  handler: async (input, ctx) => {
+    const raw = await ctx.api.del(`orders/${enc(input.order_uuid)}/items/${input.order_item_id}`, {
+      workspace: input.workspace,
+      signal: ctx.signal,
+    });
+    return editResult(input.order_uuid, raw);
   },
 });
 
@@ -342,6 +426,8 @@ export const orderTools: ToolDef[] = [
   cancelOrder,
   confirmOrder,
   submitOrderToFulfillment,
+  addOrderItem,
+  removeOrderItem,
   checkOrderStatus,
   reconcileOrder,
   listOrderHolds,

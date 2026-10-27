@@ -4,6 +4,7 @@ import { asArray, isRecord, num, str, viewUrl } from '../util/shape.js';
 import {
   deriveInsights,
   findUnderperformers,
+  type DemandSignal,
   type InsightOrder,
   type InsightProduct,
 } from '../knowledge/insights.js';
@@ -15,6 +16,46 @@ import type { ToolContext } from './context.js';
 // delete; keep listings' state; respect pricing floors) when explicitly applied.
 
 const enc = encodeURIComponent;
+
+/**
+ * Per-listing demand signal from the sales channels, keyed by product_uuid.
+ *
+ * Best-effort by design. It returns undefined — never an empty map — when the
+ * signal is unavailable for ANY reason (tier lacks advanced analytics, no
+ * connected channel reports performance, the shop needs reconnecting, the
+ * request failed). That distinction is load-bearing: an empty map would read as
+ * "checked, found no demand anywhere" and let the caller archive everything,
+ * whereas undefined means "we cannot see demand" and blocks autonomous archive.
+ */
+async function loadDemandSignals(
+  ctx: ToolContext,
+  workspace: string | undefined,
+): Promise<Map<string, DemandSignal> | undefined> {
+  try {
+    const raw = await ctx.api.get('analytics/channel/listings', {
+      workspace,
+      signal: ctx.signal,
+    });
+    const listings = asArray(isRecord(raw) ? raw.listings : undefined);
+    if (!listings.length) return undefined;
+    const map = new Map<string, DemandSignal>();
+    for (const item of listings) {
+      const uuid = str(item, 'product_uuid');
+      const state = str(item, 'state');
+      if (!uuid || !state) continue;
+      map.set(uuid, {
+        state,
+        impressions: num(item, 'impressions'),
+        units_sold: num(item, 'units_sold'),
+      });
+    }
+    return map.size ? map : undefined;
+  } catch {
+    // Deliberately swallowed to a NEGATIVE signal, not to an empty one: the
+    // caller must degrade to "cannot judge", never to "nothing has demand".
+    return undefined;
+  }
+}
 
 async function loadData(
   ctx: ToolContext,
@@ -45,14 +86,50 @@ export const analyzeWhatWorks = defineTool({
   annotations: { readOnlyHint: true, openWorldHint: true },
   handler: async (input, ctx) => {
     const { products, orders } = await loadData(ctx, input.store_uuid, input.workspace);
-    return { insights: deriveInsights(products, orders) };
+    const signals = await loadDemandSignals(ctx, input.workspace);
+    const insights = deriveInsights(products, orders);
+
+    // Own-account sales tell you what SOLD. The channel signal tells you what
+    // was SEEN — which is where the unrealised money is.
+    let demand: Record<string, unknown> | undefined;
+    if (signals) {
+      const counts: Record<string, number> = {};
+      for (const s of signals.values()) counts[s.state] = (counts[s.state] ?? 0) + 1;
+      const wasted = [...signals.entries()]
+        .filter(([, v]) => v.state === 'conversion_blocked' || v.state === 'pdp_blocked')
+        .sort((a, b) => (b[1].impressions ?? 0) - (a[1].impressions ?? 0))
+        .slice(0, 5)
+        .map(([product_uuid, v]) => ({
+          product_uuid,
+          state: v.state,
+          impressions: v.impressions,
+        }));
+      demand = { state_counts: counts, biggest_missed_opportunities: wasted };
+    }
+
+    return {
+      insights,
+      ...(demand
+        ? { channel_demand: demand }
+        : {
+            channel_demand_unavailable:
+              'No sales channel here reports listing performance, so this view shows ' +
+              'what sold but not what was seen. Use channel_coverage to check why.',
+          }),
+    };
   },
 });
 
 export const autoOptimizeListings = defineTool({
   name: 'auto_optimize_listings',
   description:
-    'Propose (and, with dry_run=false, apply) optimizations across listings. Currently flags no-sales products to pause. DEFAULTS TO DRY-RUN; applying only ever archives (never deletes, never changes a listing to live).',
+    'Propose (and, with dry_run=false, apply) optimizations across listings. Uses the ' +
+    'sales channel\'s own demand data, so a listing that people SEE but do not buy is ' +
+    'flagged for a listing fix rather than archived — that listing is proven demand with ' +
+    'broken conversion, and archiving it destroys the best opportunity in the catalogue. ' +
+    'Only a listing the channel reports as genuinely inert is ever archived. Where no ' +
+    'demand data is available the proposal is "review" and NOTHING is applied. ' +
+    'DEFAULTS TO DRY-RUN; applying only ever archives (never deletes, never goes live).',
   inputSchema: z.object({
     scope: z.enum(['underperformers', 'out_of_date', 'all']).optional(),
     dry_run: z.boolean().optional().describe('Default true — preview only.'),
@@ -62,14 +139,32 @@ export const autoOptimizeListings = defineTool({
   annotations: { openWorldHint: true },
   handler: async (input, ctx) => {
     const { products, orders } = await loadData(ctx, input.store_uuid, input.workspace);
-    const proposals = findUnderperformers(products, orders);
+    const signals = await loadDemandSignals(ctx, input.workspace);
+    const proposals = findUnderperformers(products, orders, signals);
     const dryRun = input.dry_run ?? true;
+
+    // Surfaced on every response so the caller can see WHY a run archived
+    // nothing — "no demand data" and "no dead listings" look identical otherwise.
+    const demandNote = signals
+      ? undefined
+      : 'No demand data available for these listings, so nothing was archived. ' +
+        'Archiving on sales alone would remove listings that people are seeing but ' +
+        'not buying. Use channel_coverage to see which channels report performance.';
+
     if (dryRun) {
-      return { proposed_actions: proposals, executed: false };
+      return {
+        proposed_actions: proposals,
+        executed: false,
+        ...(demandNote ? { demand_data: demandNote } : {}),
+      };
     }
     const results: Record<string, unknown>[] = [];
     for (const p of proposals) {
-      if (p.action !== 'pause') continue; // only the safe action auto-executes
+      // ONLY 'pause' auto-executes, and findUnderperformers only ever emits
+      // 'pause' for a listing the channel confirms is inert. Everything else —
+      // optimize_listing, increase_discovery, review — is returned for a human
+      // or a follow-up tool call, never applied here.
+      if (p.action !== 'pause') continue;
       try {
         await ctx.api.patch(`product/${enc(p.product_uuid)}`, {
           body: { status: 'archived' },
@@ -86,7 +181,12 @@ export const autoOptimizeListings = defineTool({
         });
       }
     }
-    return { proposed_actions: proposals, executed: true, results };
+    return {
+      proposed_actions: proposals,
+      executed: true,
+      results,
+      ...(demandNote ? { demand_data: demandNote } : {}),
+    };
   },
 });
 
@@ -156,6 +256,102 @@ export const cascadePriceChange = defineTool({
       channel_updates: channelUpdates,
       product_url: viewUrl.product(input.product_uuid),
       note,
+    };
+  },
+});
+
+export const setPricesByMargin = defineTool({
+  name: 'set_prices_by_margin',
+  description:
+    "Set each variant's price to hit a target profit margin off its OWN cost: price = cost / (1 - margin). Reads per-variant production cost (populated after the fulfillment sync), applies a per-variant price, then re-syncs connected channels. Use this instead of one flat price when costs tier by size (larger sizes cost more, so a single price gives a different margin per size — and can go negative on the biggest). Requires store_uuid (cost lives on the store-products list, not product detail).",
+  inputSchema: z.object({
+    product_uuid: z.string().min(1),
+    store_uuid: z.string().min(1).describe('The store the product is in — needed to read per-variant cost and to re-sync channels.'),
+    margin: z.number().min(0).max(0.95).describe('Target profit margin as a fraction of the selling price, e.g. 0.15 = 15%.'),
+    also_update_channels: z.boolean().optional().describe('Default true.'),
+    workspace: z.string().optional(),
+  }),
+  annotations: { openWorldHint: true },
+  handler: async (input, ctx) => {
+    const ws = input.workspace;
+    // Per-variant cost lives on the store-products list (variants[].cost), populated by the
+    // fulfillment sync. Product-detail omits it, so read the list and find this product.
+    const list = await ctx.api.get(`store/${enc(input.store_uuid)}/products`, {
+      workspace: ws,
+      signal: ctx.signal,
+    });
+    const products = asArray(isRecord(list) ? (list.products ?? list.items) : list);
+    const product = products.find((p) => isRecord(p) && p.uuid === input.product_uuid);
+    if (!isRecord(product)) {
+      throw new Error(`Product ${input.product_uuid} not found in store ${input.store_uuid}.`);
+    }
+    const variants = asArray(product.variants);
+    if (!variants.length) {
+      throw new Error('Product has no variants to price (add variants and sync to fulfillment first).');
+    }
+
+    const factor = 1 - input.margin;
+    const variantUpdates: Record<string, unknown>[] = [];
+    const missingCost: string[] = [];
+    for (const v of variants) {
+      if (!isRecord(v)) continue;
+      const vuuid = str(v, 'uuid');
+      if (!vuuid) continue;
+      const cost = num(v, 'cost');
+      if (cost === undefined || !(cost > 0)) {
+        missingCost.push(str(v, 'name') ?? vuuid);
+        continue;
+      }
+      const price = Math.round((cost / factor) * 100) / 100;
+      try {
+        await ctx.api.put(`product/${enc(input.product_uuid)}/variants/${enc(vuuid)}`, {
+          body: { name: str(v, 'name'), color: str(v, 'color'), size: str(v, 'size'), price },
+          workspace: ws,
+          signal: ctx.signal,
+        });
+        variantUpdates.push({ variant_uuid: vuuid, name: str(v, 'name'), cost, price });
+      } catch (err) {
+        variantUpdates.push({
+          variant_uuid: vuuid,
+          status: 'failed',
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    const channelUpdates: Record<string, unknown>[] = [];
+    const channels = asArray(product.channel_statuses ?? product.ecommerce_statuses);
+    if ((input.also_update_channels ?? true) && channels.length) {
+      for (const ch of channels) {
+        const integ = str(ch, 'integration_uuid', 'uuid');
+        if (!integ) continue;
+        try {
+          await ctx.api.post(`store/${enc(input.store_uuid)}/products/${enc(input.product_uuid)}/sync`, {
+            query: { target: 'ecommerce', integration_uuid: integ },
+            workspace: ws,
+            signal: ctx.signal,
+          });
+          channelUpdates.push({ integration_uuid: integ, status: 'updated' });
+        } catch (err) {
+          channelUpdates.push({
+            integration_uuid: integ,
+            status: 'failed',
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+
+    return {
+      product_uuid: input.product_uuid,
+      margin: input.margin,
+      variant_updates: variantUpdates,
+      variants_missing_cost: missingCost.length ? missingCost : undefined,
+      channel_updates: channelUpdates,
+      product_url: viewUrl.product(input.product_uuid),
+      note: missingCost.length
+        ? 'Some variants had no cost (not yet synced to fulfillment) and were skipped — sync to fulfillment, then re-run.'
+        : undefined,
     };
   },
 });
@@ -240,5 +436,6 @@ export const systemsTools: ToolDef[] = [
   analyzeWhatWorks,
   autoOptimizeListings,
   cascadePriceChange,
+  setPricesByMargin,
   recoverFromOutage,
 ];

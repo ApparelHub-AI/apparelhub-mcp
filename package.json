@@ -1,6 +1,7 @@
 {
   "name": "@apparelhub/mcp-server",
-  "version": "0.2.7",
+  "version": "0.20.0",
+  "mcpName": "io.github.ApparelHub-AI/apparelhub-mcp",
   "description": "ApparelHub MCP server: workflow-level tools that let an AI agent design apparel, build products, and sync them to sales channels through the ApparelHub platform.",
   "type": "module",
   "bin": {
@@ -61,6 +62,7 @@
     "@vitest/coverage-v8": "^4.1.9",
     "eslint": "^10.6.0",
     "prettier": "^3.9.4",
+    "tesseract.js": "^7.0.0",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.62.1",
     "vitest": "^4.1.9"

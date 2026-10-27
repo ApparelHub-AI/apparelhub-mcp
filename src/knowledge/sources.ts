@@ -47,29 +47,50 @@ export function normalizeSource(source: string): string {
   });
 }
 
-// Only Nano Banana and OpenAI support the img2img edit endpoint; Replicate-backed sources 422.
-export const EDIT_CAPABLE_SOURCES = new Set<string>(['Nano Banana', 'OpenAI']);
+// Most sources support the img2img edit endpoint now (per-model Replicate editing). TWO do NOT:
+// Google Imagen 4 (text-to-image only) and Flux 1.1 Pro (its img2img is Flux Redux — a
+// composition/style VARIATION, not an instruction-editor, so it's not offered for editing). An
+// edit on either returns a clean 400. Multi-reference (several source images) works on the
+// array-input models — see the platform's per-source `supports_multi_image`.
+export const EDIT_CAPABLE_SOURCES = new Set<string>([
+  'Nano Banana', 'OpenAI', 'GPT Image 2',
+  'Seedream 4.0', 'Seedream 4.5', 'Flux 2 Pro', 'Grok Imagine', 'Wan 2.7',
+]);
 
-/** Pick a source. Nano Banana is the best all-rounder (photoreal + text); OpenAI is the pick
- *  for purely abstract art. The user can always override with an explicit source. */
-export function pickSource(opts: { style?: DesignStyle; hasText?: boolean } = {}): string {
-  if (opts.style === 'abstract') return 'OpenAI';
+// Sources that can answer ONE request with a themed SET of designs (apparelhub-ai#1175). The
+// platform is the authority (GET /images/sources carries `supports_collection` per source) and
+// reduces `concepts` to 1 on anything else, so this set is used only to TELL the agent when that
+// happened, most often because the fallback ladder moved off Nano Banana. It never blocks a call.
+export const COLLECTION_CAPABLE_SOURCES = new Set<string>(['Nano Banana']);
+
+// The platform's cap: the primary design plus at most 6 harvested extras. Asking for more is not
+// an error on the platform, it is the cap, so the client clamps to match rather than refusing.
+export const MAX_CONCEPTS = 7;
+
+/** Pick a source. Nano Banana is the best all-rounder (photoreal + text + abstract). OpenAI is
+ *  deliberately NEVER preferred (operator directive: it's the least-preferred model — its account
+ *  is a shared billing surface and it only wins on nothing today). The user can always override
+ *  with an explicit source. */
+export function pickSource(_opts: { style?: DesignStyle; hasText?: boolean } = {}): string {
   return 'Nano Banana';
 }
 
-// The default fallback ladder (spec §Phase 1). Nano Banana first (best all-rounder), then
-// Flux 1.1 Pro (Replicate) and OpenAI (OpenAI). Each rung is on a DIFFERENT provider, so a
-// per-provider rate limit on the first is escaped; the fallbacks are also fast (OpenAI is
-// synchronous, Flux 1.1 Pro is quick), so the time cost of falling back is small. Abstract art
-// prefers OpenAI. Edit (img2img) can only run on the two edit-capable sources.
+// The default fallback ladder (spec §Phase 1). Nano Banana first (best all-rounder), then a
+// Replicate model, and OpenAI ALWAYS LAST (operator directive: OpenAI is the least-preferred
+// model — try everything else first). Each rung is on a DIFFERENT provider, so a per-provider
+// rate limit / account limit on the first is escaped. Edit (img2img) runs on the edit-capable
+// sources (almost everything now — only Google Imagen 4 is text-only). The auto EDIT_LADDER keeps
+// the two most reliable, provider-diverse edit models (Nano Banana + OpenAI); an explicit edit on
+// any other edit-capable source (Seedream, Flux, Grok, Wan, GPT Image 2) is honored via
+// EDIT_CAPABLE_SOURCES.
 const DEFAULT_LADDER = ['Nano Banana', 'Flux 1.1 Pro', 'OpenAI'];
-const ABSTRACT_LADDER = ['OpenAI', 'Nano Banana'];
+const ABSTRACT_LADDER = ['Nano Banana', 'Flux 2 Pro', 'OpenAI'];
 const EDIT_LADDER = ['Nano Banana', 'OpenAI'];
 
 /** Build the ordered, de-duplicated list of sources to try for one generation. When an explicit
  *  `source` is given it goes FIRST, then the appropriate ladder is appended (deduped). When
- *  `edit` is true the list is restricted to the edit-capable sources (img2img); Replicate-backed
- *  sources 422 on the edit endpoint, so they can never be a valid edit fallback. */
+ *  `edit` is true the list is restricted to the edit-capable sources (img2img); a text-to-image-only
+ *  source (only Google Imagen 4) can never be a valid edit fallback. */
 export function fallbackLadder(
   opts: { style?: DesignStyle; source?: string; edit?: boolean } = {},
 ): string[] {
@@ -103,7 +124,33 @@ const FALLBACKABLE_CODES = new Set<string>([
   'request_not_sent', // transport failure — no response received; a different attempt may connect
   'network_error', // legacy alias of request_not_sent (belt-and-braces; no longer emitted)
   'generation_timeout', // async poll never completed — try a (faster) different model
+  // The model finished without producing an image, for a reason unrelated to content policy
+  // (platform code `no_image_returned`, apparelhub-ai#825). Model-specific and NOT caused by the
+  // prompt, so a different model is exactly the right next move. Before the platform
+  // distinguished this from a policy refusal it arrived as a bare `generation_failed` and killed
+  // the whole ladder on the first rung.
+  'no_image_returned',
+  // The model answered conversationally instead of drawing. Also model-specific — another model
+  // routinely renders the same prompt — so it is worth a rung rather than a hard stop.
+  'text_response_instead_of_image',
 ]);
+// DELIBERATELY ABSENT: `content_blocked` — but NOT because it is unrecoverable. It gets its own
+// path (isContentBlockError + contentBlockSweep, below) because it wants the OPPOSITE treatment
+// from everything above: the full model set rather than the short ladder.
+//
+// The reasoning here used to read "a content refusal is caused by the PROMPT, so every remaining
+// model refuses the same request." That is wrong, and it is worth saying so plainly, because it is
+// the assumption this path exists to correct. Content guards are PROVIDER-SPECIFIC: Google runs a
+// recitation/copyright guard that the Replicate-hosted models do not have, so a prompt Google
+// refuses on recitation grounds routinely renders on Flux or Seedream. Measured against
+// production: one session hit a recitation block, reworded the same idea six times, was refused
+// every time, and abandoned the design — while nine other models sat untried.
+//
+// It stays OUT of FALLBACKABLE_CODES so the two behaviours remain separately tunable. That set is
+// for transient/per-model faults and is walked with a short ladder to bound wall-clock on slow
+// retries. A content block is neither transient nor slow — measured ~4.2s to refuse, FASTER than
+// the ~6.0s a success takes, because the model never generates anything — so the cap that protects
+// the rate-limit path buys nothing here and would only truncate the sweep that does the work.
 // Rate-limit-shaped text, used to decide whether an ambiguous `generation_failed` is fallbackable.
 const RATE_LIMIT_MESSAGE_RE = /rate.?limit|quota|429|resource.?exhausted|too many/i;
 
@@ -116,22 +163,154 @@ const RATE_LIMIT_MESSAGE_RE = /rate.?limit|quota|429|resource.?exhausted|too man
 export function isFallbackableError(err: unknown): boolean {
   if (!(err instanceof AhError)) return false;
   if (FALLBACKABLE_CODES.has(err.code)) return true;
+  // A prompt-length rejection is model-SPECIFIC: the identical prompt succeeds on a
+  // model with a longer limit, which is exactly what fallback is for. Without this
+  // the whole generation died on the first rung even though five other models
+  // would have accepted it (#766). Checked before the message heuristic below
+  // because these arrive as an http_error/generation_failed, not a rate limit.
+  if (isPromptTooLongError(err)) return true;
   if (err.code === 'generation_failed') return RATE_LIMIT_MESSAGE_RE.test(err.message);
   return false;
 }
 
+/** The terminal code for "every model refused this on content grounds".
+ *
+ *  This is the ONLY signal that abandoning a design is legitimate. A single block never is —
+ *  that was the behaviour being corrected. Kept distinct from `content_blocked` so an agent can
+ *  tell "one model said no" from "all ten did". */
+export const CONTENT_BLOCKED_ALL_MODELS = 'content_blocked_all_models';
+
+/** TRUE when a provider refused on content/copyright grounds (platform code `content_blocked`,
+ *  normalised across every provider by the platform side of this work). */
+export function isContentBlockError(err: unknown): boolean {
+  return err instanceof AhError && err.code === 'content_blocked';
+}
+
+// Which account/guard each model rides. This is the axis that matters after a content block:
+// cycling to a sibling on the SAME host is the least useful move available, because it is the same
+// guard that just refused.
+//
+// Note `Google Imagen 4` is a Google MODEL but is reached through Replicate, and `GPT Image 2` is
+// native OpenAI (it shares the OpenAI account and therefore the OpenAI moderation surface).
+const SOURCE_PROVIDER: Record<string, string> = {
+  'Nano Banana': 'google',
+  'OpenAI': 'openai',
+  'GPT Image 2': 'openai',
+  'Seedream 4.0': 'replicate',
+  'Seedream 4.5': 'replicate',
+  'Flux 1.1 Pro': 'replicate',
+  'Flux 2 Pro': 'replicate',
+  'Grok Imagine': 'replicate',
+  'Wan 2.7': 'replicate',
+  'Google Imagen 4': 'replicate',
+};
+
+// Preference order WITHIN each provider, best first. `Google Imagen 4` is deliberately last among
+// the Replicate models: it is Google's model, so it is the Replicate entry most likely to carry a
+// Google-flavoured guard and the least likely to help after Google has already refused.
+const PROVIDER_MODEL_ORDER: Record<string, string[]> = {
+  replicate: [
+    'Flux 1.1 Pro', 'Seedream 4.5', 'Flux 2 Pro', 'Seedream 4.0',
+    'Grok Imagine', 'Wan 2.7', 'Google Imagen 4',
+  ],
+  google: ['Nano Banana'],
+  openai: ['OpenAI', 'GPT Image 2'],
+};
+
+// Providers round-robined first, then the last-resort group appended whole.
+//
+// OpenAI is pinned last by the standing operator directive that it is the least-preferred model
+// (shared billing surface, wins on nothing today) — see pickSource. That directive and this
+// path's own logic agree rather than conflict: OpenAI's guard is a moderation/safety guard, the
+// same CLASS Replicate's per-model safety checkers use, so it adds no guard diversity that a
+// Replicate model has not already supplied. Trying it earlier would cost an OpenAI generation for
+// no extra chance of success.
+const SWEEP_PROVIDER_ORDER = ['replicate', 'google'];
+const SWEEP_LAST_RESORT_PROVIDERS = ['openai'];
+
+/** Every model worth trying after a content block, ordered provider-diverse, minus `exclude`.
+ *
+ *  Round-robin across providers means the first few rungs each land on a DIFFERENT guard, which is
+ *  where nearly all the value is: if a different guard is going to render this prompt, it renders
+ *  on rung 2, not rung 7. Siblings on an already-refused host come later, once diversity is spent.
+ *
+ *  `edit` restricts to the edit-capable set — a text-to-image-only model can never be a valid edit
+ *  fallback, and offering one would just spend a rung on a guaranteed 400. */
+export function contentBlockSweep(
+  opts: { edit?: boolean; exclude?: Iterable<string> } = {},
+): string[] {
+  const seen = new Set<string>(opts.exclude ?? []);
+  const sweep: string[] = [];
+  const push = (m: string | undefined): void => {
+    if (!m || seen.has(m)) return;
+    seen.add(m);
+    sweep.push(m);
+  };
+  /** The best still-untried model on this provider. `push` mutates `seen`, so calling this once
+   *  per provider per round walks each provider's list in order. */
+  const nextFrom = (provider: string): string | undefined =>
+    (PROVIDER_MODEL_ORDER[provider] ?? []).find(
+      (m) => !seen.has(m) && (!opts.edit || EDIT_CAPABLE_SOURCES.has(m)),
+    );
+
+  // Round-robin the preferred providers: one model each, then the next model each, and so on.
+  const maxRounds = Math.max(
+    ...SWEEP_PROVIDER_ORDER.map((p) => (PROVIDER_MODEL_ORDER[p] ?? []).length),
+    0,
+  );
+  for (let round = 0; round < maxRounds; round += 1) {
+    for (const provider of SWEEP_PROVIDER_ORDER) push(nextFrom(provider));
+  }
+  // Then the last-resort providers, in their own preference order.
+  for (const provider of SWEEP_LAST_RESORT_PROVIDERS) {
+    for (const m of PROVIDER_MODEL_ORDER[provider] ?? []) {
+      if (!opts.edit || EDIT_CAPABLE_SOURCES.has(m)) push(m);
+    }
+  }
+  return sweep;
+}
+
+/** The provider a source rides, for honest reporting. */
+export function providerOf(source: string): string | undefined {
+  return SOURCE_PROVIDER[source];
+}
+
+// Lesson 9b in as few characters as it can be said. The previous wording ran 331
+// characters, so our own boilerplate was the majority of a typical design prompt
+// and pushed it past Nano Banana's limit — five other models accepted the same
+// request, which made it read as "Nano Banana is broken" (#766).
+//
+// Every clause that remains is load-bearing: flat and uniform (models otherwise
+// shade or vignette it), the exact hex (a lime/sage green will not key cleanly),
+// edge to edge (a partial background leaves a frame), and the two negatives
+// (models asked for green still return checkerboards or real alpha). Trimmed to
+// ~160 characters, not removed.
 const GREEN_BG_HINT =
-  'Render the design on a solid, flat, fully-saturated pure chroma-key green background ' +
-  '(exactly RGB 0,255,0 / #00FF00) that fills the entire canvas edge to edge behind the subject. ' +
-  'The green must be one uniform color with NO gradient, NO shading, NO vignette, and NO yellow, ' +
-  'lime, olive, or sage tint. Do NOT make the background transparent and do NOT draw a ' +
-  'checkerboard pattern.';
+  'Background: one flat uniform #00FF00 (RGB 0,255,0) chroma-key green, edge to edge, ' +
+  'no gradient or shading, no lime/sage tint. Not transparent, no checkerboard.';
 
 /** Lesson 9b: never ask a model for a "transparent background" — request a solid green one and
- *  key it out afterward. Idempotent (skips if the prompt already asks for a green background). */
+ *  key it out afterward. Idempotent (skips if the prompt already asks for a green background).
+ *
+ *  ⚠️ Only call this when the design will actually be keyed. Appending it for an
+ *  all-over print produced a green-framed image that nothing then keyed out (#765). */
 export function augmentPromptForTransparency(prompt: string): string {
   if (/#?00ff00|(solid|bright) green background/i.test(prompt)) return prompt.trim();
   return `${prompt.trim()} ${GREEN_BG_HINT}`;
+}
+
+/** TRUE when a provider rejected the request for prompt LENGTH.
+ *
+ *  Distinct from a rate limit or a transient 5xx: retrying the same prompt on the
+ *  same model can never succeed, but the same prompt on a model with a longer limit
+ *  will. So it IS fallbackable — and it must never be reported to the agent as "the
+ *  model is rate limiting" or "the model is down", because neither is true and both
+ *  send the agent to the wrong remedy (#766). */
+export function isPromptTooLongError(err: unknown): boolean {
+  if (!(err instanceof AhError)) return false;
+  return /request too long|prompt (is )?too long|too many tokens|maximum context/i.test(
+    err.message ?? '',
+  );
 }
 
 /** Build an img2img edit prompt from a change description + a list of aspects to preserve. */

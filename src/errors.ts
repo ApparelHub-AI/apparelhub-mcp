@@ -20,6 +20,13 @@ export interface AhErrorInit {
   httpStatus?: number;
   /** For model_rate_limited: the model name whose provider is throttling. */
   source?: string;
+  /**
+   * The API's own error code, when the broad `code` above deliberately generalises
+   * it (e.g. every 409 maps to `conflict`). Lets a tool branch on the specific
+   * condition without narrowing the broad code that other callers already match.
+   * INTERNAL: not part of the agent-facing error payload.
+   */
+  apiCode?: string;
 }
 
 export class AhError extends Error {
@@ -28,6 +35,8 @@ export class AhError extends Error {
   readonly suggestion?: string;
   readonly httpStatus?: number;
   readonly source?: string;
+  /** The API's specific error code when `code` is a deliberate generalisation. */
+  readonly apiCode?: string;
 
   constructor(init: AhErrorInit) {
     super(init.message);
@@ -37,6 +46,7 @@ export class AhError extends Error {
     this.suggestion = init.suggestion;
     this.httpStatus = init.httpStatus;
     this.source = init.source;
+    this.apiCode = init.apiCode;
   }
 
   toPayload(): { error: ToolErrorShape } {
@@ -93,6 +103,41 @@ export function parseRetryAfter(header: string | null | undefined): number | und
   return undefined;
 }
 
+// Some 400s are STRUCTURED refusals rather than malformed requests: the platform
+// names a specific condition and returns the data needed to satisfy it. For these
+// the generic "check field names and values" advice is actively wrong — there is
+// no offending field — and collapsing them to `bad_request` throws away the one
+// thing an agent could branch on. Each entry below states the REAL next step.
+const STRUCTURED_BAD_REQUESTS: Record<string, { suggestion: string; fallbackMessage: string }> = {
+  empty_variant_selection: {
+    fallbackMessage: 'No variants were selected.',
+    suggestion:
+      'You sent an empty variant list. Pick from `available_variants` in the response body and ' +
+      'retry with 2-3 specific variant ids. If your own filter produced the empty list, fix that ' +
+      'first — resending the same request will fail identically.',
+  },
+  no_buildable_variants: {
+    fallbackMessage: 'None of the requested variants are buildable.',
+    suggestion:
+      'Re-pick from `available_colors` / `available_sizes` / `available_variants` in the response ' +
+      'body and retry.',
+  },
+  placement_constraint: {
+    fallbackMessage: 'The provider refuses this combination of print placements.',
+    suggestion:
+      'Retry with fewer placements, front first. `requested_placements`, `attempted_placements` ' +
+      'and `max_placements` in the body describe what is allowed. Do not resend the same set.',
+  },
+  knit_options_unavailable: {
+    fallbackMessage: 'This garment is knitted, and yarn colours could not be read from the design.',
+    suggestion:
+      'This garment is KNITTED, not printed: the artwork is reproduced in yarn, so it must have ' +
+      'clear, solid areas of colour (gradients and fine detail do not survive). Use a simpler, ' +
+      'higher-contrast design within `max_colors`, or choose a printed garment. `available_colors` ' +
+      'in the body lists the yarns the provider offers.',
+  },
+};
+
 // Map an HTTP status + parsed body into a broad, memorable AhError (api-contract §5).
 export function mapHttpError(
   status: number,
@@ -104,6 +149,15 @@ export function mapHttpError(
   const capability = extractField(body, 'capability');
 
   if (status === 400) {
+    const structured = errorCode ? STRUCTURED_BAD_REQUESTS[errorCode] : undefined;
+    if (structured) {
+      return new AhError({
+        httpStatus: status,
+        code: errorCode as string,
+        message: message ?? structured.fallbackMessage,
+        suggestion: structured.suggestion,
+      });
+    }
     return new AhError({
       httpStatus: status,
       code: 'bad_request',
@@ -120,12 +174,62 @@ export function mapHttpError(
         'Verify APPARELHUB_API_KEY (generate one at https://apparelhub.ai/developer/api-keys). Keys are environment-scoped.',
     });
   }
+  if (status === 402) {
+    // The account is frozen read-only because the owner's plan lapsed. An agent
+    // cannot resolve this itself, and WHERE the owner resolves it depends on who
+    // bills them: sending a Shopify-billed merchant to apparelhub.ai is a dead
+    // end, because we never took their card. Read the provider off the body
+    // rather than assuming (epic apparelhub-ai#729).
+    const billingProvider = extractField(body, 'billing_provider');
+    const billingUrl = extractField(body, 'billing_url');
+    const where =
+      billingProvider === 'shopify'
+        ? `their Shopify admin${billingUrl ? ` (${billingUrl})` : ''}`
+        : `Billing on ApparelHub${billingUrl ? ` (${billingUrl})` : ''}`;
+    return new AhError({
+      httpStatus: status,
+      code: 'account_suspended',
+      message: message ?? 'This account is read-only: its plan is not active.',
+      suggestion:
+        'Do not retry: a 402 does not clear until the plan is fixed. Reads still work, so you ' +
+        'can keep inspecting stores, products, designs, and orders. Tell the ACCOUNT OWNER to ' +
+        `sort the plan out in ${where}. Inbound storefront orders are held, not dropped, and ` +
+        'release automatically once the plan is active.',
+    });
+  }
+  if (status === 403 && errorCode === 'seat_limit_reached') {
+    // Not a permissions problem, so the generic "this key lacks scope" advice
+    // would send the caller looking in entirely the wrong place.
+    return new AhError({
+      httpStatus: status,
+      code: 'seat_limit_reached',
+      message: message ?? 'This plan has no seats left.',
+      suggestion:
+        'The plan includes a fixed number of seats and they are all in use, counting pending ' +
+        'invites. Remove a member to free one, or have the account owner move to a plan with ' +
+        'more seats. Retrying the invite will keep failing.',
+    });
+  }
   if (status === 403 && errorCode === 'workspace_forbidden') {
     return new AhError({
       httpStatus: status,
       code: 'workspace_forbidden',
       message: 'This key or account cannot act in the requested workspace.',
       suggestion: 'Target a workspace this account can act in (see list_my_workspaces).',
+    });
+  }
+  if (status === 403 && errorCode === 'feature_unavailable') {
+    // A PLAN entitlement gate, not a permissions problem: the key and its role are
+    // fine, the account's tier simply does not include the feature. "This key lacks
+    // scope" would send the caller to audit key scopes that were never involved.
+    return new AhError({
+      httpStatus: status,
+      code: 'feature_unavailable',
+      message: message ?? "This account's plan does not include the requested feature.",
+      suggestion:
+        'Not a key or permissions problem — do not audit key scopes and do not retry with a ' +
+        'different key or workspace. The feature is not in this account\'s plan; the ACCOUNT ' +
+        'OWNER has to upgrade. Retrying identically will keep failing.',
     });
   }
   if (status === 403 && (errorCode === 'forbidden' || capability)) {
@@ -138,12 +242,40 @@ export function mapHttpError(
       suggestion: 'The role assigned to this key does not permit this action.',
     });
   }
+  if (status === 403 && !errorCode && !capability) {
+    // The API's own 403s ALWAYS carry an `error` code. A 403 whose body has only a
+    // `message` did not come from the API at all — an edge layer (WAF / CDN / gateway)
+    // rejected the request before it ever arrived. The most common trigger is a large
+    // binary upload body being pattern-matched as an attack.
+    //
+    // This is the same trap the seat_limit_reached branch above guards against, and it
+    // has bitten a real user: the tool reported a scope problem, so the API key's
+    // permissions were audited while the request was actually being dropped at the edge.
+    // Nothing about the key, role, or workspace is wrong, so none of the usual
+    // permission remedies apply.
+    return new AhError({
+      httpStatus: status,
+      code: 'blocked_upstream',
+      message: message ?? 'The request was blocked before it reached ApparelHub.',
+      suggestion:
+        'NOT a key or permissions problem — do not audit key scopes and do not retry with a ' +
+        'different key or workspace. An edge security layer rejected the request before it ' +
+        'reached the API, most often a large binary upload body. Retrying it identically will ' +
+        'keep failing. If this was an image upload, a smaller image may succeed. Report it with ' +
+        'the tool name and the approximate payload size.',
+    });
+  }
   if (status === 403) {
+    // An `error` code we do not have a branch for. Report what the API said rather than
+    // asserting a specific cause — the code and message are the reliable signal.
     return new AhError({
       httpStatus: status,
       code: 'forbidden',
       message: message ?? 'Forbidden.',
-      suggestion: 'This key lacks scope for the requested operation.',
+      suggestion:
+        `The API refused this action${errorCode ? ` (${errorCode})` : ''}. Read the message for ` +
+        'the specific reason before changing anything — it is usually a role or scope limit on ' +
+        'this key, but confirm that from the message rather than assuming it.',
     });
   }
   if (status === 404 && errorCode === 'workspace_not_found') {
@@ -162,10 +294,25 @@ export function mapHttpError(
     });
   }
   if (status === 409) {
+    // Preserve the API's own conflict code when it gave one. Collapsing every 409
+    // to `conflict` threw away the only thing a caller could branch on, and the
+    // code was doubly unrecoverable: it was folded into `message` ONLY when the
+    // body had no message of its own, so the discriminator vanished precisely in
+    // the well-formed case. An optimistic-concurrency refusal and "this design is
+    // still in use" are different conditions with different remedies.
+    //
+    // `error_code` is read as well as `error` because the API is not uniform: the
+    // structured 400s use `error`, while newer endpoints report `error_code`.
+    // Matching only one spelling makes the branch silently stop working.
+    const conflictCode = errorCode ?? extractField(body, 'error_code');
     return new AhError({
       httpStatus: status,
+      // The broad code is UNCHANGED on purpose. Callers already branch on
+      // `conflict` (a resumed upload treats it as benign), so narrowing it here
+      // would silently reroute existing behaviour.
       code: 'conflict',
-      message: message ?? errorCode ?? 'The request conflicts with the current state.',
+      message: message ?? conflictCode ?? 'The request conflicts with the current state.',
+      apiCode: conflictCode,
       suggestion: 'Inspect the conflict and surface it to the user; do not force past it.',
     });
   }
@@ -177,8 +324,28 @@ export function mapHttpError(
     });
   }
   if (status === 429) {
-    // Honest attribution (epic #66 phase 2): a 429 is one of TWO different things, and an agent
+    // Honest attribution (epic #66 phase 2): a 429 is one of THREE different things, and an agent
     // must be able to tell them apart.
+    if (errorCode === 'provider_rate_limited') {
+      // A FULFILLMENT PROVIDER (Printify, Gelato) throttled a credential check or
+      // catalog call (platform contract, apparelhub-ai#1168:
+      // {"error": "provider_rate_limited", "provider": "<name>", "retry_after": <seconds>}).
+      // ApparelHub accepted the request fine and this key is not throttled, so
+      // backing off the key -- the advice the platform_rate_limited branch gives --
+      // would be acting on a wrong diagnosis.
+      const provider = extractField(body, 'provider');
+      return new AhError({
+        httpStatus: status,
+        code: 'provider_rate_limited',
+        source: provider,
+        message: provider
+          ? `${provider} is rate limiting us right now.`
+          : (message ?? 'The fulfillment provider is rate limiting us right now.'),
+        retryAfter: extractNumber(body, 'retry_after') ?? parseRetryAfter(retryAfterHeader),
+        suggestion:
+          'Wait retry_after seconds and retry the SAME request. Do not ask the user for a new credential: this is the provider throttling us, not a bad token and not ApparelHub\'s request throttle.',
+      });
+    }
     if (errorCode === 'model_rate_limited') {
       // A specific MODEL's upstream provider throttled the generation (platform contract:
       // {"error": "model_rate_limited", "source": "<model name>", "retry_after": <seconds>}).

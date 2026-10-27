@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { defineTool, type ToolDef } from './registry.js';
 import { AhError } from '../errors.js';
+import { SERVER_VERSION } from '../version.js';
 import { isRecord, str } from '../util/shape.js';
 
 // -----------------------------------------------------------------------------
@@ -37,13 +38,87 @@ function safeRelPath(raw: string): string {
   return rel;
 }
 
+/**
+ * What this server actually serves right now, for a client to compare against
+ * what it thinks it has.
+ *
+ * ⛔ WHY THIS RIDES AN EXISTING TOOL RATHER THAN A NEW ONE.
+ * A client whose tool list is stale does not have any tool added AFTER that list
+ * was fetched — so a dedicated `check_connector_version` tool would be invisible
+ * to exactly the clients that need it. It has to arrive through a tool the agent
+ * ALREADY has, and `get_api_reference` is the natural one: long-standing,
+ * read-only, and already what an agent reaches for when a capability seems
+ * missing.
+ *
+ * It works because a stale client holds old tool DESCRIPTIONS while the server
+ * runs current CODE, so this block reaches it in the response even though its
+ * schema for this tool predates the block existing.
+ *
+ * Why the server cannot just announce the change instead: MCP signals a changed
+ * tool list with `notifications/tools/list_changed`, which needs an open,
+ * stateful session to push over. This server is deliberately stateless
+ * streamable-HTTP (that is what lets it run on a Lambda Function URL), so it has
+ * no channel to announce on and a client only ever learns by asking again.
+ *
+ * ⚠️ `names` comes from the CONTEXT, injected by the registry. Importing the tool
+ * index here instead is a circular import: it survives unit tests and breaks the
+ * bundled Lambda build, which is how the first attempt at this failed.
+ */
+function connectorSelfReport(
+  names: string[] | undefined,
+  fingerprints?: string[],
+): Record<string, unknown> {
+  const report: Record<string, unknown> = { server_version: SERVER_VERSION };
+  if (!names || names.length === 0) {
+    // Reporting `tool_count: 0` would be worse than saying nothing: an agent
+    // could read it as "the server serves fewer tools than I have".
+    report.tool_names_unavailable =
+      'This server could not enumerate its own tools on this call. Compare ' +
+      '`server_version` against the version your client connected with instead.';
+    return report;
+  }
+  report.tool_count = names.length;
+  report.tool_names = names;
+  if (fingerprints && fingerprints.length > 0) {
+    report.tool_fingerprints = fingerprints;
+  }
+  report.self_check =
+    'Three ways your tool list can be stale. Names alone only catch the first two.\n' +
+    '1. ADDED — listed in `tool_names` but you cannot call it. It exists; your ' +
+    'list predates it.\n' +
+    '2. REMOVED — you can call it but it is NOT listed here. It is gone.\n' +
+    '3. MODIFIED — same name on both sides, but its schema or wording changed ' +
+    'under you. Compare `tool_fingerprints`: each entry is `name [#abcdef]`, and ' +
+    'the SAME marker is printed at the end of that tool\'s description in your own ' +
+    'tool list. Markers differ means your copy of THAT tool is out of date — ' +
+    're-read it before calling it, and do NOT repeat its old description back to ' +
+    'the user as fact. This is the dangerous one: nothing errors. You simply send ' +
+    'arguments its current schema rejects, or state something about the platform ' +
+    'that is no longer true.';
+  report.if_stale =
+    'Tell the user to reconnect the connector (toggle it off and on, or remove ' +
+    'and re-add it). A plain "refresh" is not always enough: some clients ' +
+    're-read their own cached registry rather than re-requesting the tool list. ' +
+    'This server is stateless and never caches — it cannot push a change ' +
+    'notification, so a client only learns by asking again. Meanwhile you can ' +
+    'reach any missing capability through api_request using the endpoint index ' +
+    'below.';
+  return report;
+}
+
 export const getApiReference = defineTool({
   name: 'get_api_reference',
   description:
     'Discover the full ApparelHub agent API: returns a compact index of every ' +
     'endpoint (path, methods, summary) from the live OpenAPI spec. Use this when ' +
     'no dedicated tool covers what you need, then call it with api_request. ' +
-    'Read-only.',
+    'Read-only.\n\n' +
+    'Also returns `connector`, which reports what THIS server actually serves: ' +
+    'its version, and the name of every tool. **If a capability seems missing, ' +
+    'check that first.** A tool listed in `connector.tool_names` that you cannot ' +
+    'call means your own tool list is stale, not that the tool is unbuilt — say ' +
+    'so and tell the user to reconnect, rather than reporting the feature as ' +
+    'missing.',
   inputSchema: z.object({
     filter: z
       .string()
@@ -73,6 +148,9 @@ export const getApiReference = defineTool({
       version: str(info, 'version'),
       total: endpoints.length,
       endpoints,
+      // Deliberately NOT gated behind a `filter` — a stale client asking about
+      // one namespace still needs to be able to discover that it is stale.
+      connector: connectorSelfReport(ctx.toolNames, ctx.toolFingerprints),
       hint: 'Call api_request({ method, path }) to invoke any of these. Paths are relative under /agents/v1.',
     };
   },

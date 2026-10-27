@@ -1,0 +1,471 @@
+import { z } from 'zod';
+import { defineTool } from './registry.js';
+import { isRecord, str } from '../util/shape.js';
+
+// First-time account setup (platform epic: agent-guided setup).
+//
+// Until these existed the server exposed ~97 tools and not one of them
+// CONNECTED anything. `create_store` and `activate_store` were both present,
+// but `activate_store` requires a fulfillment connection that no tool could
+// create — so an agent driving a brand-new user hit a wall immediately and had
+// to send them to the web dashboard. Setup was the only stage of the pipeline
+// an agent could not drive.
+//
+// The shape of the problem, which these tools are built around:
+//
+//   Four of the eight connectable providers need NO browser. Printify and
+//   Gelato take an API token, WooCommerce and Wix take API keys, and all four
+//   can be completed entirely in the conversation.
+//
+//   The other four (Printful, Shopify, TikTok Shop, Fourthwall) need a consent
+//   screen. For those the agent's job is not to complete the connection but to
+//   BRACKET it: dispatch a link, then poll until the connection appears. That
+//   is what makes a chat session better than the web wizard — the web OAuth
+//   round trip is a fragile one-shot, so a user who bounces off to go create a
+//   Printful account loses the flow. In chat they just say "ok, made it" and
+//   the agent hands over a fresh link.
+//
+// These are deliberately THIN. Which providers exist, which connect in chat,
+// what is still missing and what to do next are all decided by the platform's
+// readiness endpoint, so the rules can be corrected server-side without an npm
+// release and every surface (these tools, the web consent page) reads the same
+// answer. Do not reimplement that logic here.
+//
+// One hard rule throughout: never echo a submitted credential back, including
+// in error paths. A token pasted into a chat is already in a transcript; it
+// must not also come back in a tool result.
+
+const enc = encodeURIComponent;
+
+const STORE_UUID = z
+  .string()
+  .min(1)
+  .describe('Store uuid (from list_my_stores or create_store).');
+
+const PROVIDER_UUID = z
+  .string()
+  .min(1)
+  .describe('Provider uuid (from list_connectable_providers).');
+
+// Every call in this file is scoped to a workspace server-side, and when it is
+// omitted the platform scopes to the account's DEFAULT workspace. That default
+// is wrong for any agency / multi-brand account working in another workspace,
+// and it fails in a way that reads like something else entirely:
+//
+//   - connect_* and start_channel_connect refuse a store that is plainly
+//     visible in list_my_stores, saying "Store not found or access denied" —
+//     the credential is never even looked at, so a correct credential and a
+//     typo'd one produce the identical error.
+//   - check_setup_readiness / check_connection_status silently answer about
+//     the WRONG workspace, so a connect that really did land reports false and
+//     the agent polls until it times out.
+//
+// So it is threaded through every tool here, exactly as the store / product /
+// order / design tools already do. Pass the workspace the STORE lives in — the
+// one list_my_stores reported for it — not whichever one happens to be default.
+const WORKSPACE = z
+  .string()
+  .optional()
+  .describe(
+    "Workspace uuid the store lives in (agency accounts) — use the store's workspace.uuid from list_my_stores. Omit only for single-workspace accounts; omitting it on a multi-workspace account targets the Default workspace and the call will fail to find a store that lives elsewhere.",
+  );
+
+function rec(raw: unknown): Record<string, unknown> {
+  return isRecord(raw) ? raw : { result: raw };
+}
+
+/**
+ * Turn readiness into a single sentence the model can act on.
+ *
+ * The payload already carries ordered next_steps; this just surfaces the head
+ * of that list so the model never has to infer priority from an array.
+ */
+function guidanceFor(readiness: Record<string, unknown>): string {
+  const steps = Array.isArray(readiness.next_steps) ? readiness.next_steps : [];
+  if (steps.length === 0) {
+    return 'Nothing is missing. This account can design, fulfill and sell.';
+  }
+  const head = isRecord(steps[0]) ? steps[0] : {};
+  const reason = typeof head.reason === 'string' ? head.reason : '';
+  const step = typeof head.step === 'string' ? head.step : 'continue setup';
+  const blocked = head.blocked === true;
+  if (blocked) {
+    return `Next: ${step}. ${reason} This is BLOCKED by a plan limit — surface the upgrade path rather than retrying.`;
+  }
+  return `Next: ${step}. ${reason}`;
+}
+
+export const checkSetupReadiness = defineTool({
+  name: 'check_setup_readiness',
+  description:
+    'What this account already has, what it still needs, and the single next action to take. Returns ready_to_design / ready_to_fulfill / ready_to_sell, a per-store breakdown, and an ordered next_steps list. Start here for any first-time setup, and call it again after each connection to confirm the state actually changed. Read-only, makes no provider calls, and is safe to poll.',
+  inputSchema: z.object({ workspace: WORKSPACE }),
+  annotations: { readOnlyHint: true, openWorldHint: true },
+  handler: async (input, ctx) => {
+    const raw = rec(
+      await ctx.api.get('onboarding/readiness', {
+        workspace: input.workspace,
+        signal: ctx.signal,
+      }),
+    );
+    return { ...raw, guidance: guidanceFor(raw) };
+  },
+});
+
+export const listConnectableProviders = defineTool({
+  name: 'list_connectable_providers',
+  description:
+    'Fulfillment providers and sales channels this account may connect, each marked with how it connects: connect_mode "in_chat" means you can complete it here by asking for a credential, "browser" means you must dispatch an authorization link with start_channel_connect and poll. Also returns where the merchant generates the credential, when there is one. Use this before asking a user for anything, so you ask for the right thing.',
+  inputSchema: z.object({ workspace: WORKSPACE }),
+  annotations: { readOnlyHint: true, openWorldHint: true },
+  handler: async (input, ctx) => {
+    // Readiness already computes both lists, gated to what this caller may
+    // actually connect. Reusing it keeps one source of truth and avoids
+    // offering a provider the user would then be refused.
+    const raw = rec(
+      await ctx.api.get('onboarding/readiness', {
+        workspace: input.workspace,
+        signal: ctx.signal,
+      }),
+    );
+    const options = isRecord(raw.options) ? raw.options : {};
+    const fulfillment = Array.isArray(options.fulfillment) ? options.fulfillment : [];
+    const channels = Array.isArray(options.sales_channels) ? options.sales_channels : [];
+    const inChat = [...fulfillment, ...channels].filter(
+      (p) => isRecord(p) && p.connect_mode === 'in_chat',
+    ).length;
+    return {
+      fulfillment_providers: fulfillment,
+      sales_channels: channels,
+      guidance:
+        `${inChat} of ${fulfillment.length + channels.length} can be connected without leaving this conversation. ` +
+        'For connect_mode "browser", use start_channel_connect and then poll check_connection_status.',
+    };
+  },
+});
+
+export const connectFulfillmentProvider = defineTool({
+  name: 'connect_fulfillment_provider',
+  description:
+    'Connect an API-token fulfillment provider (Printify, Gelato) to a store, entirely in chat. Validates the token first, so a bad token fails before anything is stored. If the token maps to more than one shop the result asks you to pick one and lists them — call again with shop_id set. For Printful use start_channel_connect instead: it needs a browser. Never repeat the token back to the user.',
+  inputSchema: z.object({
+    store_uuid: STORE_UUID,
+    provider_uuid: PROVIDER_UUID,
+    api_token: z
+      .string()
+      .min(1)
+      .describe(
+        "The merchant's provider API token. Get the generation URL from list_connectable_providers (credential_url). Treat as a secret: do not echo it.",
+      ),
+    shop_id: z
+      .string()
+      .optional()
+      .describe('Which shop to connect, when the token maps to several. Omit on the first call.'),
+    workspace: WORKSPACE,
+  }),
+  annotations: { openWorldHint: true },
+  handler: async (input, ctx) => {
+    const base = `store/${enc(input.store_uuid)}/merchandise_provider/${enc(input.provider_uuid)}`;
+
+    // Validate before connecting: a bad token should fail without persisting
+    // anything, and the same call is what surfaces a multi-shop token.
+    //
+    // The wire fields are `pat` and `external_store_id`, NOT this tool's own
+    // input names. Sending the wrong names did not fail loudly: the platform
+    // reads the body directly on the agent surface, so the token resolved to
+    // nothing, the provider was called with no credential at all, and its 401
+    // came back to the agent as "Invalid token" -- pointing the merchant at the
+    // one thing that was not wrong. The body-shape assertions in
+    // test/setup.test.ts exist so a rename cannot go quiet again.
+    const validated = rec(
+      await ctx.api.post(`${base}/validate-pat`, {
+        body: { pat: input.api_token },
+        workspace: input.workspace,
+        signal: ctx.signal,
+      }),
+    );
+
+    const shops = Array.isArray(validated.shops) ? validated.shops : [];
+    if (!input.shop_id && shops.length > 1) {
+      return {
+        connected: false,
+        needs_shop_selection: true,
+        shops,
+        guidance:
+          'This token has access to more than one shop. Ask the user which one, then call again with shop_id.',
+      };
+    }
+
+    const body: Record<string, unknown> = { pat: input.api_token };
+    if (input.shop_id) body.external_store_id = input.shop_id;
+
+    const connected = rec(
+      await ctx.api.post(`${base}/connect-pat`, {
+        body,
+        workspace: input.workspace,
+        signal: ctx.signal,
+      }),
+    );
+
+    return {
+      connected: true,
+      // Deliberately does NOT include the token, on any path.
+      provider: str(connected, 'provider_name', 'provider') ?? undefined,
+      result: connected,
+      guidance:
+        'Fulfillment is connected. Activate the store with activate_store if it is not already active, then check_setup_readiness to confirm.',
+    };
+  },
+});
+
+export const connectSalesChannel = defineTool({
+  name: 'connect_sales_channel',
+  description:
+    'Connect an API-key sales channel (WooCommerce, Wix) to a store, entirely in chat. For Shopify and TikTok Shop use start_channel_connect instead: they need a browser. Credentials are write-only and are never returned.',
+  inputSchema: z.object({
+    store_uuid: STORE_UUID,
+    provider_uuid: PROVIDER_UUID,
+    credentials: z
+      .record(z.string(), z.unknown())
+      .describe(
+        'Channel credentials, e.g. WooCommerce { store_url, consumer_key, consumer_secret }; Wix { api_key, site_id }. Treat as secrets: do not echo them.',
+      ),
+    workspace: WORKSPACE,
+  }),
+  annotations: { openWorldHint: true },
+  handler: async (input, ctx) => {
+    const raw = rec(
+      await ctx.api.post(
+        `store/${enc(input.store_uuid)}/ecommerce/${enc(input.provider_uuid)}/connect-api-key`,
+        { body: input.credentials, workspace: input.workspace, signal: ctx.signal },
+      ),
+    );
+    return {
+      connected: true,
+      result: raw,
+      guidance:
+        'Sales channel connected. Use check_setup_readiness to confirm, then sync_to_channel to list products on it.',
+    };
+  },
+});
+
+export const startChannelConnect = defineTool({
+  name: 'start_channel_connect',
+  description:
+    'Begin a browser-based connection (Printful, Shopify, TikTok Shop, Fourthwall). Shopify additionally requires shop_url, the merchant myshopify domain — ask for it before calling. Returns an authorization URL to give the user. THE CONNECTION IS NOT FINISHED WHEN THIS RETURNS. You must keep polling check_connection_status (passing the same provider_uuid) until it reports connected, then tell the user. The browser tab where they authorize is NOT this conversation and cannot report back to you, so polling is the only way you or they will learn it worked. Poll every few seconds, up to about two minutes, and if it has not landed by then ask whether they finished authorizing rather than giving up silently. If they need to create an upstream account first, let them, then call this again for a fresh link.',
+  inputSchema: z.object({
+    provider_uuid: PROVIDER_UUID,
+    kind: z
+      .enum(['fulfillment', 'sales_channel'])
+      .describe('Which family this provider belongs to (from list_connectable_providers.family).'),
+    store_uuid: z
+      .string()
+      .optional()
+      .describe(
+        'Store to attach to. Required for sales_channel. For fulfillment, omit it together with store_name to create a new store.',
+      ),
+    store_name: z
+      .string()
+      .optional()
+      .describe('Name for a NEW store, when connecting fulfillment without an existing store_uuid.'),
+    // Shopify cannot build an authorize URL without knowing WHICH shop: the
+    // consent screen lives on the merchant's own domain
+    // (https://<shop>.myshopify.com/admin/oauth/authorize). Every other
+    // provider has one global authorize host, so nothing needed this until
+    // Shopify. Without it the call fails before the user ever sees a link.
+    shop_url: z
+      .string()
+      .optional()
+      .describe(
+        "Required for Shopify only: the merchant's myshopify domain, e.g. your-store.myshopify.com. Ask the user for it; it is the domain in their Shopify admin URL, not their custom storefront domain. Omit for every other provider.",
+      ),
+    callback_url: z
+      .string()
+      .optional()
+      .describe(
+        'OMIT THIS. The platform fills in the callback registered with the provider, and for Shopify that registered URL is the only one that works — anything else is refused, either by us or by Shopify with an error naming neither what was sent nor what was wanted. Set it only if you have been given a specific URL to use.',
+      ),
+    // Also decides WHERE a new store is created on the fulfillment branch
+    // below, not just which store is reachable on the sales_channel branch.
+    workspace: WORKSPACE,
+  }),
+  annotations: { openWorldHint: true },
+  handler: async (input, ctx) => {
+    let raw: Record<string, unknown>;
+
+    if (input.kind === 'sales_channel') {
+      if (!input.store_uuid) {
+        return {
+          started: false,
+          error: 'store_uuid is required to connect a sales channel.',
+          guidance: 'Create or pick a store first, then call again with store_uuid.',
+        };
+      }
+      const body: Record<string, unknown> = {};
+      if (input.callback_url) body.callback_url = input.callback_url;
+      if (input.shop_url) body.shop_url = input.shop_url;
+      raw = rec(
+        await ctx.api.post(
+          `store/${enc(input.store_uuid)}/ecommerce/${enc(input.provider_uuid)}/initiate`,
+          { body, workspace: input.workspace, signal: ctx.signal },
+        ),
+      );
+    } else {
+      const body: Record<string, unknown> = {};
+      if (input.store_uuid) body.store_uuid = input.store_uuid;
+      else if (input.store_name) body.name = input.store_name;
+      if (input.callback_url) body.callback_url = input.callback_url;
+      raw = rec(
+        await ctx.api.post(`store/create/merchandise_provider/${enc(input.provider_uuid)}`, {
+          body,
+          workspace: input.workspace,
+          signal: ctx.signal,
+        }),
+      );
+    }
+
+    const authUrl =
+      str(raw, 'auth_url', 'redirect_url', 'authorization_url', 'oauth_url') ?? undefined;
+
+    return {
+      started: true,
+      authorization_url: authUrl,
+      store_uuid: str(raw, 'uuid', 'store_uuid') ?? input.store_uuid,
+      result: raw,
+      // Structured, because a sentence is easy for a model to skip and this
+      // step is the one that decides whether the user ever learns the outcome.
+      next_action: authUrl ? 'poll_check_connection_status' : 'retry_start_channel_connect',
+      guidance: authUrl
+        ? 'Give the user this link and ask them to authorize in a browser. Then KEEP POLLING check_connection_status — passing this same provider_uuid — until connected is true, and tell them when it lands. Do not stop after handing over the link: the tab where they authorize cannot report back to this conversation, so your poll is the only way the result reaches them. Poll every few seconds for about two minutes; if it has not landed, ask whether they finished authorizing.'
+        : 'The provider did not return an authorization URL. Re-check the provider and store, then try again.',
+    };
+  },
+});
+
+export const checkConnectionStatus = defineTool({
+  name: 'check_connection_status',
+  description:
+    'Poll whether a dispatched connection has completed. Call this repeatedly after start_channel_connect while the user authorizes in their browser, and announce the result when it lands: they cannot see this conversation from the tab they authorized in, so if you do not tell them, nobody does. Read-only, makes no provider call, and is safe to poll every few seconds. connected true means say so and continue setup. connected false means keep waiting. needs_reconnect means retrying will never work and you must dispatch a fresh link with start_channel_connect.',
+  inputSchema: z.object({
+    store_uuid: z
+      .string()
+      .optional()
+      .describe('Narrow the answer to one store. Omit to get the whole account.'),
+    provider_uuid: z
+      .string()
+      .optional()
+      .describe(
+        'The provider you are waiting for — pass the same provider_uuid you gave start_channel_connect. REQUIRED in practice when waiting on a sales channel (Shopify, TikTok Shop): without it this answers only about fulfillment and will report false however long you poll. It also prevents a false positive, where an unrelated existing connection makes this look successful.',
+      ),
+    // Same failure shape as the missing provider_uuid above: readiness answers
+    // for ONE workspace, so polling the default while the store lives in
+    // another reports false for as long as you are willing to poll.
+    workspace: WORKSPACE,
+  }),
+  annotations: { readOnlyHint: true, openWorldHint: true },
+  handler: async (input, ctx) => {
+    // Readiness is the poll target on purpose: it reads persisted connection
+    // state and makes NO provider call, so polling it cannot burn a provider
+    // rate limit no matter how eager the model is.
+    const raw = rec(
+      await ctx.api.get('onboarding/readiness', {
+        workspace: input.workspace,
+        signal: ctx.signal,
+      }),
+    );
+    const stores = Array.isArray(raw.stores) ? raw.stores : [];
+    const scoped = input.store_uuid
+      ? stores.filter((s) => isRecord(s) && s.uuid === input.store_uuid)
+      : stores;
+
+    // Sales channels were invisible here until #867: this only ever read
+    // `fulfillment.connected`, so a Shopify or TikTok connect could complete
+    // and the poll would report false forever. The agent would wait out its
+    // timeout and ask the user whether they had really authorized -- while the
+    // channel sat connected. Readiness has always carried `sales_channels`;
+    // nothing looked at it.
+    const providerUuid = input.provider_uuid;
+
+    const fulfillmentConnected = (s: Record<string, unknown>) =>
+      isRecord(s.fulfillment) && s.fulfillment.connected === true;
+
+    const channelsOf = (s: Record<string, unknown>) =>
+      (Array.isArray(s.sales_channels) ? s.sales_channels : []).filter(isRecord);
+
+    // Scoped to ONE provider when we know which one we are waiting for. A poll
+    // that answers "is anything connected" says true the moment ANY prior
+    // connection exists, which for a second provider is a false positive --
+    // the agent would announce success for something that never happened.
+    const matchesProvider = (holder: Record<string, unknown>) =>
+      isRecord(holder.provider) && holder.provider.uuid === providerUuid;
+
+    const connectedChannels = scoped.flatMap((s) =>
+      isRecord(s) ? channelsOf(s).filter((c) => c.connected === true) : [],
+    );
+
+    const connected = providerUuid
+      ? scoped.some(
+          (s) =>
+            isRecord(s) &&
+            ((isRecord(s.fulfillment) &&
+              s.fulfillment.connected === true &&
+              matchesProvider(s.fulfillment)) ||
+              channelsOf(s).some((c) => c.connected === true && matchesProvider(c))),
+        )
+      : // Unscoped keeps the original meaning exactly, so the fulfillment flow
+        // that is already working in production does not change behaviour.
+        scoped.some((s) => isRecord(s) && fulfillmentConnected(s));
+
+    const needsReconnect = scoped.filter(
+      (s) =>
+        isRecord(s) &&
+        isRecord(s.fulfillment) &&
+        s.fulfillment.connection_state === 'reconnect_required' &&
+        (!providerUuid || matchesProvider(s.fulfillment)),
+    );
+
+    // A named store that readiness does not report at all is not "not yet" —
+    // readiness answers for one workspace, so the store lives in a different
+    // one and no amount of polling will ever turn this true. Say so, instead
+    // of letting the agent burn its whole poll budget on a wrong-workspace
+    // question and then ask the user whether they really authorized.
+    const storeMissingFromWorkspace = Boolean(input.store_uuid) && scoped.length === 0;
+
+    return {
+      connected,
+      stores: scoped,
+      wrong_workspace: storeMissingFromWorkspace || undefined,
+      // Surfaced even when unscoped, so an agent polling after a channel
+      // connect without passing provider_uuid still has something true to read
+      // rather than a bare false.
+      connected_sales_channels: connectedChannels.map((c) => ({
+        provider: isRecord(c.provider) ? c.provider.name : undefined,
+        integration_uuid: c.integration_uuid,
+      })),
+      needs_reconnect: needsReconnect.length > 0,
+      guidance: storeMissingFromWorkspace
+        ? `No store ${input.store_uuid} exists in the workspace this answered for, so polling will never report connected. Get that store's workspace.uuid from list_my_stores and call again passing workspace=<uuid>.`
+        : needsReconnect.length
+        ? 'A fulfillment connection has stopped working. Retrying will not fix it — dispatch start_channel_connect again so the user can re-authorize.'
+        : connected
+          ? 'Connected. Continue with check_setup_readiness for the next step.'
+          : // "poll again" must survive on BOTH branches. It is the instruction
+            // that keeps the agent polling at all (#136); dropping it to make
+            // room for the provider_uuid hint would trade one silent failure
+            // for another.
+            'Not connected yet. If the user has authorized in their browser, wait a few seconds and poll again.' +
+            (providerUuid
+              ? ''
+              : ' If you are waiting on a sales channel, pass provider_uuid — without it this reports only on fulfillment.'),
+    };
+  },
+});
+
+export const setupTools = [
+  checkSetupReadiness,
+  listConnectableProviders,
+  connectFulfillmentProvider,
+  connectSalesChannel,
+  startChannelConnect,
+  checkConnectionStatus,
+];

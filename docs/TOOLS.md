@@ -11,6 +11,7 @@ the human-readable summary. Read tools are read-only; mutating tools default to 
 | `list_my_workspaces` | The workspaces this account can act in, each with its uuid. Resolve a client/brand name to the uuid the other tools scope with. |
 | `list_my_stores` | Stores with their fulfillment providers + connected sales channels. |
 | `list_my_designs` | Generated design images (newest first). |
+| `get_design_collection` | The other designs from the same generation (a `concepts` set), with the product name and description the model wrote for each, and a warning for any that will print with their background. Empty for an ordinary design. |
 | `list_my_products` | Products with fulfillment + channel sync status (optionally per store). |
 | `list_my_orders` | Recent orders across channels. |
 | `get_order_details` | One order: line items, payment + fulfillment status, shipments. |
@@ -29,7 +30,7 @@ the human-readable summary. Read tools are read-only; mutating tools default to 
 |---|---|
 | `design_apparel` | **Atomic.** Generate a design with the rules baked in (solid-green background prompt, transparency keying, optional text check). Streams progress. |
 | `iterate_design` | img2img variation of an existing design (Nano Banana / OpenAI only). |
-| `generate_image` | *(split)* Generate the raw image; handles the async slow-model poll. |
+| `generate_image` | *(split)* Generate the raw image; handles the async slow-model poll. Returns the platform's advisory `prompt_improvement` (a `brand_brief` issue means the prompt is a whole brand; `improved_prompt` is one design extracted from it). `concepts` asks one generation for a themed set (Nano Banana only, capped at 7, one generation credit); read the rest with `get_design_collection`. |
 | `process_transparency` | *(split)* Key the background to true RGBA + upload (server-side Python/Pillow). Auto-recovers in green-dominance mode when the model produced a tinted/muted green instead of pure #00FF00; `background_mode` (`auto`/`box`/`dominance`) + `force` pin the strategy. |
 | `verify_design_text` | *(split)* Read text via local OCR (tesseract) so the agent can confirm spelling. Advisory. |
 
@@ -39,6 +40,7 @@ the human-readable summary. Read tools are read-only; mutating tools default to 
 |---|---|
 | `ship_product` | **Atomic.** Design → mockup → create → variants → associate → sync (fulfillment then channels, draft). Enforces pricing floors + variant guards. Streams progress. |
 | `update_product` | Update name/description/price. |
+| `set_product_images` | Set an existing listing's images: attach, reorder, choose the cover. The list REPLACES the gallery, and order decides what survives a channel's image cap. Version-checked, so a concurrent change is refused rather than overwritten. |
 | `delete_product` | Hard delete (default) or archive. |
 | `create_product` | *(split)* Create the product shell with correct field names + pricing floor. |
 | `add_variants` | *(split)* Resolve + add variants; warns on the AQUA-vs-Navy trap. |
@@ -78,6 +80,20 @@ Mutating tools **default to a dry run**; applying only takes safe actions.
 | `approve_order_hold` | Approve one hold. May return `deferred` when the provider can't flip it (with a dashboard link). |
 | `request_hold_changes` | Request changes on a hold (`change_kind` minor/full_replacement + notes). |
 
+## Fulfillment issues
+
+Post-sale problem reports on fulfilled orders. Providers accept problem reports only in their own
+dashboards, within 30 days of delivery (resolved as a free reprint or a wallet refund); these
+tools compute the window, build the report, and track the claim to resolution. Evidence photos
+are attached in the ApparelHub UI (multipart upload).
+
+| Tool | Summary |
+|---|---|
+| `report_fulfillment_issue` | Report a defect on an order (mockup mismatch, print quality, damaged, wrong/missing item, late, lost) with the affected line items and requested resolution. |
+| `list_fulfillment_issues` | One order's issues plus its report-window eligibility, or the workspace-wide inbox with status/store filters and paging. Read-only. |
+| `check_fulfillment_issue` | One issue in full (items, evidence, claim tracking) plus the provider-ready problem report: copyable `summary_text` and the provider dashboard deep-link. Read-only. |
+| `resolve_fulfillment_issue` | Record the provider filing (`submit_upstream`, with the claim reference), close with a `resolution_type` (`resolve`), or build a zero-charge replacement draft order (`create_replacement`). |
+
 ## Analytics
 
 Read-only. Filters: `start`, `end`, `store`, `currency`, `workspace`.
@@ -110,6 +126,29 @@ For agency accounts moving assets between client workspaces. Resolve the destina
 | `check_product_move` | Dry-run eligibility: `{eligible, blockers}`. |
 | `copy_design_to_workspace` / `move_design_to_workspace` / `check_design_move` | Same for generated designs. |
 
+## Workspace & team management
+
+Agency (Enterprise) accounts only. These need an **account-wide** API key — a workspace-scoped key gets `account_wide_key_required`, and a tier without the agency feature gets `feature_unavailable`. `accept_invite` is the exception (invitee side, any tier/key). Discover uuids with `list_my_workspaces`, member public_ids / invite uuids with `list_account_members` / `list_invites`. Workspace roles: `director` | `creator` | `merchandiser` | `operator` | `viewer`.
+
+| Tool | Summary |
+|---|---|
+| `create_workspace` | Create a workspace (name unique in the account). |
+| `update_workspace` | Rename or archive/unarchive (Default can't be archived). |
+| `delete_workspace` | Delete a workspace; stores move to Default, assignments revoked. |
+| `check_workspace_deletion` | Dry-run: stores that move + members unassigned. |
+| `assign_workspace_member` | Assign a member to a workspace with a role (or change it). |
+| `unassign_workspace_member` | Revoke a member's workspace assignment. |
+| `move_store_to_workspace` | Move a store into a workspace (owner/admin). |
+| `get_role_matrix` | Workspace roles → capability matrix. |
+| `get_account_overview` | Account name, your role, agency flag, seat accounting. |
+| `list_account_members` | Members + per-workspace assignments (filterable, paginated). |
+| `remove_member` | Remove a member from the account entirely. |
+| `invite_member` | Invite by email, optionally pre-assign a workspace + role. |
+| `list_invites` | Pending invites with target workspace + accept URL. |
+| `revoke_invite` | Revoke a pending invite. |
+| `resend_invite` | Resend a pending invite (same token, +14-day TTL). |
+| `accept_invite` | Accept an invite by token (email must match). |
+
 ## Store & order management
 
 | Tool | Summary |
@@ -119,6 +158,19 @@ For agency accounts moving assets between client workspaces. Resolve the destina
 | `record_order_payment` / `mark_order_no_payment` / `set_order_payment_method` | Record a payment on a manual order, or its method. |
 | `sync_orders` / `estimate_order_costs` / `get_orders_summary` / `list_pending_fulfillments` | Pull orders from channels; estimate costs; dashboard summary; pending queue. |
 | `archive_product` / `restore_product` | Archive a product (409 if it has pending orders) or restore it. |
+
+## Catalog import (tracked listings)
+
+Bring the products a merchant already sells on a connected channel into ApparelHub as tracked
+listings. Read-only against the channel: nothing is written to the merchant's store, and those
+products keep being fulfilled exactly as today. Tracked listings are not ApparelHub products (no
+sync, price cascade or fulfilment). WooCommerce and TikTok Shop today.
+
+| Tool | Summary |
+|---|---|
+| `import_channel_catalog` | Start a background import for one channel; returns the run to poll. If an import is already running for that channel, returns that run (`already_running: true`). `integration_inactive` (reconnect first) and `catalog_read_unsupported` (do not retry) come back as their own codes. |
+| `get_catalog_import_run` | Run status (queued/running/completed/failed) and counts. A failed run states `error`; nothing is marked removed on a partial pass. Read-only. |
+| `list_tracked_listings` | The imported listings (`scope` all/external/ours, `include_removed`, paging) plus each channel's `catalog_read` and `last_run`. Read-only. |
 
 ## API escape hatch
 

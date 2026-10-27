@@ -1,11 +1,18 @@
 import { z } from 'zod';
 import { defineTool, type ToolDef } from './registry.js';
 import { AhError } from '../errors.js';
-import { asArray, isRecord, num, str, viewUrl } from '../util/shape.js';
-import { pickDimensions } from '../image/dimensions.js';
-import { pricingFloor } from '../knowledge/garments.js';
-import { resolveVariants, type MatrixVariant } from '../knowledge/variants.js';
+import { asArray, isRecord, num, str, variantRef, viewUrl } from '../util/shape.js';
+import { pricingFloor, type PrintStyle } from '../knowledge/garments.js';
+import {
+  expectedThreadColorsIdFromError,
+  isEmbroideryPlacement,
+  normalizeThreadColors,
+  threadColorsOptionId,
+} from '../knowledge/embroidery.js';
+import { resolveVariants, type MatrixVariant, type VariantId } from '../knowledge/variants.js';
 import { runMockup } from '../image/mockup.js';
+import { runGenerationWithFallback } from '../image/generate.js';
+import { fallbackLadder } from '../knowledge/sources.js';
 import { resolveImageUrl } from './design.js';
 import type { ToolContext } from './context.js';
 
@@ -13,7 +20,7 @@ import type { ToolContext } from './context.js';
 // scar-tissue baked in:
 //   - Lesson 2: the create endpoint uses provider_uuid / product_ref_id / price / print_data,
 //     which DIFFER from the mockup endpoint's field names (image/mockup.ts handles that side).
-//   - Lesson 53: two-phase mockup poll (in runMockup).
+//   - Mockup poll waits for a published preview_url, not just status=completed (in runMockup).
 //   - Variants BEFORE sync; fulfillment sync BEFORE ecommerce sync; DRAFT (never live) default.
 //   - Pricing floors: refuse to create at a negative-margin price.
 //   - Lesson 7: AQUA-vs-Navy variant guard (in resolveVariants).
@@ -22,17 +29,101 @@ const enc = encodeURIComponent;
 
 interface GarmentInfo {
   matrix: MatrixVariant[];
+  /** The primary print placement — used for the embroidery thread-colors option id. Full
+   *  per-placement geometry + composition is resolved SERVER-SIDE (prepare-print-data). */
   area: { area_width: number; area_height: number; provider_ref_id: string };
   baseCost: number | undefined;
+  /** The chosen placement is an embroidery placement (caps/beanies/embroidered apparel). */
+  isEmbroidery: boolean;
+  name: string | undefined;
+}
+
+/**
+ * The one line an agent needs when the platform says this design will print as
+ * a rectangle (apparelhub-ai#1151).
+ *
+ * A warning rather than a refusal on purpose. An unattended run that stops dead
+ * is worse than one that ships something it flagged clearly, and someone may
+ * genuinely want a design that is a photograph. The remedy is named explicitly
+ * because "fix the background" is not actionable on its own.
+ */
+function designCheckWarning(check: Record<string, unknown>): string {
+  const message =
+    str(check, 'message') ??
+    'This design has a solid background, so it will print as a coloured rectangle on the garment.';
+  const imageUuid = str(isRecord(check.next) ? check.next : undefined, 'image_uuid');
+  const remedy = imageUuid
+    ? ` Call process_transparency (or remove_background) on design ${imageUuid} and render the mockup again.`
+    : ' Remove the background and render the mockup again.';
+  return message + remedy;
 }
 
 function mapMatrix(raw: unknown): MatrixVariant[] {
   return asArray(raw).map((v) => ({
-    provider_variant_id: num(v, 'id', 'variant_id', 'provider_variant_id') ?? 0,
+    // Printify puts the variant id under `provider_ref_id` (a numeric string) with NO
+    // id/variant_id/provider_variant_id field — so it must be in this lookup or every Printify
+    // variant resolves to 0 and the platform rejects it ("No valid variants found matching the
+    // selection"). Mirrors catalog.ts's mapVariant (get_garment_details). Printful is unaffected
+    // (it has `id`, read first). num() coerces the numeric string.
+    provider_variant_id:
+      variantRef(v, 'id', 'variant_id', 'provider_variant_id', 'provider_ref_id') ?? 0,
     color: str(v, 'color', 'color_name'),
     size: str(v, 'size'),
     cost: num(v, 'cost', 'price'),
   }));
+}
+
+/**
+ * One representative provider_variant_id per DISTINCT color (in order, up to `cap`). Mockups are
+ * rendered per variant, and variants of the same color share the same print image — so passing
+ * "the first N variants" yields N shades of ONE color and leaves the other colors you're offering
+ * with NO mockup. Passing one-per-color makes the generated mockup set COVER every color imported,
+ * so the product's gallery has a mockup for each variant color (not just the first).
+ */
+function mockupIdsCoveringColors(
+  variants: { color?: string; provider_variant_id: VariantId }[],
+  cap = 5,
+): VariantId[] {
+  const seen = new Set<string>();
+  const ids: VariantId[] = [];
+  for (const v of variants) {
+    const id = v.provider_variant_id;
+    // Valid = a positive number (Printful/Printify) OR a non-empty string (Gelato productUid).
+    // Zeroing/dropping a string id here is what silently skipped Gelato mockups.
+    const valid = (typeof id === 'number' && id > 0) || (typeof id === 'string' && id.length > 0);
+    const color = (v.color ?? '').toLowerCase().trim();
+    if (valid && !seen.has(color)) {
+      seen.add(color);
+      ids.push(id);
+      if (ids.length >= cap) break;
+    }
+  }
+  return ids;
+}
+
+/**
+ * A template's placement name. Variant templates carry it under `provider_location_ref_id` and a
+ * NUMERIC template id under `provider_ref_id` (which str() would coerce to "257169"), so
+ * provider_location_ref_id MUST be read before provider_ref_id. Mirrors catalog.ts's mapTemplate.
+ */
+function templatePlacement(tpl: unknown): string | undefined {
+  return str(tpl, 'placement', 'provider_location_ref_id', 'provider_ref_id', 'type');
+}
+
+/**
+ * Choose the template the print targets: the true print front first, then any non-embroidery
+ * placement, then whatever exists — embroidery-only garments (caps/beanies) carry ONLY
+ * `embroidery_*` templates, and for those the embroidery placement IS the correct target.
+ */
+function pickPrintTemplate(templates: unknown[]): unknown {
+  return (
+    templates.find((t) => /^(front|default)$/i.test(templatePlacement(t) ?? '')) ??
+    templates.find((t) => {
+      const p = templatePlacement(t);
+      return Boolean(p) && !isEmbroideryPlacement(p);
+    }) ??
+    templates[0]
+  );
 }
 
 async function fetchGarment(
@@ -41,47 +132,172 @@ async function fetchGarment(
   productRefId: string,
   workspace?: string,
 ): Promise<GarmentInfo> {
-  const raw = await ctx.api.get(
-    `merchandise/${enc(providerUuid)}/product/${enc(productRefId)}`,
-    { workspace, signal: ctx.signal },
-  );
+  const raw = await ctx.api.get(`merchandise/${enc(providerUuid)}/product/${enc(productRefId)}`, {
+    workspace,
+    signal: ctx.signal,
+  });
   const g = isRecord(raw) && isRecord(raw.product) ? raw.product : raw;
   const matrix = mapMatrix(isRecord(g) ? g.variants : undefined);
-  const templates = asArray(
+  let templates = asArray(
     isRecord(g) ? (g.templates ?? g.print_templates ?? g.print_areas) : undefined,
   );
-  const front =
-    templates.find((tpl) =>
-      /front|default/i.test(str(tpl, 'placement', 'provider_ref_id', 'type') ?? ''),
-    ) ?? templates[0];
+  if (!templates.length && isRecord(g)) {
+    // The raw garment endpoint has NO top-level template keys for Printful — templates live
+    // per-VARIANT. Falling straight through to the 'front' default is what shipped
+    // embroidery-only garments (caps/beanies) as `front` PRINT files, which Printful rejects
+    // ("File type front is not allowed") at BOTH mockup generation and fulfillment sync.
+    const firstVariant = asArray(g.variants)[0];
+    if (isRecord(firstVariant)) templates = asArray(firstVariant.templates);
+  }
+  const chosen = pickPrintTemplate(templates);
+  const placement = templatePlacement(chosen) ?? 'front';
   const area = {
-    area_width: num(front, 'area_width', 'print_area_width') ?? 1800,
-    area_height: num(front, 'area_height', 'print_area_height') ?? 2400,
-    provider_ref_id: str(front, 'placement', 'provider_ref_id', 'type') ?? 'front',
+    area_width: num(chosen, 'area_width', 'print_area_width') ?? 1800,
+    area_height: num(chosen, 'area_height', 'print_area_height') ?? 2400,
+    provider_ref_id: placement,
   };
+  // Layout + placement geometry now live SERVER-SIDE (Garment Intelligence epic, mcp#101 / v0.4.0):
+  // prepare-print-data composes the full per-placement print_data on the platform. The client only
+  // needs the primary area (for the embroidery thread-colors placement id), the variant matrix, the
+  // embroidery flag, base cost + name.
   const baseCost = num(g, 'base_cost', 'cost', 'price') ?? matrix.find((m) => m.cost)?.cost;
-  return { matrix, area, baseCost };
+  return {
+    matrix,
+    area,
+    baseCost,
+    isEmbroidery: isEmbroideryPlacement(placement),
+    name: str(g, 'name', 'title'),
+  };
 }
 
-function buildPrintData(
-  area: GarmentInfo['area'],
+interface PreparedPrintData {
+  print_data: Record<string, unknown>[];
+  image_uuid: string;
+  image_url: string;
+  placements_covered: string[];
+  print_style: string | undefined;
+  background: string | undefined;
+  warnings: string[];
+}
+
+const prepSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+function normalizePrep(job: unknown, fallbackUuid: string, fallbackUrl: string): PreparedPrintData {
+  const j = isRecord(job) ? job : {};
+  return {
+    print_data: asArray(j.print_data) as Record<string, unknown>[],
+    image_uuid: str(j, 'image_uuid') ?? fallbackUuid,
+    image_url: str(j, 'image_url') ?? fallbackUrl,
+    placements_covered: (asArray(j.placements_covered) as string[]) ?? [],
+    print_style: str(j, 'print_style'),
+    background: str(j, 'background'),
+    warnings: (asArray(j.warnings) as string[]) ?? [],
+  };
+}
+
+/**
+ * Compose the full per-placement print_data SERVER-SIDE (Garment Intelligence epic #549 Phase 3
+ * endpoint + mcp#101 client cutover). Replaces the client's local recompose/face/solid pipeline:
+ * the platform handles fill-vs-placed routing, face windows, solid sibling panels, transparent
+ * per-face wraps, the resolution floor + background derivation, and interior blanking — so new
+ * calibrations reach every client as data, no release. Async: POST -> 202 + job -> poll.
+ * Returns print_data byte-compatible with create/preview, plus the composed primary revision.
+ */
+async function preparePrintData(
+  ctx: ToolContext,
+  designUuid: string,
   designUrl: string,
+  providerUuid: string,
+  productRef: string,
+  printStyle: 'auto' | PrintStyle,
+  workspace?: string,
+): Promise<PreparedPrintData> {
+  const start = await ctx.api.post(`images/generated/${enc(designUuid)}/prepare-print-data`, {
+    body: { provider_uuid: providerUuid, product_ref: productRef, print_style: printStyle },
+    workspace,
+    signal: ctx.signal,
+  });
+  const jobUuid = str(start, 'job_uuid');
+  if (!jobUuid) {
+    // Defensive: a completed-synchronously body.
+    if (asArray(isRecord(start) ? start.print_data : undefined).length) {
+      return normalizePrep(start, designUuid, designUrl);
+    }
+    throw new AhError({
+      code: 'compose_failed',
+      message: 'prepare-print-data did not return a job.',
+    });
+  }
+  const deadline = Date.now() + 90_000;
+  let poll = 0;
+  for (;;) {
+    poll += 1;
+    await ctx.progress.report(Math.min(20, 8 + poll), `Composing print files (poll ${poll})...`);
+    const job = await ctx.api.get(
+      `images/generated/${enc(designUuid)}/prepare-print-data/${enc(jobUuid)}`,
+      { workspace, signal: ctx.signal },
+    );
+    const status = str(job, 'status');
+    if (status === 'completed') return normalizePrep(job, designUuid, designUrl);
+    if (status === 'failed') {
+      throw new AhError({
+        code: 'compose_failed',
+        message: `Print-data preparation failed: ${str(job, 'error') ?? 'unknown error'}`,
+        suggestion: 'Retry; if it persists, verify the garment ref + design are valid.',
+      });
+    }
+    if (Date.now() > deadline) {
+      throw new AhError({
+        code: 'compose_timeout',
+        message: 'Print-data preparation timed out. Retry, or check the design + garment ref.',
+      });
+    }
+    await prepSleep(2000);
+  }
+}
+
+/**
+ * Copy of print_data with the embroidery thread-colors option attached. Goes ONLY on the
+ * product-create payload (the platform persists it into print_files and hoists it to the
+ * sync-variant level at Printful sync — Lesson 61); mockup templates stay options-free.
+ */
+function withThreadColorOptions(
+  printData: Record<string, unknown>[],
+  placement: string,
+  colors: string[],
 ): Record<string, unknown>[] {
-  // Default placement: a chest-fill print sized for a square design (the agent can refine with
-  // the dimensions helper). Encodes "respect the print area so Printful doesn't crop".
-  const dims = pickDimensions(1, 1, area.area_width, area.area_height, 'chest_fill');
-  return [
-    {
-      provider_ref_id: area.provider_ref_id,
-      area_width: area.area_width,
-      area_height: area.area_height,
-      width: dims.width,
-      height: dims.height,
-      top: dims.top,
-      left: dims.left,
-      image_url: designUrl,
-    },
-  ];
+  return printData.map((t) => ({
+    ...t,
+    options: [{ id: threadColorsOptionId(placement), value: colors }],
+  }));
+}
+
+/** Explicit thread colors validated against the palette, else derived from the design. */
+async function resolveThreadColors(
+  ctx: ToolContext,
+  explicit: string[] | undefined,
+  designUrl: string,
+): Promise<string[]> {
+  if (explicit?.length) return normalizeThreadColors(explicit);
+  let inPath: string | undefined;
+  try {
+    inPath = await ctx.imaging.downloadToTemp(designUrl);
+    const derived = await ctx.imaging.threadColors(inPath);
+    return normalizeThreadColors(derived);
+  } catch (err) {
+    if (err instanceof AhError && err.code === 'local_tool_unavailable') {
+      throw new AhError({
+        code: 'local_tool_unavailable',
+        message:
+          'This is an EMBROIDERY garment: Printful requires thread colors from its fixed 15-color palette, and the local toolchain to derive them from the design (Python 3 + Pillow) is unavailable.',
+        suggestion:
+          'Pass thread_colors explicitly (e.g. ["#000000", "#FFCC00"]) using only palette colors, or install Python 3 + Pillow and retry.',
+      });
+    }
+    throw err;
+  } finally {
+    if (inPath) await ctx.imaging.cleanup([inPath]);
+  }
 }
 
 function enforcePricingFloor(baseCost: number | undefined, price: number): void {
@@ -95,6 +311,161 @@ function enforcePricingFloor(baseCost: number | undefined, price: number): void 
   }
 }
 
+/**
+ * Fulfillment (merchandise) sync with the embroidery thread-colors self-heal: when Printful
+ * rejects the sync naming a DIFFERENT thread-colors option id than the one on the product
+ * ("<expected_id> option is missing or incorrect! Allowed values: ..."), rewrite the product's
+ * print_files option id to the expected one and retry ONCE. Printful's id convention varies by
+ * placement (bare `thread_colors` for plain embroidery_front, suffixed elsewhere) and can vary by
+ * product — the error message is the authoritative source. Any other failure propagates.
+ */
+async function syncFulfillmentHealingThreadColors(
+  ctx: ToolContext,
+  storeUuid: string,
+  productUuid: string,
+  workspace?: string,
+): Promise<FulfillmentSyncOutcome> {
+  const syncOnce = () =>
+    ctx.api.post(`store/${enc(storeUuid)}/products/${enc(productUuid)}/sync`, {
+      query: { target: 'merchandise' },
+      workspace,
+      signal: ctx.signal,
+    });
+  try {
+    return readFulfillmentDeferral(await syncOnce());
+  } catch (err) {
+    const message = err instanceof AhError ? err.message : String(err);
+    const expected = expectedThreadColorsIdFromError(message);
+    if (!expected) throw err;
+    const prodRaw = await ctx.api.get(`product/${enc(productUuid)}`, {
+      workspace,
+      signal: ctx.signal,
+    });
+    const prod = isRecord(prodRaw) && isRecord(prodRaw.product) ? prodRaw.product : prodRaw;
+    const printFiles = asArray(isRecord(prod) ? prod.print_files : undefined);
+    let changed = false;
+    const fixed = printFiles.map((pf) => {
+      if (!isRecord(pf) || !Array.isArray(pf.options)) return pf;
+      const options = pf.options.map((o) => {
+        if (
+          isRecord(o) &&
+          typeof o.id === 'string' &&
+          /^thread_colors/i.test(o.id) &&
+          o.id.toLowerCase() !== expected
+        ) {
+          changed = true;
+          return { ...o, id: expected };
+        }
+        return o;
+      });
+      return { ...pf, options };
+    });
+    // Nothing correctable (e.g. a pre-fix product with NO thread-colors options at all) — the
+    // original error is the real story; let it surface.
+    if (!changed) throw err;
+    await ctx.api.patch(`product/${enc(productUuid)}`, {
+      body: { print_files: fixed },
+      workspace,
+      signal: ctx.signal,
+    });
+    return { ...readFulfillmentDeferral(await syncOnce()), healedOptionId: expected };
+  }
+}
+
+/** What a merchandise sync actually did. `deferred` is set when the provider rate-limited the
+ *  update and the platform will finish it automatically (apparelhub-ai#1266). */
+interface FulfillmentSyncOutcome {
+  healedOptionId?: string;
+  deferred?: { retryAfter?: number; message?: string };
+}
+
+/**
+ * Read a deferral out of a merchandise-sync response (apparelhub-ai#1266).
+ *
+ * When the fulfillment provider rate-limits a price update past what one request can wait, the
+ * platform answers 202 with `deferred: true` and finishes the update itself a minute or so later.
+ * That is NOT a completed sync: reporting `synced` here would tell an unattended agent the prices
+ * are live when they are still pending (and could still end up failed).
+ */
+function readFulfillmentDeferral(r: unknown): FulfillmentSyncOutcome {
+  if (!isRecord(r) || r.deferred !== true) return {};
+  const retryAfter = typeof r.retry_after === 'number' ? r.retry_after : undefined;
+  const message = str(r, 'message');
+  return { deferred: { ...(retryAfter !== undefined ? { retryAfter } : {}), ...(message ? { message } : {}) } };
+}
+
+function deferralNote(d: NonNullable<FulfillmentSyncOutcome['deferred']>): string {
+  const wait = d.retryAfter !== undefined ? `about ${d.retryAfter}s` : 'a short while';
+  return (
+    `The fulfillment provider rate-limited this update, so the platform deferred it and will finish it automatically in ${wait}. ` +
+    'Do NOT retry the sync now (that only hits the limit again); check the product later. It ends up Synced, or Failed with a reason.' +
+    (d.message ? ` Platform note: ${d.message}` : '')
+  );
+}
+
+/**
+ * Idempotently (1) associate a product with a store and (2) sync it to the store's fulfillment
+ * provider (Printful/Printify). This is the HARD prerequisite for any sales-channel sync: a
+ * product created by create_product is standalone (on no store), and the ecommerce listing binds
+ * to the fulfillment SKU. `POST store/<s>/products` is a no-op if the product is already
+ * associated, and the merchandise sync is safe to repeat — so this is safe to call more than once.
+ * Errors propagate: a caller that genuinely cannot associate / fulfillment-sync (e.g. the product
+ * has no variants) must hear the real error, not get a cosmetic listing with no manufacturing path.
+ */
+async function associateAndSyncFulfillment(
+  ctx: ToolContext,
+  storeUuid: string,
+  productUuid: string,
+  workspace?: string,
+): Promise<FulfillmentSyncOutcome> {
+  await ctx.api.post(`store/${enc(storeUuid)}/products`, {
+    body: { product_uuids: [productUuid] },
+    workspace,
+    signal: ctx.signal,
+  });
+  return syncFulfillmentHealingThreadColors(ctx, storeUuid, productUuid, workspace);
+}
+
+// Client-error statuses where a sync_to_channel failure most likely means "the product isn't on
+// the store / isn't fulfillment-synced yet" — worth a one-shot self-heal (associate + fulfillment
+// sync) then retry. Auth (401/403), rate limit (429) and transient 5xx are NOT healable this way
+// (the client already retried the transient ones), so those propagate unchanged.
+const CHANNEL_SYNC_HEALABLE_STATUS = new Set([400, 404, 409, 422]);
+
+/**
+ * Read the listing state the CHANNEL ended up in from a sync response.
+ *
+ * This exists because the previous code derived `sync_status` from the caller's
+ * own `state` argument and never looked at the response at all. A channel that
+ * published a listing live despite a draft request still came back
+ * `synced_as_draft`, so an agent honouring a publish gate reported to its
+ * operator that nothing was live while the catalogue was on sale.
+ *
+ * Only channels that actually have a draft concept report a state (TikTok
+ * does; Shopify/WooCommerce/Wix do not). When none is reported we return the
+ * neutral `synced` rather than guessing: "it synced and we cannot confirm
+ * draft vs live" is true, and `synced_as_draft` would not be.
+ */
+function readAppliedListingState(r: unknown): {
+  syncStatus: 'synced_as_live' | 'synced_as_draft' | 'synced';
+  warnings: string[];
+} {
+  const warnings: string[] = [];
+  const details = isRecord(r) && isRecord(r.sync_details) ? r.sync_details : undefined;
+
+  // The platform tells us when it could not honour the requested state (the
+  // listing already existed, or the channel has no per-request draft). Pass its
+  // reason through verbatim rather than inventing one.
+  for (const w of asArray(details?.warnings)) {
+    if (typeof w === 'string') warnings.push(w);
+  }
+
+  const applied = details ? str(details, 'listing_state') : undefined;
+  if (applied === 'live') return { syncStatus: 'synced_as_live', warnings };
+  if (applied === 'draft') return { syncStatus: 'synced_as_draft', warnings };
+  return { syncStatus: 'synced', warnings };
+}
+
 const garmentSchema = z.object({
   provider_uuid: z.string().min(1),
   product_ref_id: z.string().min(1),
@@ -103,24 +474,45 @@ const variantSchema = z.object({
   color: z.string().min(1),
   sizes: z.array(z.string().min(1)).min(1),
   price: z.number().positive().optional(),
-  provider_variant_ids: z.array(z.number()).optional(),
+  provider_variant_ids: z.array(z.union([z.number(), z.string()])).optional(),
 });
 
 export const shipProduct = defineTool({
   name: 'ship_product',
   description:
-    'End-to-end: take a design, generate + verify a mockup, create the product with the correct field names, add all variants, associate with a store, sync to fulfillment, then (optionally) sync to sales channels as DRAFT. Enforces pricing floors and guards the AQUA-vs-Navy variant trap. Streams progress.',
+    'End-to-end pipeline in ONE call: take a design, generate + verify a mockup (one per imported color, so every color variant has a matching mockup), create the product with the correct field names, add all variants, associate with a store, sync to fulfillment, then (optionally) sync to sales channels as DRAFT. Handles EMBROIDERY garments automatically WHEN the garment is actually embroidered: routes the design to the real embroidery placement and attaches thread colors (derived from the design, or pass thread_colors). Headwear is NOT inherently embroidered -- some providers carry printed (DTF) caps that take photoreal art as-is, so check `accepts_photoreal` on the garment rather than assuming, and call find_garments before concluding a design cannot go on a hat. Face goods (canvas, posters, backpacks, bags, socks, towels, blankets, pillows, cases...) default to print_style "fill": the design is recomposed onto an aesthetically matching background and printed edge-to-edge, so no green-screen background or contrasting borders reach the product. Enforces pricing floors and guards the AQUA-vs-Navy variant trap. Streams progress. PREFER this over chaining create_product + add_variants + sync_to_fulfillment + sync_to_channel yourself — especially for AUTOMATED or SCHEDULED runs — because it guarantees the correct order (store association + fulfillment sync BEFORE any channel sync). Use the split primitives only when you deliberately need a partial/interactive flow.',
   inputSchema: z.object({
-    design_uuid: z.string().min(1),
+    design_uuid: z.string().min(1).describe(
+      'The design to print. Comes from generate_image / design_apparel, OR from upload_design when the merchant already owns the artwork (a logo, a brand mark, a cleared cover). Never regenerate a mark you were given as a file.',
+    ),
     garment: garmentSchema,
     variants: z.array(variantSchema).min(1),
     pricing: z.object({ price: z.number().positive(), shipping_price: z.number().optional() }),
     product_meta: z.object({ name: z.string().min(1), description: z.string() }),
-    store_uuid: z.string().optional().describe('Omit to create a standalone (unassociated) product.'),
+    store_uuid: z
+      .string()
+      .optional()
+      .describe('Omit to create a standalone (unassociated) product.'),
     sync_to_channels: z
-      .array(z.object({ integration_uuid: z.string(), state: z.enum(['draft', 'live']).optional() }))
+      .array(
+        z.object({ integration_uuid: z.string(), state: z.enum(['draft', 'live']).optional() }),
+      )
       .optional(),
     generate_mockup: z.boolean().optional().describe('Default true.'),
+    print_style: z
+      .enum(['auto', 'placed', 'fill'])
+      .optional()
+      .describe(
+        'How the design sits on the print face. "fill": recompose onto a matching background and print edge-to-edge (default for face goods like canvas/backpacks/bags/socks/towels/blankets/pillows/cases). "placed": the design floats with transparency preserved (default for apparel and embroidery). "auto" (default) picks by garment.',
+      ),
+    thread_colors: z
+      .array(z.string().regex(/^#[0-9A-Fa-f]{6}$/))
+      .min(1)
+      .max(6)
+      .optional()
+      .describe(
+        'EMBROIDERY garments only: explicit Printful thread palette colors. Omit to auto-derive from the design (mapped to the fixed 15-color palette).',
+      ),
     design_url: z.string().url().optional().describe('The design URL, if known (else resolved).'),
     workspace: z.string().optional(),
   }),
@@ -130,7 +522,12 @@ export const shipProduct = defineTool({
     const warnings: string[] = [];
 
     await ctx.progress.report(5, 'Resolving garment + variants...');
-    const garment = await fetchGarment(ctx, input.garment.provider_uuid, input.garment.product_ref_id, ws);
+    const garment = await fetchGarment(
+      ctx,
+      input.garment.provider_uuid,
+      input.garment.product_ref_id,
+      ws,
+    );
     enforcePricingFloor(garment.baseCost, input.pricing.price);
 
     const resolvedR = resolveVariants(
@@ -146,10 +543,18 @@ export const shipProduct = defineTool({
     );
     warnings.push(...resolvedR.warnings);
     if (!resolvedR.resolved.length) {
+      // Name the catalog's ACTUAL values so an unattended agent can self-correct on the next
+      // call instead of stalling (the MOROCCO phone-case run had to diagnose this blind).
+      const colors = [...new Set(garment.matrix.map((m) => m.color).filter(Boolean))].slice(0, 8);
+      const sizes = [...new Set(garment.matrix.map((m) => m.size).filter(Boolean))].slice(0, 12);
       throw new AhError({
         code: 'bad_request',
         message: 'No variants could be resolved for the requested colors/sizes.',
-        suggestion: 'Check colors/sizes against get_garment_details, or pass provider_variant_ids.',
+        suggestion:
+          `This garment's catalog has ` +
+          `${colors.length ? `colors: ${colors.join(', ')}` : 'NO color dimension'} and ` +
+          `${sizes.length ? `sizes: ${sizes.join(', ')}${garment.matrix.length > 12 ? ', ...' : ''}` : 'NO size dimension'}. ` +
+          'Match those names (see get_garment_details), or pass provider_variant_ids.',
       });
     }
     if (resolvedR.unresolved.length) {
@@ -159,25 +564,54 @@ export const shipProduct = defineTool({
           .join(', ')}.`,
       );
     }
-    const variantIds = resolvedR.resolved.map((r) => r.provider_variant_id);
+    let designUuid = input.design_uuid;
+    let designUrl = input.design_url ?? (await resolveImageUrl(ctx, input.design_uuid, ws));
 
-    const designUrl = input.design_url ?? (await resolveImageUrl(ctx, input.design_uuid, ws));
-    const printData = buildPrintData(garment.area, designUrl);
+    await ctx.progress.report(12, 'Composing print files...');
+    const prep = await preparePrintData(
+      ctx,
+      designUuid,
+      designUrl,
+      input.garment.provider_uuid,
+      input.garment.product_ref_id,
+      input.print_style ?? 'auto',
+      ws,
+    );
+    designUuid = prep.image_uuid;
+    designUrl = prep.image_url;
+    warnings.push(...prep.warnings);
+
+    let threadColors: string[] | undefined;
+    const printData = prep.print_data;
+    if (garment.isEmbroidery) {
+      await ctx.progress.report(15, 'Resolving embroidery thread colors...');
+      threadColors = await resolveThreadColors(ctx, input.thread_colors, designUrl);
+    }
 
     let previewJobUuid: string | undefined;
+    let designCheck: Record<string, unknown> | undefined;   // #1151
     if (input.generate_mockup ?? true) {
       const m = await runMockup(
         ctx.api,
         {
           merchandise_provider_uuid: input.garment.provider_uuid,
-          generated_image_uuid: input.design_uuid,
+          generated_image_uuid: designUuid,
           provider_product_ref_id: input.garment.product_ref_id,
           templates: printData,
-          variant_ids: variantIds.slice(0, 5),
+          // Cover EVERY color being imported (one mockup per color), not the first 5 variants —
+          // which are all one color and leave the other imported colors with no mockup.
+          variant_ids: mockupIdsCoveringColors(resolvedR.resolved),
         },
         { progress: ctx.progress, signal: ctx.signal, workspace: ws },
       );
       previewJobUuid = m.job_uuid;
+      // #1151: an opaque background on a placed print renders as a coloured
+      // rectangle on the garment. Surfaced BEFORE the product is created, and
+      // as a warning rather than a refusal, because an unattended run that
+      // stops dead is worse than one that ships something it flagged. This has
+      // already happened for real: a scheduled build shipped products with the
+      // green screen printed in, because nothing checked.
+      designCheck = m.design_check;
     }
 
     await ctx.progress.report(55, 'Creating product...');
@@ -185,19 +619,24 @@ export const shipProduct = defineTool({
       body: {
         name: input.product_meta.name,
         description: input.product_meta.description,
-        generated_image_uuid: input.design_uuid,
+        generated_image_uuid: designUuid,
         preview_job_uuid: previewJobUuid,
         provider_uuid: input.garment.provider_uuid,
         product_ref_id: String(input.garment.product_ref_id),
         price: input.pricing.price,
-        print_data: printData,
+        print_data: threadColors
+          ? withThreadColorOptions(printData, garment.area.provider_ref_id, threadColors)
+          : printData,
       },
       workspace: ws,
       signal: ctx.signal,
     });
     const productUuid = str(created, 'uuid', 'product_uuid') ?? '';
     if (!productUuid) {
-      throw new AhError({ code: 'internal_error', message: 'Product create did not return a uuid.' });
+      throw new AhError({
+        code: 'internal_error',
+        message: 'Product create did not return a uuid.',
+      });
     }
 
     await ctx.progress.report(70, `Adding ${resolvedR.resolved.length} variants...`);
@@ -227,30 +666,50 @@ export const shipProduct = defineTool({
       });
       await ctx.progress.report(85, 'Syncing to fulfillment...');
       try {
-        await ctx.api.post(`store/${enc(input.store_uuid)}/products/${enc(productUuid)}/sync`, {
-          query: { target: 'merchandise' },
-          workspace: ws,
-          signal: ctx.signal,
-        });
-        fulfillmentStatus = 'synced';
+        const healed = await syncFulfillmentHealingThreadColors(
+          ctx,
+          input.store_uuid,
+          productUuid,
+          ws,
+        );
+        fulfillmentStatus = healed.deferred ? 'pending' : 'synced';
+        if (healed.deferred) warnings.push(deferralNote(healed.deferred));
+        if (healed.healedOptionId) {
+          warnings.push(
+            `The fulfillment provider expects thread-colors option id "${healed.healedOptionId}" for this garment — auto-corrected on the product and re-synced.`,
+          );
+        }
       } catch (err) {
         fulfillmentStatus = 'failed';
-        warnings.push(`Fulfillment sync failed: ${err instanceof AhError ? err.message : String(err)}`);
+        warnings.push(
+          `Fulfillment sync failed: ${err instanceof AhError ? err.message : String(err)}`,
+        );
       }
 
       // Only sync to sales channels AFTER fulfillment (lifecycle ordering).
       for (const ch of input.sync_to_channels ?? []) {
         const state = ch.state ?? 'draft';
         try {
-          const r = await ctx.api.post(`store/${enc(input.store_uuid)}/products/${enc(productUuid)}/sync`, {
-            query: { target: 'ecommerce', integration_uuid: ch.integration_uuid, listing_state: state },
-            workspace: ws,
-            signal: ctx.signal,
-          });
+          const r = await ctx.api.post(
+            `store/${enc(input.store_uuid)}/products/${enc(productUuid)}/sync`,
+            {
+              query: {
+                target: 'ecommerce',
+                integration_uuid: ch.integration_uuid,
+                listing_state: state,
+              },
+              workspace: ws,
+              signal: ctx.signal,
+            },
+          );
+          // Same fix as sync_to_channel: report the channel's state, not ours.
+          const appliedState = readAppliedListingState(r);
           channelResults.push({
             integration_uuid: ch.integration_uuid,
-            status: state === 'live' ? 'synced_as_live' : 'synced_as_draft',
+            status: appliedState.syncStatus,
+            requested_listing_state: state,
             listing_url: str(r, 'listing_url', 'external_url', 'url'),
+            ...(appliedState.warnings.length ? { warnings: appliedState.warnings } : {}),
           });
         } catch (err) {
           channelResults.push({
@@ -269,7 +728,12 @@ export const shipProduct = defineTool({
       fulfillment_status: fulfillmentStatus,
       variants_added: added,
       channel_sync_results: channelResults,
-      warnings,
+      print_style: prep.print_style ?? input.print_style ?? 'auto',
+      placements_covered: printData.map((t) => t.provider_ref_id),
+      ...(threadColors ? { thread_colors: threadColors } : {}),
+      ...(prep.background ? { fill_background: prep.background } : {}),
+      ...(designCheck ? { design_check: designCheck } : {}),
+      warnings: designCheck ? [...warnings, designCheckWarning(designCheck)] : warnings,
     };
   },
 });
@@ -279,53 +743,120 @@ export const shipProduct = defineTool({
 export const createProduct = defineTool({
   name: 'create_product',
   description:
-    'Create a product from a design (split primitive). Applies the correct field names + pricing floor. Pass mockup_variant_ids to also generate a mockup; otherwise the design is used as the display image. Add variants with add_variants next.',
+    'Create a STANDALONE product from a design (split primitive) — it is NOT placed on any store yet. Applies the correct field names + pricing floor, routes EMBROIDERY garments (caps/beanies) to their real embroidery placement with Printful thread colors (derived or explicit), and defaults face goods (canvas/backpacks/bags/socks/towels/blankets/pillows/cases...) to print_style "fill" (design recomposed onto a matching background, printed edge-to-edge). Set generate_mockup: true to render a garment mockup as the display image (it auto-derives representative variants from the catalog, so you do NOT need mockup_variant_ids) — otherwise the raw design is used as the display image. To get it onto a store and listed, the required sequence is: add_variants -> sync_to_fulfillment(product_uuid, store_uuid) [associates it with the store + syncs to Printful/Printify] -> sync_to_channel [sales channel]. To run that whole pipeline in one call instead, use ship_product.',
   inputSchema: z.object({
-    design_uuid: z.string().min(1),
+    design_uuid: z.string().min(1).describe(
+      'The design to print. Comes from generate_image / design_apparel, OR from upload_design when the merchant already owns the artwork (a logo, a brand mark, a cleared cover). Never regenerate a mark you were given as a file.',
+    ),
     garment: garmentSchema,
     pricing: z.object({ price: z.number().positive(), shipping_price: z.number().optional() }),
     product_meta: z.object({ name: z.string().min(1), description: z.string() }),
     generate_mockup: z.boolean().optional(),
-    mockup_variant_ids: z.array(z.number()).optional().describe('Representative variant ids for the mockup preview.'),
+    mockup_variant_ids: z
+      .array(z.union([z.number(), z.string()]))
+      .optional()
+      .describe(
+        'Representative variant ids for the mockup preview (numeric on Printful/Printify, string productUids on Gelato).',
+      ),
+    print_style: z
+      .enum(['auto', 'placed', 'fill'])
+      .optional()
+      .describe(
+        'How the design sits on the print face. "fill": recompose onto a matching background and print edge-to-edge (default for face goods). "placed": transparency preserved (default for apparel and embroidery). "auto" (default) picks by garment.',
+      ),
+    thread_colors: z
+      .array(z.string().regex(/^#[0-9A-Fa-f]{6}$/))
+      .min(1)
+      .max(6)
+      .optional()
+      .describe(
+        'EMBROIDERY garments only: explicit Printful thread palette colors. Omit to auto-derive from the design.',
+      ),
     design_url: z.string().url().optional(),
     workspace: z.string().optional(),
   }),
   annotations: { openWorldHint: true },
   handler: async (input, ctx) => {
     const ws = input.workspace;
-    const garment = await fetchGarment(ctx, input.garment.provider_uuid, input.garment.product_ref_id, ws);
+    const garment = await fetchGarment(
+      ctx,
+      input.garment.provider_uuid,
+      input.garment.product_ref_id,
+      ws,
+    );
     enforcePricingFloor(garment.baseCost, input.pricing.price);
-    const designUrl = input.design_url ?? (await resolveImageUrl(ctx, input.design_uuid, ws));
-    const printData = buildPrintData(garment.area, designUrl);
+    let designUuid = input.design_uuid;
+    let designUrl = input.design_url ?? (await resolveImageUrl(ctx, input.design_uuid, ws));
 
+    const warnings: string[] = [];
+    const prep = await preparePrintData(
+      ctx,
+      designUuid,
+      designUrl,
+      input.garment.provider_uuid,
+      input.garment.product_ref_id,
+      input.print_style ?? 'auto',
+      ws,
+    );
+    designUuid = prep.image_uuid;
+    designUrl = prep.image_url;
+    warnings.push(...prep.warnings);
+
+    let threadColors: string[] | undefined;
+    const printData = prep.print_data;
+    if (garment.isEmbroidery) {
+      threadColors = await resolveThreadColors(ctx, input.thread_colors, designUrl);
+    }
+
+    // Generate a mockup when asked. In the split-primitive flow, add_variants runs AFTER this, so
+    // the product has no variants of its own yet — derive representative variant ids from the
+    // garment catalog (fetched above) so `generate_mockup: true` actually produces a mockup instead
+    // of silently leaving the raw design as the display image.
+    const wantMockup = input.generate_mockup ?? Boolean(input.mockup_variant_ids?.length);
+    let mockupVariantIds = input.mockup_variant_ids ?? [];
+    if (wantMockup && mockupVariantIds.length === 0) {
+      // Cover a RANGE of colors (one per color), not the first N variants (all one color).
+      // Caveat: create_product runs before add_variants, so it can't know the exact colors you'll
+      // import — for color-ACCURATE mockups use ship_product (it resolves your variants first and
+      // renders one mockup per imported color), or pass mockup_variant_ids for your chosen colors.
+      mockupVariantIds = mockupIdsCoveringColors(garment.matrix);
+    }
     let previewJobUuid: string | undefined;
+    let designCheck: Record<string, unknown> | undefined;   // #1151
     let mockupStatus: 'generated' | 'skipped' = 'skipped';
-    if ((input.generate_mockup ?? Boolean(input.mockup_variant_ids?.length)) && input.mockup_variant_ids?.length) {
+    if (wantMockup && mockupVariantIds.length) {
       const m = await runMockup(
         ctx.api,
         {
           merchandise_provider_uuid: input.garment.provider_uuid,
-          generated_image_uuid: input.design_uuid,
+          generated_image_uuid: designUuid,
           provider_product_ref_id: input.garment.product_ref_id,
           templates: printData,
-          variant_ids: input.mockup_variant_ids.slice(0, 5),
+          variant_ids: mockupVariantIds.slice(0, 5),
         },
         { progress: ctx.progress, signal: ctx.signal, workspace: ws },
       );
       previewJobUuid = m.job_uuid;
       mockupStatus = 'generated';
+      designCheck = m.design_check;   // #1151, same reasoning as ship_product
+    } else if (wantMockup) {
+      warnings.push(
+        'generate_mockup was requested but no representative variant ids could be derived for this garment, so it will use the raw design as its display image. Pass mockup_variant_ids, or use ship_product (it resolves variants then generates the mockup).',
+      );
     }
 
     const created = await ctx.api.post('product/create', {
       body: {
         name: input.product_meta.name,
         description: input.product_meta.description,
-        generated_image_uuid: input.design_uuid,
+        generated_image_uuid: designUuid,
         preview_job_uuid: previewJobUuid,
         provider_uuid: input.garment.provider_uuid,
         product_ref_id: String(input.garment.product_ref_id),
         price: input.pricing.price,
-        print_data: printData,
+        print_data: threadColors
+          ? withThreadColorOptions(printData, garment.area.provider_ref_id, threadColors)
+          : printData,
       },
       workspace: ws,
       signal: ctx.signal,
@@ -335,7 +866,12 @@ export const createProduct = defineTool({
       product_uuid: productUuid,
       product_url: productUuid ? viewUrl.product(productUuid) : undefined,
       mockup_status: mockupStatus,
-      warnings: [],
+      print_style: prep.print_style ?? input.print_style ?? 'auto',
+      placements_covered: printData.map((t) => t.provider_ref_id),
+      ...(threadColors ? { thread_colors: threadColors } : {}),
+      ...(prep.background ? { fill_background: prep.background } : {}),
+      ...(designCheck ? { design_check: designCheck } : {}),
+      warnings: designCheck ? [...warnings, designCheckWarning(designCheck)] : warnings,
     };
   },
 });
@@ -343,11 +879,14 @@ export const createProduct = defineTool({
 export const addVariants = defineTool({
   name: 'add_variants',
   description:
-    'Add variants to an existing product (split primitive). Resolves provider_variant_ids by color+size from the product\'s provider options (or pass them explicitly). Warns on the AQUA-vs-Navy trap. Variants must exist before syncing.',
+    "Add variants to an existing product (split primitive). Resolves provider_variant_ids by color+size from the product's provider options (or pass them explicitly). Warns on the AQUA-vs-Navy trap. Variants must exist before syncing.",
   inputSchema: z.object({
     product_uuid: z.string().min(1),
     variants: z.array(variantSchema).min(1),
-    product_ref_id: z.string().optional().describe('Enables the AQUA-vs-Navy guard for BC 3001 ("71").'),
+    product_ref_id: z
+      .string()
+      .optional()
+      .describe('Enables the AQUA-vs-Navy guard for BC 3001 ("71").'),
     workspace: z.string().optional(),
   }),
   annotations: { openWorldHint: true },
@@ -374,10 +913,33 @@ export const addVariants = defineTool({
       })),
       input.product_ref_id,
     );
+    if (resolvedR.resolved.length === 0) {
+      // Fail LOUDLY instead of silently creating a 0-variant product. The usual cause is assuming
+      // apparel sizes (S/M/L/XL/2XL) for a garment that uses different labels — caps/beanies/phone
+      // cases/bottles are often one-size. Sizes are matched exactly, so a mismatch resolves nothing.
+      const colors = [
+        ...new Set(matrix.map((m) => m.color).filter((c): c is string => Boolean(c))),
+      ];
+      const sizes = [...new Set(matrix.map((m) => m.size).filter((s): s is string => Boolean(s)))];
+      throw new AhError({
+        code: 'bad_request',
+        message:
+          'None of the requested color/size combinations exist for this garment, so no variants were added.',
+        suggestion:
+          `Available colors: [${colors.join(', ') || 'n/a'}]. Available sizes: [${sizes.join(', ') || 'n/a'}]. ` +
+          'Do NOT assume S/M/L/XL/2XL — read the real options from get_garment_details and build the variant list from those (many accessories are one-size).',
+      });
+    }
     let added = 0;
     for (const v of resolvedR.resolved) {
       await ctx.api.post(`product/${enc(input.product_uuid)}/variants`, {
-        body: { name: v.color, price: v.price, color: v.color, size: v.size, provider_variant_id: v.provider_variant_id },
+        body: {
+          name: v.color,
+          price: v.price,
+          color: v.color,
+          size: v.size,
+          provider_variant_id: v.provider_variant_id,
+        },
         workspace: ws,
         signal: ctx.signal,
       });
@@ -395,7 +957,8 @@ export const addVariants = defineTool({
 
 export const syncToFulfillment = defineTool({
   name: 'sync_to_fulfillment',
-  description: 'Sync a product to its fulfillment provider (Printful/Printify). Do this before syncing to any sales channel.',
+  description:
+    "Associate a product with a store AND sync it to that store's fulfillment provider (Printful/Printify). This is the REQUIRED step before sync_to_channel: it both puts the product on the store (a product from create_product is standalone) and creates the manufacturing path the sales-channel listing binds to. Run it after the product has variants.",
   inputSchema: z.object({
     product_uuid: z.string().min(1),
     store_uuid: z.string().min(1),
@@ -403,18 +966,41 @@ export const syncToFulfillment = defineTool({
   }),
   annotations: { openWorldHint: true },
   handler: async (input, ctx) => {
-    await ctx.api.post(`store/${enc(input.store_uuid)}/products/${enc(input.product_uuid)}/sync`, {
-      query: { target: 'merchandise' },
-      workspace: input.workspace,
-      signal: ctx.signal,
-    });
-    return { product_uuid: input.product_uuid, fulfillment_status: 'synced' };
+    // Associate with the store (idempotent) THEN sync to the fulfillment provider. The association
+    // was previously missing here, so a product created by create_product (standalone) could not
+    // be fulfillment-synced without a separate association call the split-primitive path never made.
+    const healed = await associateAndSyncFulfillment(
+      ctx,
+      input.store_uuid,
+      input.product_uuid,
+      input.workspace,
+    );
+    return {
+      product_uuid: input.product_uuid,
+      store_uuid: input.store_uuid,
+      fulfillment_status: healed.deferred ? 'pending' : 'synced',
+      ...(healed.deferred
+        ? {
+            deferred: true,
+            ...(healed.deferred.retryAfter !== undefined
+              ? { retry_after: healed.deferred.retryAfter }
+              : {}),
+            warning: deferralNote(healed.deferred),
+          }
+        : {}),
+      ...(healed.healedOptionId
+        ? {
+            note: `The fulfillment provider expects thread-colors option id "${healed.healedOptionId}" for this garment — auto-corrected on the product and re-synced.`,
+          }
+        : {}),
+    };
   },
 });
 
 export const syncToChannel = defineTool({
   name: 'sync_to_channel',
-  description: 'Sync a product to one sales channel. Defaults to DRAFT — only push live when the user explicitly asks.',
+  description:
+    'Sync one product to a sales channel (WooCommerce/Shopify/Wix) as a listing. PREREQUISITE: the product must first be associated with the store AND synced to its fulfillment provider — call sync_to_fulfillment(product_uuid, store_uuid) FIRST (it does the store association too). If that prerequisite is missing, this tool now AUTO-HEALS it (associate + fulfillment-sync, then retries once) instead of failing with "product not associated with store" — but the clean, explicit order is sync_to_fulfillment then sync_to_channel, and ship_product does the whole pipeline in one call. Defaults to DRAFT — only push live when the user explicitly asks.',
   inputSchema: z.object({
     product_uuid: z.string().min(1),
     store_uuid: z.string().min(1),
@@ -425,29 +1011,139 @@ export const syncToChannel = defineTool({
   annotations: { openWorldHint: true },
   handler: async (input, ctx) => {
     const state = input.state ?? 'draft';
-    const r = await ctx.api.post(`store/${enc(input.store_uuid)}/products/${enc(input.product_uuid)}/sync`, {
-      query: { target: 'ecommerce', integration_uuid: input.integration_uuid, listing_state: state },
-      workspace: input.workspace,
-      signal: ctx.signal,
-    });
+    const ws = input.workspace;
+    const warnings: string[] = [];
+
+    const channelSync = () =>
+      ctx.api.post(`store/${enc(input.store_uuid)}/products/${enc(input.product_uuid)}/sync`, {
+        query: {
+          target: 'ecommerce',
+          integration_uuid: input.integration_uuid,
+          listing_state: state,
+        },
+        workspace: ws,
+        signal: ctx.signal,
+      });
+
+    let r: unknown;
+    try {
+      r = await channelSync();
+    } catch (err) {
+      // Self-heal the most common first-attempt failure: the product was never associated with the
+      // store / synced to fulfillment (a caller that jumped straight from create_product to here —
+      // the exact bug this guards). Associate + fulfillment-sync idempotently, then retry ONCE.
+      // Any non-prerequisite error (auth, rate limit, transient 5xx), or a still-failing retry, is
+      // real — let it surface.
+      if (
+        !(err instanceof AhError) ||
+        err.httpStatus === undefined ||
+        !CHANNEL_SYNC_HEALABLE_STATUS.has(err.httpStatus)
+      ) {
+        throw err;
+      }
+      await associateAndSyncFulfillment(ctx, input.store_uuid, input.product_uuid, ws);
+      warnings.push(
+        'Product was not associated with the store / synced to fulfillment yet; auto-associated and synced to the fulfillment provider, then retried the channel sync. Call sync_to_fulfillment(product_uuid, store_uuid) before sync_to_channel to avoid this, or use ship_product for the whole pipeline in one call.',
+      );
+      r = await channelSync();
+    }
+
+    // Report the state the CHANNEL is in, never the state we asked for. This
+    // used to be `state === 'live' ? ... : ...` — a restatement of the request
+    // that never looked at the response, so a channel that published a
+    // "draft" listing live still returned `synced_as_draft` and the agent told
+    // its operator the publish gate had held.
+    const applied = readAppliedListingState(r);
     return {
       product_uuid: input.product_uuid,
       integration_uuid: input.integration_uuid,
-      sync_status: state === 'live' ? 'synced_as_live' : 'synced_as_draft',
+      sync_status: applied.syncStatus,
+      requested_listing_state: state,
       channel_url: str(r, 'listing_url', 'external_url', 'url'),
+      ...(warnings.length || applied.warnings.length
+        ? { warnings: [...warnings, ...applied.warnings] }
+        : {}),
     };
   },
 });
 
 export const updateProduct = defineTool({
   name: 'update_product',
-  description: 'Update a product (name, description, price). For a price change that must propagate to synced channels, prefer cascade_price_change.',
+  description:
+    'Update a product (name, description, price). For a price change that must propagate to synced channels, prefer cascade_price_change. ' +
+    'Optionally set tiktok_listing to enrich the TikTok Shop listing (SEO search terms, product '
+    + 'highlights, brand, packaging, TikTok-only title/description, and category_id) — applied when '
+    + 'the product is synced to a TikTok channel; ignored by other channels. For channel-defined '
+    + 'ATTRIBUTES (Material, Style, Washing Instructions...) use set_listing_attributes instead: it '
+    + 'validates against the listing category\'s real schema and tells you which values the channel '
+    + 'refused, which this tool cannot.',
   inputSchema: z.object({
     product_uuid: z.string().min(1),
     changes: z.object({
       name: z.string().optional(),
       description: z.string().optional(),
       price: z.number().positive().optional(),
+      tiktok_listing: z
+        .object({
+          search_terms: z
+            .array(z.string())
+            .optional()
+            .describe('TikTok SEO search terms (hidden from buyers, boost search). Max 15 / 250 chars total; excess trimmed.'),
+          key_product_features: z
+            .array(z.string())
+            .optional()
+            .describe('TikTok product-page highlights. Max 5 / 1500 chars total; excess trimmed.'),
+          brand_id: z.string().optional().describe('TikTok brand id (from TikTok Get Brands). Omit for no brand.'),
+          category_id: z
+            .string()
+            .nullable()
+            .optional()
+            .describe(
+              "Pin this product's TikTok category, overriding automatic resolution. Null clears "
+              + 'the pin. Worth setting when a listing has been auto-filed somewhere wrong (a tee '
+              + 'under Golf Clubs, a hoodie under Pet Supplies) — the category also determines '
+              + 'which attributes the listing accepts, so a wrong one silently invalidates them.',
+            ),
+          // `attributes` deliberately REMOVED here. set_listing_attributes owns
+          // channel-defined fields: it validates against the listing's actual
+          // category schema and reports which values the channel refused.
+          // Writing them through this tool skipped all of that and reported
+          // blanket success, so an agent could not tell an accepted attribute
+          // from an ignored one. Two doors to one outcome, one of which was
+          // silent — the schema now leaves only the door that tells the truth.
+          weight: z
+            .object({ value: z.number().positive(), unit: z.string().optional() })
+            .optional()
+            .describe('Package weight for shipping, e.g. {value:0.9, unit:"POUND"} (unit POUND/KILOGRAM/GRAM/OUNCE; default POUND). Replaces the flat 0.5 lb default.'),
+          dimensions: z
+            .object({ length: z.number().positive(), width: z.number().positive(), height: z.number().positive(), unit: z.string().optional() })
+            .optional()
+            .describe('Package dimensions for shipping, e.g. {length:12, width:9, height:3, unit:"INCH"} (unit INCH/CENTIMETER; keep same system as weight).'),
+          shipping_template_id: z
+            .string()
+            .optional()
+            .describe('TikTok shipping-template id to bind (usually set once at the integration level). Binding it uses that template\'s rate instead of the shop default.'),
+          title: z
+            .string()
+            .optional()
+            .describe(
+              'TikTok-ONLY title override (max 255 chars). Unset uses the product name. Use this to apply a TikTok-optimized title (e.g. from diagnose_tiktok_listings) WITHOUT rewriting the shared product record, which would also change the Shopify/WooCommerce/Wix listings.',
+            ),
+          description: z
+            .string()
+            .optional()
+            .describe('TikTok-ONLY description override. Unset uses the product description. Same channel-isolation rationale as title.'),
+        })
+        // STRICT on purpose. Zod strips unknown keys by default, which would
+        // silently discard `attributes` (now owned by set_listing_attributes)
+        // and hand the caller a success — the precise failure this release
+        // exists to remove. The platform rejects unknown tiktok_listing keys
+        // too (`tiktok_listing_unknown_key`), so this just fails earlier and
+        // more clearly, at the tool boundary rather than over the wire.
+        .strict()
+        .nullable()
+        .optional()
+        .describe('Per-product TikTok listing metadata (merge; null a key or the whole object to clear). Applied only when synced to TikTok. Channel-defined ATTRIBUTES are not set here — use set_listing_attributes.'),
     }),
     workspace: z.string().optional(),
   }),
@@ -457,6 +1153,7 @@ export const updateProduct = defineTool({
     if (input.changes.name !== undefined) body.name = input.changes.name;
     if (input.changes.description !== undefined) body.description = input.changes.description;
     if (input.changes.price !== undefined) body.price = input.changes.price;
+    if (input.changes.tiktok_listing !== undefined) body.tiktok_listing = input.changes.tiktok_listing;
     if (Object.keys(body).length === 0) {
       throw new AhError({ code: 'bad_request', message: 'No changes provided.' });
     }
@@ -465,10 +1162,312 @@ export const updateProduct = defineTool({
       workspace: input.workspace,
       signal: ctx.signal,
     });
+    // Renamed from `changes_applied`, which was a lie by construction: it was
+    // Object.keys(body) — the keys we SENT — so it reported success identically
+    // whether every nested field persisted, some did, or none did. The platform
+    // PATCH returns the updated product rather than a per-field report, so the
+    // honest thing this tool can say is what it asked for.
     return {
       product_uuid: input.product_uuid,
-      changes_applied: Object.keys(body),
+      changes_requested: Object.keys(body),
       product_url: viewUrl.product(input.product_uuid),
+    };
+  },
+});
+
+// Listing imagery (#181). Kept OUT of update_product deliberately: images carry
+// their own validation, their own ORDERING semantics, and an optimistic-concurrency
+// token none of update_product's other fields have. Folding them in would have given
+// one tool two conflict models, and a caller changing a price would be handed an
+// images_version they never asked about.
+
+/** Where a listing image came from. The platform's `source` enum. */
+const IMAGE_SOURCE = z.enum(['mockup', 'upload', 'ai_mockup', 'print_file', 'unknown']);
+
+/** The platform's cap on stored images per product. Mirrored here so an over-long
+ *  list is refused at the tool boundary with the real number, rather than after a
+ *  round trip. The platform re-checks it — this is a courtesy, not the guard. */
+const MAX_LISTING_IMAGES = 20;
+
+/** The platform's per-URL length cap. */
+const MAX_IMAGE_URL_LENGTH = 512;
+
+/**
+ * Read a product's current listing imagery. Also the re-read after a version
+ * conflict, which is why it returns the version alongside the images.
+ */
+async function readProductImages(
+  ctx: ToolContext,
+  productUuid: string,
+  workspace: string | undefined,
+): Promise<{
+  images: unknown[];
+  images_version: number | undefined;
+  display_image: string | undefined;
+}> {
+  const r = await ctx.api.get(`product/${enc(productUuid)}`, {
+    workspace,
+    signal: ctx.signal,
+  });
+  return {
+    // `images` is the structured list; `gallery_images` is the deprecated flat
+    // URL array kept for back-compat. Prefer the structured one, fall back so a
+    // product served by an older platform build still reads sensibly.
+    images: isRecord(r) && Array.isArray(r.images) ? r.images : asArray(r, 'gallery_images'),
+    images_version: num(r, 'images_version'),
+    display_image: str(r, 'display_image'),
+  };
+}
+
+/** Normalize one image entry from a platform read into a stable agent-facing shape. */
+function mapListingImage(raw: unknown): Record<string, unknown> {
+  if (typeof raw === 'string') {
+    // The deprecated flat form: a bare URL with no provenance.
+    return { url: raw, source: 'unknown', ai_generated: null };
+  }
+  return {
+    url: str(raw, 'url'),
+    source: str(raw, 'source') ?? 'unknown',
+    // Tri-state, NOT a boolean with a default. `null` means "nobody has said",
+    // which is different from "no" — coercing it to false would assert a
+    // provenance claim the platform never made.
+    ai_generated: isRecord(raw) && typeof raw.ai_generated === 'boolean' ? raw.ai_generated : null,
+    thumbnail_url: str(raw, 'thumbnail_url'),
+    alt: str(raw, 'alt'),
+    added_at: str(raw, 'added_at'),
+    image_uuid: str(raw, 'image_uuid'),
+    preview_uuid: str(raw, 'preview_uuid'),
+  };
+}
+
+/**
+ * Is this the platform's optimistic-concurrency refusal, as opposed to any other 409?
+ *
+ * The HTTP mapper generalises every 409 to `conflict` (other callers depend on
+ * that), so the specific condition is read from `apiCode`, which preserves the
+ * API's own code. The message is checked as a fallback: a 409 whose body carries
+ * only a message would otherwise be indistinguishable, and mistaking a genuine
+ * version conflict for an unrelated one would let a stale write through.
+ */
+function isImagesVersionConflict(err: unknown): boolean {
+  if (!(err instanceof AhError) || err.httpStatus !== 409) return false;
+  return err.apiCode === 'images_version_conflict' || /images_version_conflict/i.test(err.message);
+}
+
+export const setProductImages = defineTool({
+  name: 'set_product_images',
+  description:
+    "Set an existing product's listing images: attach an uploaded photo or a generated " +
+    'lifestyle shot, reorder them, and choose the cover. Use this AFTER the product exists — ' +
+    'create_product / ship_product pick the initial mockup themselves.\n\n' +
+    '⚠️ THE LIST REPLACES, IT DOES NOT MERGE. What you send becomes the whole gallery, in the ' +
+    'order given. To add one image, READ the current list first and send it back with the new ' +
+    'entry in it — sending the new entry alone deletes every other image. Pass ' +
+    '`images: null` to reset the gallery back to the product\'s provider mockups.\n\n' +
+    '⚠️ ORDER IS FUNCTIONAL, NOT COSMETIC. Channels cap how many images a listing may carry and ' +
+    'TRUNCATE IN GALLERY ORDER, so position decides what actually ships: TikTok Shop takes 9, ' +
+    'Wix 15, Shopify and WooCommerce are unlimited. On a capped channel an image in position 10 ' +
+    'is not a lower-priority image, it is an absent one. Put the images that must survive first. ' +
+    `The platform stores at most ${MAX_LISTING_IMAGES}.\n\n` +
+    'Each entry carries provenance. `source` says where the file came from ' +
+    '(mockup / upload / ai_mockup / print_file / unknown). `ai_generated` is SEPARATE and ' +
+    'tri-state on purpose: an uploaded photo may itself have been AI-generated and the platform ' +
+    'cannot detect that, so only you can say. Set it truthfully — true, false, or leave it unset ' +
+    'when you genuinely do not know. Do not guess it from `source`.\n\n' +
+    '`cover` sets the display image independently of order, so the cover need not be first. A ' +
+    'cover that is not in the gallery is added to it. Replace the gallery without naming a cover ' +
+    'and the cover follows to the new first image.\n\n' +
+    'CONCURRENCY: this reads the product first and passes its version back with the write, so a ' +
+    'change someone else made in between is REFUSED rather than silently overwritten. On a ' +
+    'conflict the tool re-reads and returns `conflict: true` with the current images — it does ' +
+    'NOT retry, because the list you built was based on a gallery that no longer exists. Rebuild ' +
+    'from `current_images` and call again.',
+  inputSchema: z.object({
+    product_uuid: z.string().min(1).describe('The product whose listing images to set.'),
+    images: z
+      .array(
+        z.object({
+          url: z
+            .string()
+            .min(1)
+            .max(MAX_IMAGE_URL_LENGTH)
+            .describe('Publicly reachable image URL.'),
+          source: IMAGE_SOURCE.optional().describe(
+            'Where the file came from. `mockup` = a provider mockup render, `upload` = a file ' +
+              'the merchant supplied (see upload_design), `ai_mockup` = an AI-generated ' +
+              'lifestyle/staged shot, `print_file` = the raw artwork. Defaults to `unknown` ' +
+              'rather than being guessed. NOTE: a gallery of nothing but `print_file` artwork ' +
+              'is refused (no_shippable_gallery_image) — raw artwork is not a listing photo.',
+          ),
+          ai_generated: z
+            .boolean()
+            .nullable()
+            .optional()
+            .describe(
+              'Was this image produced by a generative model? Independent of `source`: an ' +
+                'uploaded photo can be AI-generated. Leave unset/null when unknown — null means ' +
+                '"not stated", which is not the same as false.',
+            ),
+        }),
+      )
+      .max(
+        MAX_LISTING_IMAGES,
+        `At most ${MAX_LISTING_IMAGES} images can be stored on a product.`,
+      )
+      .nullable()
+      .optional()
+      .describe(
+        'The COMPLETE ordered gallery, replacing whatever is there. Null resets to the ' +
+          "product's provider mockups. Omit to change only the cover.",
+      ),
+    cover: z
+      .string()
+      .min(1)
+      .max(MAX_IMAGE_URL_LENGTH)
+      .optional()
+      .describe(
+        'URL of the image to show as the listing cover. Independent of gallery order. Added to ' +
+          'the gallery if it is not already in it.',
+      ),
+    workspace: z.string().optional().describe('Workspace uuid (agency accounts).'),
+  }),
+  annotations: { openWorldHint: true },
+  handler: async (input, ctx) => {
+    if (input.images === undefined && input.cover === undefined) {
+      throw new AhError({
+        code: 'bad_request',
+        message: 'Nothing to change: provide `images`, `cover`, or both.',
+      });
+    }
+
+    // Duplicate URLs are refused by the platform (duplicate_gallery_image). Catching
+    // it here names the offending URL, which the round trip does not.
+    if (Array.isArray(input.images)) {
+      const seen = new Set<string>();
+      for (const img of input.images) {
+        if (seen.has(img.url)) {
+          throw new AhError({
+            code: 'duplicate_gallery_image',
+            message: `The same image appears twice in the gallery: ${img.url}`,
+            suggestion:
+              'Each image may appear once. Remove the duplicate entry and retry — position, ' +
+              'not repetition, is what controls prominence.',
+          });
+        }
+        seen.add(img.url);
+      }
+    }
+
+    // Read first: this is where the concurrency token comes from. It also means a
+    // caller changing only the cover does not have to have read the product.
+    const before = await readProductImages(ctx, input.product_uuid, input.workspace);
+
+    const body: Record<string, unknown> = {};
+    if (input.images !== undefined) {
+      body.gallery_images =
+        input.images === null
+          ? null
+          : input.images.map((img) => ({
+              url: img.url,
+              source: img.source ?? 'unknown',
+              // Sent as-is including null: the platform's tri-state.
+              ai_generated: img.ai_generated ?? null,
+            }));
+    }
+    if (input.cover !== undefined) body.display_image = input.cover;
+    // Only claim a version we actually read. Sending a fabricated one would turn
+    // the guard off in exactly the case it exists for.
+    if (before.images_version !== undefined) {
+      body.expected_images_version = before.images_version;
+    }
+
+    try {
+      await ctx.api.patch(`product/${enc(input.product_uuid)}`, {
+        body,
+        workspace: input.workspace,
+        signal: ctx.signal,
+      });
+    } catch (err) {
+      if (!isImagesVersionConflict(err)) throw err;
+      // Someone else changed the imagery between our read and our write. Re-read and
+      // hand back the truth rather than retrying: the list the caller built describes
+      // a gallery that no longer exists, so replaying it would discard whatever the
+      // other writer did — the exact silent clobber the version token prevents.
+      const current = await readProductImages(ctx, input.product_uuid, input.workspace);
+      return {
+        product_uuid: input.product_uuid,
+        conflict: true,
+        applied: false,
+        expected_images_version: before.images_version,
+        current_images_version: current.images_version,
+        current_images: current.images.map(mapListingImage),
+        current_cover: current.display_image,
+        message:
+          'The listing images changed since they were read, so nothing was written. This is ' +
+          'not a transient failure — retrying the same list would overwrite that change.',
+        suggestion:
+          'Rebuild the gallery from `current_images` (re-applying your intended edit on top of ' +
+          'it), then call set_product_images again. If the change was made by a person, say what ' +
+          'changed before overwriting it.',
+        product_url: viewUrl.product(input.product_uuid),
+      };
+    }
+
+    // Re-read rather than echoing the request. The platform reorders nothing, but it
+    // DOES auto-insert a cover that was not in the gallery and moves the cover when the
+    // gallery is replaced, so what was sent is not reliably what is now stored.
+    const after = await readProductImages(ctx, input.product_uuid, input.workspace);
+    return {
+      product_uuid: input.product_uuid,
+      conflict: false,
+      applied: true,
+      images: after.images.map(mapListingImage),
+      images_version: after.images_version,
+      cover: after.display_image,
+      image_count: after.images.length,
+      product_url: viewUrl.product(input.product_uuid),
+    };
+  },
+});
+
+export const unsyncFromChannel = defineTool({
+  name: 'unsync_from_channel',
+  description:
+    'Remove a product from ONE sales channel, leaving every other channel and the fulfillment ' +
+    'provider untouched. The product stays in ApparelHub; only that channel listing goes away. ' +
+    'Use this to delist from a single channel — do NOT hand-roll it against the raw unsync ' +
+    'endpoint: that endpoint is product-level and defaults to detaching fulfillment AND cascading ' +
+    'to every channel, so getting the parameters slightly wrong unsyncs far more than you asked ' +
+    'for. To remove a product from EVERYTHING, use archive_product instead.',
+  inputSchema: z.object({
+    product_uuid: z.string().min(1),
+    store_uuid: z.string().min(1),
+    integration_uuid: z
+      .string()
+      .min(1)
+      .describe('The sales-channel integration to remove the listing from. Required: without it '
+        + 'the platform would cascade to fulfillment and every other channel.'),
+    workspace: z.string().optional(),
+  }),
+  // Destructive but narrow, and re-running it on an already-unsynced product is
+  // a no-op on the platform side.
+  annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: true },
+  handler: async (input, ctx) => {
+    const r = await ctx.api.del(
+      `store/${enc(input.store_uuid)}/products/${enc(input.product_uuid)}/sync`,
+      {
+        // target=ecommerce is what scopes this to the one channel. It is set
+        // here by construction precisely so a caller cannot omit it.
+        query: { target: 'ecommerce', integration_uuid: input.integration_uuid },
+        workspace: input.workspace,
+        signal: ctx.signal,
+      },
+    );
+    return {
+      product_uuid: input.product_uuid,
+      integration_uuid: input.integration_uuid,
+      unsynced: { fulfillment: false, channels: [input.integration_uuid] },
+      message: str(r, 'message') ?? 'Product unsynced from the sales channel.',
     };
   },
 });
@@ -476,7 +1475,9 @@ export const updateProduct = defineTool({
 export const deleteProduct = defineTool({
   name: 'delete_product',
   description:
-    'Delete (default) or archive a product. Hard delete cascades to variants; if the product is synced to channels, unsync it first (sync_to_channel / the web UI) to avoid orphan listings.',
+    'Delete (default) or archive a product. Hard delete cascades to variants; if the product is ' +
+    'synced to channels, unsync it first to avoid orphan listings — unsync_from_channel for one ' +
+    'channel, archive_product for all of them. (sync_to_channel cannot unsync; it only syncs.)',
   inputSchema: z.object({
     product_uuid: z.string().min(1),
     archive_only: z.boolean().optional().describe('Default false (hard delete).'),
@@ -500,6 +1501,261 @@ export const deleteProduct = defineTool({
   },
 });
 
+// TikTok grades every listing POOR/FAIR/GOOD and that grade suppresses reach.
+// This is the diagnose -> fix -> verify loop over TikTok's own quality engine:
+// it reports why a listing is graded low AND the values TikTok itself
+// recommends, so the fix is sourced from the system doing the grading rather
+// than guessed.
+export const diagnoseTiktokListings = defineTool({
+  name: 'diagnose_tiktok_listings',
+  description:
+    "Diagnose TikTok Shop listing quality and optionally apply TikTok's own recommendations. " +
+    'TikTok grades each listing POOR/FAIR/GOOD and a low grade suppresses reach. Returns, per listing: ' +
+    'the current tier, the machine-readable issues behind it (code + how_to_solve + the tier that ONE fix ' +
+    "unlocks), and TikTok's recommended search terms / titles / descriptions. " +
+    'READ-ONLY unless you pass `apply`. ' +
+    "`apply:['search_terms']` is the safe default action — search terms are hidden listing metadata. " +
+    "Passing 'title' or 'description' replaces merchant-visible copy with machine-generated text, so ask " +
+    'the user first; those land on a TikTok-ONLY override and never rewrite the shared product record ' +
+    '(which would also change the Shopify/WooCommerce/Wix listings). Use `dry_run` to preview. ' +
+    'IMPORTANT — TikTok often flags a title WITHOUT offering a replacement, so `apply:["title"]` returns ' +
+    'no_recommendation. That is not a dead end: each listing also carries `requirements` (the computed ' +
+    'target, e.g. 40-150 chars — TikTok\'s own length rules contradict each other and this is the ' +
+    'intersection), `building_blocks` (the product\'s real garment/colors/sizes, so you write from facts ' +
+    'rather than inventing them), and `candidates.title` (ready-to-use options, shortest first, each ' +
+    'already validated against the requirements). Offer the candidates to the user, or write your own ' +
+    'title to the requirements and set it via update_product tiktok_listing.title. ' +
+    'Check `issues[].fixable_by` before acting: `photography` means the listing needs new imagery, not ' +
+    'better writing — report it rather than trying to write around it. ' +
+    '⚠️ `diagnosable` means "TikTok returned a diagnosis", NOT "this listing is live". TikTok also '
+    + 'answers for deactivated and deleted listings, so a catalog can come back entirely '
+    + 'diagnosable:true while a third of it is no longer for sale. Read `listing_health` for '
+    + 'liveness: "Removed" is gone, "Needs Attention" is present but not visible to buyers, and '
+    + 'null means we have never checked — which is NOT the same as healthy. Do not advise a user '
+    + 'to delist something on the strength of diagnosable alone. ' +
+    'Tier is a US-market signal. After applying, re-run this tool LATER to see the new tier: TikTok ' +
+    're-grades asynchronously, so the tier does not move the instant an edit lands.',
+  inputSchema: z.object({
+    store_uuid: z.string().min(1),
+    integration_uuid: z
+      .string()
+      .optional()
+      .describe('Only needed when the store has more than one connected TikTok Shop integration.'),
+    product_uuids: z
+      .array(z.string())
+      .optional()
+      .describe('Limit to these products. Omit to cover every listing synced to TikTok.'),
+    apply: z
+      .array(z.enum(['search_terms', 'title', 'description']))
+      .optional()
+      .describe(
+        "Omit for a read-only diagnosis. Provide the fields to overwrite with TikTok's recommendations.",
+      ),
+    dry_run: z
+      .boolean()
+      .optional()
+      .describe('With `apply`: report what would change without writing or syncing.'),
+    workspace: z.string().optional(),
+  }),
+  annotations: { openWorldHint: true },
+  handler: async (input, ctx) => {
+    const base = `store/${enc(input.store_uuid)}/tiktok/listing-quality`;
+
+    if (!input.apply || input.apply.length === 0) {
+      const query: Record<string, string> = {};
+      if (input.integration_uuid) query.integration_uuid = input.integration_uuid;
+      // Filter server-side so TikTok is only asked about the listings we care
+      // about. The route also takes a repeatable `product_uuid`, but this client
+      // cannot send repeated query params, hence the comma-separated form.
+      if (input.product_uuids?.length) query.product_uuids = input.product_uuids.join(',');
+      const r = await ctx.api.get(base, {
+        query,
+        workspace: input.workspace,
+        signal: ctx.signal,
+      });
+      if (!isRecord(r)) return { products: [] };
+      return {
+        integration_uuid: str(r, 'integration_uuid'),
+        products: asArray(r.products),
+        unavailable: r.unavailable ?? {},
+      };
+    }
+
+    const r = await ctx.api.post(`${base}/optimize`, {
+      body: {
+        integration_uuid: input.integration_uuid,
+        product_uuids: input.product_uuids,
+        fields: input.apply,
+        dry_run: input.dry_run ?? false,
+      },
+      workspace: input.workspace,
+      signal: ctx.signal,
+    });
+    return isRecord(r) ? r : { results: [] };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Listing photography (#183)
+// ---------------------------------------------------------------------------
+
+const LISTING_IMAGE_STYLE = z.enum(['on_model', 'detail', 'flat_lay', 'lifestyle']);
+
+/** The platform refuses when a product has no mockup to edit. That is the refusal an agent is
+ *  most likely to hit and it is ACTIONABLE (render a mockup first), so it gets its own code
+ *  instead of surfacing as a generic validation failure. */
+function isNoMockupRefusal(err: unknown): boolean {
+  return err instanceof AhError && /no mockup/i.test(err.message);
+}
+
+export const generateListingImage = defineTool({
+  name: 'generate_listing_image',
+  description:
+    'Generate listing photography for an existing product — an on-model shot, a detail crop, a ' +
+    'flat lay, or the product in a real setting.\n\n' +
+    "HOW IT WORKS: this EDITS the product's own rendered mockup. It is not text-to-image, and " +
+    'that is the point — the photo shows the actual colourway and the actual printed design, so ' +
+    'it depicts the product a shopper will receive.\n\n' +
+    '⚠️ A PRODUCT WITH NO MOCKUP IS REFUSED, not silently generated from scratch. A from-scratch ' +
+    'product photo invents a product that does not exist and publishes it as photography of one ' +
+    'that does — a listing-takedown and chargeback risk, not merely a quality problem. On ' +
+    '`product_has_no_mockup`, render a mockup preview first (ship_product / create_product do ' +
+    'this) and call again. Raw print artwork does not count as a mockup.\n\n' +
+    '`guidance` is EXTRA wording folded in on top of the chosen preset — it does NOT replace it, ' +
+    'and it cannot override the constraint that keeps the garment, colour and artwork unchanged. ' +
+    'Use it for setting or mood ("outdoors at golden hour"), not to restate the product.\n\n' +
+    "COST: this spends an image generation from the account's quota, like any other. Four styles " +
+    'across thirty products is 120 generations — more than some plans allow in total. Check the ' +
+    'plan before looping over a catalogue.\n\n' +
+    'By default the image is generated and RETURNED, not attached: putting a machine-made photo ' +
+    'on a live storefront is a separate decision from making one. Pass `attach: true` to append ' +
+    'it to the gallery — appended, so existing images are kept, unlike set_product_images which ' +
+    'replaces the whole gallery.',
+  inputSchema: z.object({
+    product_uuid: z
+      .string()
+      .min(1)
+      .describe('The product to photograph. Its existing mockup is what gets edited.'),
+    style: LISTING_IMAGE_STYLE.describe(
+      'Which preset to use. `on_model` = worn by a person; `detail` = close crop showing fabric ' +
+        'and print texture; `flat_lay` = styled flat, shot from above; `lifestyle` = the product ' +
+        'in a real setting. The preset supplies the prompt.',
+    ),
+    guidance: z
+      .string()
+      .max(500)
+      .optional()
+      .describe(
+        'Optional extra direction layered on top of the preset (setting, mood, lighting). ' +
+          'Truncated at 500 characters by the platform.',
+      ),
+    source_image_url: z
+      .string()
+      .min(1)
+      .max(MAX_IMAGE_URL_LENGTH)
+      .optional()
+      .describe(
+        "Which of the product's existing listing images to edit. Must be one of them and must " +
+          "not be raw print artwork. Defaults to the product's best mockup — usually leave unset.",
+      ),
+    attach: z
+      .boolean()
+      .optional()
+      .describe(
+        "Append the result to the product's listing gallery (default false). Existing images are " +
+          'kept. Leave false to review the image before it reaches a storefront.',
+      ),
+    set_as_cover: z
+      .boolean()
+      .optional()
+      .describe('When attaching, also make it the listing cover. Ignored unless `attach` is true.'),
+    workspace: z.string().optional().describe('Workspace uuid (agency accounts).'),
+  }),
+  annotations: { openWorldHint: true },
+  handler: async (input, ctx) => {
+    // An edit can only fall back to an edit-capable model; a text-to-image-only model would spend
+    // a rung on a guaranteed rejection.
+    const sources = fallbackLadder({ edit: true });
+    const started = Date.now();
+
+    let generated;
+    try {
+      generated = await runGenerationWithFallback(
+        ctx.api,
+        {
+          source: sources[0]!,
+          sources,
+          sourceProductUuid: input.product_uuid,
+          listingStyle: input.style,
+          // Omitted when absent so the preset stands alone: the platform folds any prompt into
+          // the merchant's real prompt as extra guidance, so filler would not be ignored.
+          ...(input.guidance ? { prompt: input.guidance } : {}),
+          ...(input.source_image_url ? { sourceImageUrl: input.source_image_url } : {}),
+          workspace: input.workspace,
+        },
+        { progress: ctx.progress, signal: ctx.signal },
+      );
+    } catch (err) {
+      if (isNoMockupRefusal(err)) {
+        throw new AhError({
+          code: 'product_has_no_mockup',
+          message:
+            'This product has no mockup to photograph, so listing imagery was refused rather ' +
+            'than invented from scratch.',
+          suggestion:
+            'Render a mockup preview for the product first, then call generate_listing_image ' +
+            'again. Raw print artwork does not count as a mockup.',
+          httpStatus: 400,
+        });
+      }
+      throw err;
+    }
+
+    const result: Record<string, unknown> = {
+      product_uuid: input.product_uuid,
+      style: input.style,
+      image_uuid: generated.image_uuid,
+      image_url: generated.image_url,
+      source_used: generated.source_used,
+      fallback_trail: generated.fallback_trail,
+      generation_latency_ms: Date.now() - started,
+      metered: 'image_generation',
+      attached: false,
+    };
+
+    if (!input.attach) {
+      result.next_step =
+        'Review the image, then attach it with attach: true (or set_product_images for full ' +
+        'control over gallery order).';
+      return result;
+    }
+
+    const r = await ctx.api.post(`product/${enc(input.product_uuid)}/listing-images`, {
+      body: {
+        url: generated.image_url,
+        source: 'ai_mockup',
+        // The one path where the client genuinely knows: it just generated this image.
+        ai_generated: true,
+        image_uuid: generated.image_uuid,
+        ...(input.set_as_cover ? { set_as_cover: true } : {}),
+      },
+      workspace: input.workspace,
+      signal: ctx.signal,
+    });
+
+    result.attached = true;
+    if (isRecord(r)) {
+      const images = asArray(r, 'images');
+      result.images = images.map(mapListingImage);
+      result.images_version = num(r, 'images_version');
+      result.cover = str(r, 'display_image');
+      result.image_count = images.length;
+    }
+    result.product_url = viewUrl.product(input.product_uuid);
+    return result;
+  },
+});
+
 export const productTools: ToolDef[] = [
   shipProduct,
   createProduct,
@@ -507,5 +1763,9 @@ export const productTools: ToolDef[] = [
   syncToFulfillment,
   syncToChannel,
   updateProduct,
+  setProductImages,
+  generateListingImage,
+  unsyncFromChannel,
   deleteProduct,
+  diagnoseTiktokListings,
 ];

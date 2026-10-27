@@ -45,8 +45,18 @@ export function qualityTier(brand?: string, name?: string): QualityTier {
   return 'standard';
 }
 
-/** BC 3001 (product_ref_id "71") variant-ID trap: 4021-4025 render AQUA, not Navy. Use the
- *  Heather Midnight Navy IDs (8495-8499) instead. Surfaced on get_garment_details. */
+// Face goods print as a FULL face by default: a raw "placed" design on these leaves contrasting
+// borders (white bands) and, when the design still carries its chroma-green keying background,
+// prints the green screen onto the product (the canvas/backpack incident, 2026-07-09). Apparel,
+// drinkware, and glass keep placed/transparent behavior; embroidery is decided upstream.
+// NOTES: apparel is tested FIRST because brand names collide with face-good words ("Bella +
+// Canvas 3001" contains "canvas"); 'laptop sleeve' is deliberately specific — a bare /sleeve/
+// would misclassify "Long Sleeve Tee" apparel as a fill face.
+
+export type PrintStyle = 'placed' | 'fill';
+
+/** Default print style for a garment by name: 'fill' for face goods, 'placed' otherwise
+ *  (apparel always placed — the design floats with transparency preserved). */
 export function garmentWarnings(providerRefId: string | undefined): string[] {
   if (providerRefId === '71') {
     return [

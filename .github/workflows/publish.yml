@@ -2,17 +2,22 @@ name: Publish to npm
 
 # Publishes @apparelhub/mcp-server when a GitHub Release is published, or on manual dispatch.
 #
-# STUBBED until credentials are configured: without an `NPM_TOKEN` repo secret this runs
-# `npm publish --dry-run` (proves the tarball packs correctly) and does NOT publish. Add the
-# NPM_TOKEN secret later to switch on real publishing — no other change required.
+# Auth is npm TRUSTED PUBLISHING (GitHub OIDC). There is no stored npm token: npm trusts this
+# repo + this workflow file (configured on the package's npmjs.com Settings > Trusted Publisher),
+# and each run gets a short-lived credential. The old NPM_TOKEN secret expired (write tokens cap
+# at 90 days) and npm is retiring 2FA-bypass publish tokens in Jan 2027, so it is NOT used here.
+# Renaming this file breaks publishing until the trusted-publisher entry on npmjs.com is updated.
 on:
   release:
     types: [published]
   workflow_dispatch:
 
+# SECURITY (public repo): `id-token: write` below is for npm provenance and for the MCP
+# registry's GitHub OIDC login only (audiences are the npm and MCP registries, NOT AWS). Do not repurpose it to assume AWS roles, and never add a
+# `pull_request` / `pull_request_target` trigger to a job that holds id-token in this repo.
 permissions:
   contents: read
-  id-token: write # npm provenance (OIDC), used once NPM_TOKEN is set
+  id-token: write # npm trusted publishing + provenance, and MCP registry login (OIDC)
 
 jobs:
   publish:
@@ -25,16 +30,39 @@ jobs:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
           cache: npm
+      # Trusted publishing needs npm >= 11.5.1; Node 22 bundles an older npm.
+      - name: Upgrade npm for trusted publishing
+        run: |
+          npm install -g npm@latest
+          npm --version
+          node -e "const [a,b,c]=process.argv[1].split('.').map(Number); if (a<11||(a===11&&(b<5||(b===5&&c<1)))) { console.error('npm '+process.argv[1]+' is too old for trusted publishing'); process.exit(1) }" "$(npm --version)"
       - run: npm ci
       - run: npm run build
       - run: npm test
-      - name: Publish (or dry-run if NPM_TOKEN is not configured)
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish to npm (trusted publishing)
+        # Deliberately NO NODE_AUTH_TOKEN: if a stale token is present npm uses it instead of OIDC.
         run: |
-          if [ -z "${NODE_AUTH_TOKEN}" ]; then
-            echo "::warning title=npm publish stubbed::NPM_TOKEN secret is not set. Running 'npm publish --dry-run' only. Add the NPM_TOKEN repo secret to enable real publishing."
-            npm publish --dry-run --access public
+          if npm view "$(node -p "require('./package.json').name")@$(node -p "require('./package.json').version")" version >/dev/null 2>&1; then
+            # Already on npm (a re-run after a later step failed). npm refuses to publish over
+            # an existing version, so skip instead of failing the whole job.
+            echo "Version already published to npm; skipping."
           else
             npm publish --provenance --access public
           fi
+
+      # List the release in the official MCP registry, after the npm publish: the registry
+      # verifies the published npm tarball carries the matching mcpName. Auth is GitHub OIDC.
+      - name: Publish to the MCP registry
+        run: |
+          # The registry validates against npm, and a fresh npm publish takes a short while to
+          # become visible. v0.15.2's first run failed with "version not found" for exactly this
+          # reason, so wait (up to 5 minutes) until npm serves the version before publishing.
+          PKG="$(node -p "require('./package.json').name")@$(node -p "require('./package.json').version")"
+          for i in $(seq 1 30); do
+            npm view "$PKG" version >/dev/null 2>&1 && break
+            echo "Waiting for $PKG to appear on npm ($i/30)..."; sleep 10
+          done
+          npm view "$PKG" version >/dev/null 2>&1 || { echo "::error::$PKG never appeared on npm"; exit 1; }
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish

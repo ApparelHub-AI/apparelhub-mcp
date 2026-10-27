@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { browseCatalog, getGarmentDetails, recommendGarmentTool } from '../src/tools/catalog.js';
+import {
+  browseCatalog,
+  getGarmentDetails,
+  recommendGarmentTool,
+  listCatalogProviders,
+} from '../src/tools/catalog.js';
 import { fakeContext } from './helpers/ctx.js';
 import { apiSequence } from './helpers/fakeFetch.js';
 
@@ -42,6 +47,41 @@ describe('browse_catalog', () => {
       browseCatalog.handler({ provider: 'Printful' }, fakeContext(api)),
     ).rejects.toMatchObject({ code: 'not_found' });
   });
+
+  // #110: provider access is auth-gated per account, so the tool must accept ANY provider the
+  // live /merchandise/providers list returns — never a hardcoded Printful/Printify enum.
+  it('accepts any provider the account is entitled to (no hardcoded enum)', async () => {
+    const merchandise = {
+      providers: [
+        { uuid: 'pf-uuid', name: 'Printful' },
+        { uuid: 'py-uuid', name: 'Printify' },
+        { uuid: 'ge-uuid', name: 'Gelato' },
+      ],
+    };
+    const products = { products: [{ ref_id: 'abc', name: 'Phone Case', variant_count: 1 }] };
+    const { api, calls } = apiSequence([merchandise, products]);
+    const res = (await browseCatalog.handler({ provider: 'Gelato' }, fakeContext(api))) as any;
+    expect(calls[0]?.url).toContain('/agents/v1/merchandise/providers');
+    expect(calls[1]?.url).toContain('/merchandise/ge-uuid/products');
+    expect(res.provider).toBe('Gelato');
+    expect(res.garments[0]).toMatchObject({ provider_ref_id: 'abc', name: 'Phone Case' });
+  });
+
+  it("unknown provider error enumerates the account's actual available providers", async () => {
+    const merchandise = {
+      providers: [
+        { uuid: 'pf-uuid', name: 'Printful' },
+        { uuid: 'py-uuid', name: 'Printify' },
+      ],
+    };
+    const { api } = apiSequence([merchandise]);
+    await expect(
+      browseCatalog.handler({ provider: 'Nope' }, fakeContext(api)),
+    ).rejects.toMatchObject({
+      code: 'not_found',
+      message: expect.stringContaining('Printful, Printify'),
+    });
+  });
 });
 
 describe('get_garment_details', () => {
@@ -70,6 +110,83 @@ describe('get_garment_details', () => {
     expect(res.print_templates[0]).toMatchObject({ placement: 'front', area_width: 1800 });
     expect(res.warnings[0]).toContain('AQUA');
   });
+
+  // apparelhub-mcp#171 / platform cost-visibility work: `cost` alone cannot tell a
+  // live catalog price from a snapshot captured the last time a blank was built.
+  // An agent comparing providers needs the provenance or it treats both as equally
+  // current. mapVariant whitelists fields, so an unmapped one is silently dropped.
+  it('surfaces cost provenance so a cached price is not mistaken for a live one', async () => {
+    const merchandise = { providers: [{ uuid: 'py-uuid', name: 'Printify' }] };
+    const detail = {
+      name: 'Cotton Tee',
+      provider_ref_id: '77',
+      variants: [
+        {
+          id: 'v1', color: 'Black', size: 'M', price: 11.36,
+          cost_source: 'cached', cost_captured_at: '2026-08-12T14:03:11',
+        },
+        { id: 'v2', color: 'White', size: 'L', cost_source: 'unavailable', cost_captured_at: null },
+      ],
+    };
+    const { api } = apiSequence([merchandise, detail]);
+    const res = (await getGarmentDetails.handler(
+      { provider: 'Printify', product_ref_id: '77' },
+      fakeContext(api),
+    )) as any;
+    expect(res.variants[0]).toMatchObject({
+      cost: 11.36,
+      cost_source: 'cached',
+      cost_captured_at: '2026-08-12T14:03:11',
+    });
+    expect(res.variants[1].cost_source).toBe('unavailable');
+    expect(res.variants[1].cost).toBeUndefined();
+  });
+
+  // #111 follow-up: Gelato's top-level template_details lists placements with NO dims;
+  // the real dims live on variants[].templates. print_templates must carry those dims,
+  // not an empty recommended_image_size.
+  it('falls back to variant templates when the top-level list is dimensionless (Gelato)', async () => {
+    const merchandise = { providers: [{ uuid: 'ge-uuid', name: 'Gelato' }] };
+    const detail = {
+      name: 'Iphone 16 Phone Case',
+      provider_ref_id: 'cGhv',
+      template_details: [
+        { detail_type: 'Location', name: 'Default', provider_ref_id: 'default', value: 'default' },
+      ],
+      variants: [
+        {
+          color: 'White',
+          color_code: '#ffffff',
+          price: 10.4,
+          provider_ref_id: 'phonecase_apple_iphone-16_tough_white_glossy',
+          size: '',
+          templates: [
+            {
+              provider_location_ref_id: 'default',
+              area_width: 1000,
+              area_height: 2000,
+              template_width: 1150,
+              template_height: 2300,
+              left: 75,
+              top: 0,
+            },
+          ],
+        },
+      ],
+    };
+    const { api } = apiSequence([merchandise, detail]);
+    const res = (await getGarmentDetails.handler(
+      { provider: 'Gelato', product_ref_id: 'cGhv' },
+      fakeContext(api),
+    )) as any;
+    expect(res.print_templates[0]).toMatchObject({
+      placement: 'default',
+      area_width: 1000,
+      area_height: 2000,
+    });
+    expect(res.print_templates[0].recommended_image_size).toEqual({ width: 1150, height: 2300 });
+    expect(res.variants[0]).toMatchObject({ color: 'White', cost: 10.4 });
+  });
 });
 
 describe('recommend_garment', () => {
@@ -87,6 +204,40 @@ describe('recommend_garment', () => {
 // numeric provider_ref_id, string prices, variant-level templates) — the fields the first
 // remote-surface test (#38) caught the mappers missing. Generic placeholder values only.
 describe('catalog mapping against live platform shapes', () => {
+  it('surfaces platform warnings so a narrowed result set announces itself', async () => {
+    // The reason this matters: Printful's only category node named "Hats"
+    // sits under KIDS, so category=hats legitimately returns one product.
+    // Without the warning an agent concludes "only one hat exists" -- the
+    // failure this whole area exists to prevent. Dropping warnings here would
+    // strand the platform-side fix inside the API.
+    const merchandise = { providers: [{ uuid: 'pf-uuid', name: 'Printful' }] };
+    const products = {
+      garments: [{ ref_id: '194', name: 'Kids Hat' }],
+      total: 1,
+      filters_applied: { category: 'hats', category_ref: 194, category_matched: 'kids / Hats' },
+      warnings: ["category='hats' matched the 'Hats' type inside 'kids' only"],
+    };
+    const { api } = apiSequence([merchandise, products]);
+    const res = (await browseCatalog.handler(
+      { provider: 'Printful', category: 'hats' },
+      fakeContext(api),
+    )) as any;
+    expect(res.warnings).toEqual([
+      "category='hats' matched the 'Hats' type inside 'kids' only",
+    ]);
+    expect(res.filters_applied).toMatchObject({ category_matched: 'kids / Hats' });
+    expect(res.total).toBe(1);
+  });
+
+  it('omits warnings/filters_applied entirely on an unfiltered browse', async () => {
+    const merchandise = { providers: [{ uuid: 'pf-uuid', name: 'Printful' }] };
+    const { api } = apiSequence([merchandise, [{ ref_id: '71', name: 'Tee' }]]);
+    const res = (await browseCatalog.handler({ provider: 'Printful' }, fakeContext(api))) as any;
+    expect(res).not.toHaveProperty('warnings');
+    expect(res).not.toHaveProperty('filters_applied');
+    expect(res.garments).toHaveLength(1);
+  });
+
   it('browse_catalog maps a bare-array listing with numeric provider_ref_id', async () => {
     const merchandise = { providers: [{ uuid: 'pf-uuid', name: 'Printful' }] };
     const products = [
@@ -143,5 +294,28 @@ describe('catalog mapping against live platform shapes', () => {
     expect(res.variants[0]).toMatchObject({ provider_variant_id: 23889, cost: 13.2 });
     expect(res.print_templates[0]).toMatchObject({ placement: 'default', area_width: 1622 });
     expect(res.print_templates[0].recommended_image_size).toEqual({ width: 3000, height: 3000 });
+  });
+});
+
+describe('list_catalog_providers', () => {
+  it("returns the account's entitled providers (incl. gated ones like Gelato)", async () => {
+    const merchandise = {
+      providers: [
+        { uuid: 'pf-uuid', name: 'Printful', active: true, user_auth_mode: 'oauth' },
+        { uuid: 'py-uuid', name: 'Printify', active: true, user_auth_mode: 'pat' },
+        { uuid: 'ge-uuid', name: 'Gelato', active: true, user_auth_mode: 'pat' },
+      ],
+    };
+    const { api, calls } = apiSequence([merchandise]);
+    const res = (await listCatalogProviders.handler({}, fakeContext(api))) as any;
+    expect(calls[0]?.url).toContain('/agents/v1/merchandise/providers');
+    expect(res.total).toBe(3);
+    expect(res.providers.map((p: any) => p.name)).toEqual(['Printful', 'Printify', 'Gelato']);
+    expect(res.providers[2]).toMatchObject({
+      name: 'Gelato',
+      uuid: 'ge-uuid',
+      active: true,
+      auth_mode: 'pat',
+    });
   });
 });

@@ -1,5 +1,12 @@
 # Docker context allowlist for deploy/hosted/Dockerfile (context = repo root).
-# Only the prebuilt bundle and the python helpers enter the image.
+# Only the prebuilt bundle, the python helpers and the OCR language data enter
+# the image.
+#
+# This is an ALLOWLIST: anything the Dockerfile COPYs must be un-ignored here as
+# well, or the build dies with "file not found in build context" — which reads
+# like a missing file rather than an ignore rule. test/hosted-image.test.ts
+# checks the two stay in step.
 *
 !python/
+!tessdata/
 !deploy/hosted/build/handler.mjs

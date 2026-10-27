@@ -5,6 +5,11 @@ import {
   verifyDesignText,
   designApparel,
   iterateDesign,
+  fitAspect,
+  archiveDesign,
+  restoreDesign,
+  deleteDesign,
+  designTools,
 } from '../src/tools/design.js';
 import { runGeneration } from '../src/image/generate.js';
 import { ApiClient } from '../src/http/client.js';
@@ -45,7 +50,14 @@ function fakeImaging(over: Partial<Imaging> = {}): Imaging {
       corner_alpha: [0, 0, 0, 0],
       premultiplied_white: true,
     }),
-    ocr: async () => ({ available: true, text: 'STAY WILD' }),
+    ocr: async () => ({ available: true, text: 'STAY WILD' , confidence: null }),
+    recomposeFill: async () => {
+      throw new Error('not expected in this test');
+    },
+    solidFill: async () => {
+      throw new Error('not expected in this test');
+    },
+    ensureResolution: async () => ({ outputPath: '/tmp/fake-out.png', upscaled: false }),
     cleanup: async () => {},
     ...over,
   };
@@ -222,9 +234,74 @@ describe('process_transparency', () => {
   });
 });
 
+describe('process_transparency: fails loud when nothing was keyed (apparelhub-ai#1289)', () => {
+  // The real case: a yellow-lime screen (#CBCD5C) is not green-dominant, so the dominance
+  // fallback cleared 0 pixels and the keyer exited 3. The old code uploaded the untouched
+  // opaque square and returned a success payload with a note claiming a safe re-key.
+  const limeImaging = (uploads: { n: number }) =>
+    fakeImaging({
+      makeTransparent: async (_in: string, opts?: { mode?: 'box' | 'dominance' }) => {
+        if (opts?.mode !== 'dominance') {
+          throw new AhError({ code: 'chroma_background', message: 'not pure green' });
+        }
+        return { outputPath: '/tmp/still-opaque.png', cornersClean: false, width: 1024, height: 1024 };
+      },
+      imageStats: async () => ({
+        width: 1024,
+        height: 1024,
+        mode: 'RGBA',
+        has_alpha: true,
+        transparent_ratio: 0,
+        corner_alpha: [255, 255, 255, 255],
+        premultiplied_white: true,
+      }),
+      ensureResolution: async () => {
+        uploads.n += 1; // must not even get this far
+        return { outputPath: '/tmp/still-opaque.png', upscaled: false };
+      },
+    });
+
+  it('returns a structured error and uploads nothing', async () => {
+    const { api, calls } = apiFrom([]);
+    const uploads = { n: 0 };
+    await expect(
+      processTransparency.handler(
+        { image_uuid: 'g1', image_url: 'https://cdn.example/x.png' },
+        fakeContext(api, limeImaging(uploads)),
+      ),
+    ).rejects.toMatchObject({ code: 'transparency_not_applied' });
+    expect(calls).toHaveLength(0);
+    expect(uploads.n).toBe(0);
+  });
+
+  it('design_apparel keeps the raw design flagged, never a success-looking key', async () => {
+    const { api } = apiFrom([jsonResponse(200, { image_uuid: 'g1', url: 'https://cdn.example/x.png' })]);
+    const res = (await designApparel.handler(
+      { prompt: 'x', source: 'OpenAI', verify_text: false },
+      fakeContext(api, limeImaging({ n: 0 })),
+    )) as any;
+    expect(res.designs[0]).toMatchObject({ design_uuid: 'g1', transparency_clean: false });
+    expect(res.designs[0].warning).toContain('transparency_not_applied');
+    expect(res.designs[0].transparency_note).toBeUndefined();
+  });
+
+  it('a partially keyed result succeeds but says plainly that it is not clean', async () => {
+    const { api } = apiFrom([jsonResponse(200, { image_uuid: 't3', url: 'https://cdn.example/t3.png' })]);
+    const imaging = fakeImaging({
+      makeTransparent: async () => ({ outputPath: '/tmp/partial.png', cornersClean: false, width: 900, height: 700 }),
+    });
+    const res = (await processTransparency.handler(
+      { image_uuid: 'g1', image_url: 'https://cdn.example/x.png' },
+      fakeContext(api, imaging),
+    )) as any;
+    expect(res).toMatchObject({ image_uuid: 't3', corners_clean: false, transparency_clean: false });
+    expect(res.warning).toContain('NOT clean');
+  });
+});
+
 describe('verify_design_text', () => {
   it('reports a spelling match when OCR is available', async () => {
-    const ctx = fakeContext(undefined, fakeImaging({ ocr: async () => ({ available: true, text: 'STAY WILD' }) }));
+    const ctx = fakeContext(undefined, fakeImaging({ ocr: async () => ({ available: true, text: 'STAY WILD' , confidence: null }) }));
     const res = (await verifyDesignText.handler(
       { image_uuid: 'g1', image_url: 'https://cdn.example/x.png', expected_text: 'stay wild' },
       ctx,
@@ -233,7 +310,7 @@ describe('verify_design_text', () => {
   });
 
   it('degrades with a note when OCR is unavailable', async () => {
-    const ctx = fakeContext(undefined, fakeImaging({ ocr: async () => ({ available: false, text: '' }) }));
+    const ctx = fakeContext(undefined, fakeImaging({ ocr: async () => ({ available: false, text: '' , confidence: null }) }));
     const res = (await verifyDesignText.handler(
       { image_uuid: 'g1', image_url: 'https://cdn.example/x.png' },
       ctx,
@@ -310,10 +387,10 @@ describe('design_apparel', () => {
 });
 
 describe('iterate_design', () => {
-  it('rejects a source that cannot edit', async () => {
+  it('rejects a text-to-image-only source (Google Imagen 4) for editing', async () => {
     await expect(
       iterateDesign.handler(
-        { source_design_uuid: 'g1', change_description: 'blue', source: 'Seedream 4.0' },
+        { source_design_uuid: 'g1', change_description: 'blue', source: 'Google Imagen 4' },
         fakeContext(),
       ),
     ).rejects.toMatchObject({ code: 'unprocessable' });
@@ -328,5 +405,181 @@ describe('iterate_design', () => {
     expect(res).toMatchObject({ design_uuid: 'g9', design_url: 'https://cdn.example/v.png' });
     const body = JSON.parse(calls[0]?.init?.body as string);
     expect(body.source_image_uuid).toBe('g1');
+  });
+});
+
+describe('fit_aspect', () => {
+  it('pads an existing design to a target aspect and maps the nested image result', async () => {
+    // The route returns the new image nested under `image`, plus echoes source/aspect/mode/dimensions.
+    const { api, calls } = apiFrom([
+      jsonResponse(200, {
+        image: { uuid: 'fa1', url: 'https://cdn.example/tall.png', title: 'tall', created: '2026-07-15' },
+        source_image_uuid: 'g1',
+        aspect: '9:16',
+        mode: 'pad',
+        dimensions: { width: 1024, height: 1820 },
+      }),
+    ]);
+    const res = (await fitAspect.handler(
+      { image_uuid: 'g1', aspect: '9:16' }, // mode defaults to 'pad'
+      fakeContext(api),
+    )) as any;
+    expect(res).toMatchObject({
+      image_uuid: 'fa1',
+      image_url: 'https://cdn.example/tall.png',
+      source_image_uuid: 'g1',
+      aspect: '9:16',
+      mode: 'pad',
+      dimensions: { width: 1024, height: 1820 },
+    });
+    // Hits the fit-aspect route with the JSON body; background omitted when not given.
+    expect(calls[0]?.url).toContain('/images/generated/g1/fit-aspect');
+    const body = JSON.parse(calls[0]?.init?.body as string);
+    expect(body).toEqual({ aspect: '9:16', mode: 'pad' });
+  });
+
+  it('forwards a background only in pad mode when provided', async () => {
+    const { api, calls } = apiFrom([
+      jsonResponse(200, { image: { uuid: 'fa2', url: 'https://cdn.example/w.png' }, aspect: '16:9', mode: 'pad' }),
+    ]);
+    await fitAspect.handler(
+      { image_uuid: 'g1', aspect: '16:9', mode: 'pad', background: '#FFFFFF' },
+      fakeContext(api),
+    );
+    const body = JSON.parse(calls[0]?.init?.body as string);
+    expect(body).toEqual({ aspect: '16:9', mode: 'pad', background: '#FFFFFF' });
+  });
+
+  it('rejects a malformed aspect and a bad background hex without calling the API', async () => {
+    const { calls } = apiFrom([]);
+    const bad = fitAspect.inputSchema.safeParse({ image_uuid: 'g1', aspect: '9x16' });
+    expect(bad.success).toBe(false);
+    const badBg = fitAspect.inputSchema.safeParse({ image_uuid: 'g1', aspect: '9:16', background: 'white' });
+    expect(badBg.success).toBe(false);
+    expect(calls.length).toBe(0);
+  });
+});
+
+describe('process_transparency: resolution floor (NORWAY passport-wallet QC-skip)', () => {
+  it('upscales a low-res keyed design to the floor so verify_design_quality does not block', async () => {
+    // A 1024x1024 design keyed + tight-cropped to its artwork can come out 847x596 (min side
+    // 596 < 600 = the QC gate's hard block). process_transparency now upscales the keyed result
+    // and uploads THAT, so the design that reaches verify_design_quality is print-ready.
+    const { api } = apiFrom([jsonResponse(200, { image_uuid: 'hi', url: 'https://cdn.example/hi.png' })]);
+    let ensuredFloor = 0;
+    const readPaths: string[] = [];
+    const imaging = fakeImaging({
+      makeTransparent: async () => ({ outputPath: '/tmp/keyed-847x596.png', cornersClean: true, width: 847, height: 596 }),
+      ensureResolution: async (p: string, min: number) => {
+        ensuredFloor = min;
+        return { outputPath: '/tmp/keyed-upscaled.png', upscaled: true, width: 2843, height: 2000 };
+      },
+      readBytes: async (p: string) => {
+        readPaths.push(p);
+        return new Uint8Array([1, 2, 3]);
+      },
+    });
+    const res = (await processTransparency.handler(
+      { image_uuid: 'g1', image_url: 'https://cdn.example/x.png' },
+      fakeContext(api, imaging),
+    )) as any;
+
+    expect(ensuredFloor).toBe(2000); // upscaled to the resolution floor
+    expect(readPaths).toContain('/tmp/keyed-upscaled.png'); // the UPSCALED file is what gets uploaded
+    expect(res.image_uuid).toBe('hi');
+  });
+
+  it('does not re-upload when the keyed design is already large enough', async () => {
+    const { api } = apiFrom([jsonResponse(200, { image_uuid: 't1', url: 'https://cdn.example/t.png' })]);
+    const readPaths: string[] = [];
+    const imaging = fakeImaging({
+      makeTransparent: async () => ({ outputPath: '/tmp/keyed-big.png', cornersClean: true, width: 2400, height: 2000 }),
+      ensureResolution: async () => ({ outputPath: '/tmp/unused.png', upscaled: false }),
+      readBytes: async (p: string) => {
+        readPaths.push(p);
+        return new Uint8Array([1, 2, 3]);
+      },
+    });
+    await processTransparency.handler(
+      { image_uuid: 'g1', image_url: 'https://cdn.example/x.png' },
+      fakeContext(api, imaging),
+    );
+    // upscaled:false -> the ORIGINAL keyed file is uploaded, not a new one.
+    expect(readPaths).toEqual(['/tmp/keyed-big.png']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Design lifecycle: archive / restore / delete
+// Generic placeholders only (public repo, Rule 13): short ids like d1.
+// ---------------------------------------------------------------------------
+
+describe('archive_design / restore_design', () => {
+  it('archive PATCHes the design with archived:true', async () => {
+    const { api, calls } = apiFrom([jsonResponse(200, { uuid: 'd1', title: 'Cactus', archived: true })]);
+    const res = (await archiveDesign.handler({ design_uuid: 'd1' }, fakeContext(api))) as any;
+    expect(calls[0]!.init!.method).toBe('PATCH');
+    expect(calls[0]!.url).toContain('/images/generated/d1');
+    expect(JSON.parse(String(calls[0]!.init!.body))).toEqual({ archived: true });
+    expect(res).toMatchObject({ design_uuid: 'd1', archived: true, title: 'Cactus' });
+  });
+
+  it('restore PATCHes the design with archived:false', async () => {
+    const { api, calls } = apiFrom([jsonResponse(200, { uuid: 'd1', archived: false })]);
+    const res = (await restoreDesign.handler({ design_uuid: 'd1' }, fakeContext(api))) as any;
+    expect(calls[0]!.init!.method).toBe('PATCH');
+    expect(JSON.parse(String(calls[0]!.init!.body))).toEqual({ archived: false });
+    expect(res).toMatchObject({ design_uuid: 'd1', archived: false });
+  });
+
+  it('archive is idempotent-hinted and not flagged destructive', () => {
+    expect(archiveDesign.annotations?.idempotentHint).toBe(true);
+    expect(archiveDesign.annotations?.destructiveHint).toBeUndefined();
+  });
+});
+
+describe('delete_design', () => {
+  it('DELETEs the design and surfaces freed_bytes', async () => {
+    const { api, calls } = apiFrom([
+      jsonResponse(200, { message: 'Image deleted successfully', freed_bytes: 2048 }),
+    ]);
+    const res = (await deleteDesign.handler({ design_uuid: 'd1' }, fakeContext(api))) as any;
+    expect(calls[0]!.init!.method).toBe('DELETE');
+    expect(calls[0]!.url).toContain('/images/generated/d1');
+    expect(res).toMatchObject({ design_uuid: 'd1', deleted: true, freed_bytes: 2048 });
+  });
+
+  it('re-codes the in-use 409 to design_in_use and points at archive_design', async () => {
+    const { api } = apiFrom([
+      jsonResponse(409, {
+        message: 'This image is in use by one or more products and cannot be deleted.',
+        code: 'image_in_use',
+        products: [{ uuid: 'p1', name: 'Acme Tee' }],
+      }),
+    ]);
+    await expect(deleteDesign.handler({ design_uuid: 'd1' }, fakeContext(api))).rejects.toMatchObject({
+      code: 'design_in_use',
+      httpStatus: 409,
+    });
+    // The remedy has to name the safe alternative, or the agent just gives up.
+    try {
+      await deleteDesign.handler({ design_uuid: 'd1' }, fakeContext(apiFrom([
+        jsonResponse(409, { message: 'in use', code: 'image_in_use' }),
+      ]).api));
+    } catch (err) {
+      expect((err as AhError).suggestion).toContain('archive_design');
+    }
+  });
+
+  it('is flagged destructive', () => {
+    expect(deleteDesign.annotations?.destructiveHint).toBe(true);
+  });
+});
+
+describe('designTools surface', () => {
+  it('exports the lifecycle trio with unique names', () => {
+    const names = designTools.map((t) => t.name);
+    expect(new Set(names).size).toBe(names.length);
+    expect(names).toEqual(expect.arrayContaining(['archive_design', 'restore_design', 'delete_design']));
   });
 });

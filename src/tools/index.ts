@@ -2,31 +2,48 @@ import type { ToolDef } from './registry.js';
 import { readTools } from './read.js';
 import { catalogTools } from './catalog.js';
 import { designTools } from './design.js';
+import { uploadTools } from './upload.js';
 import { productTools } from './product.js';
 import { systemsTools } from './systems.js';
 import { safetyTools } from './safety.js';
 import { orderTools } from './orders.js';
+import { issueTools } from './issues.js';
 import { analyticsTools } from './analytics.js';
+import { channelTools } from './channel.js';
+import { trackedListingTools } from './tracked.js';
 import { collectionTools } from './collections.js';
 import { transferTools } from './transfer.js';
+import { workspaceTools } from './workspaces.js';
 import { managementTools } from './management.js';
 import { apiTools } from './apirequest.js';
+import { setupTools } from './setup.js';
 
 // The complete tool surface, assembled from each group.
 export function allTools(): ToolDef[] {
   return [
+    // First-time account setup: the only stage an agent could not drive.
+    ...setupTools,
     ...readTools,
     ...catalogTools,
     ...designTools,
+    // Bring-your-own artwork: the merchant already owns the file (#129).
+    ...uploadTools,
     ...productTools,
     ...systemsTools,
     ...safetyTools,
     // Capability-gap tools (epic #47): order management, analytics, collections,
     // cross-workspace transfer, tier-2 management, and the api_request escape hatch.
     ...orderTools,
+    // Post-sale fulfillment-issue reporting + resolution (platform epic #510).
+    ...issueTools,
     ...analyticsTools,
+    ...channelTools,
+    // Catalog import: the merchant's existing channel listings, tracked read-only (#1326).
+    ...trackedListingTools,
     ...collectionTools,
     ...transferTools,
+    // Workspace & team management for agency accounts (create/assign/invite).
+    ...workspaceTools,
     ...managementTools,
     ...apiTools,
   ];

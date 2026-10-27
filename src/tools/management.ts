@@ -14,7 +14,7 @@ import { asArray, bool, isRecord, num, str, total, viewUrl } from '../util/shape
 //     (auto|confirm|review), approval_authority (human|agent|rules), auto_fulfill_on_payment,
 //     require_payment_before_fulfill, hold_orders_above_amount (float|null), hold_below_margin_pct
 //     (float|null), hold_on_negative_margin, hold_first_time_customer, auto_reconcile_orders,
-//     notify_on_new_order, notify_on_shipment. Response = the full settings dict.
+//     notify_on_new_order, notify_on_shipment, notify_on_tracked_orders. Response = the full settings dict.
 //   - create_store POST store requires {name}; optional {description, logo, status}. It lands in
 //     the workspace the key is scoped to (?workspace=). New stores start CLOSED — connect a
 //     fulfillment provider then activate_store to make them ACTIVE.
@@ -53,9 +53,11 @@ function mapStoreSettings(raw: unknown): Record<string, unknown> {
     hold_below_margin_pct: num(raw, 'hold_below_margin_pct'),
     hold_on_negative_margin: bool(raw, 'hold_on_negative_margin'),
     hold_first_time_customer: bool(raw, 'hold_first_time_customer'),
+    hold_channel_risk_review: bool(raw, 'hold_channel_risk_review'),
     auto_reconcile_orders: bool(raw, 'auto_reconcile_orders'),
     notify_on_new_order: bool(raw, 'notify_on_new_order'),
     notify_on_shipment: bool(raw, 'notify_on_shipment'),
+    notify_on_tracked_orders: bool(raw, 'notify_on_tracked_orders'),
   };
   // Drop undefined keys so a partial live response reads clean.
   for (const k of Object.keys(out)) if (out[k] === undefined) delete out[k];
@@ -127,7 +129,9 @@ export const updateStoreSettings = defineTool({
     'changed. fulfillment_mode: "auto" (auto-pilot: paid -> draft -> auto-confirm -> production), ' +
     '"confirm" (auto-draft, you confirm each order), "review" (held before submission for approval). ' +
     'The hold_* guardrails escalate an otherwise-auto/confirm order to a pre-submission review. Set ' +
-    'hold_orders_above_amount / hold_below_margin_pct to null to disable that guardrail.',
+    'hold_orders_above_amount / hold_below_margin_pct to null to disable that guardrail. ' +
+    'hold_channel_risk_review is ON by default and OVERRIDES fulfillment_mode (including "auto"): an ' +
+    'order the sales channel is reviewing is never sent to fulfillment while it may still be voided.',
   inputSchema: z.object({
     store_uuid: z.string().min(1).describe('The store uuid to update.'),
     fulfillment_mode: z
@@ -152,12 +156,24 @@ export const updateStoreSettings = defineTool({
       .describe('Auto-hold orders below this profit-margin percent. null disables the guardrail.'),
     hold_on_negative_margin: z.boolean().optional().describe('Auto-hold orders that would lose money.'),
     hold_first_time_customer: z.boolean().optional().describe('Auto-hold the first order from a new customer.'),
+    hold_channel_risk_review: z
+      .boolean()
+      .optional()
+      .describe(
+        'ON by default. Hold an order the SALES CHANNEL has flagged as under its own risk review, so ' +
+        'it is never sent to fulfillment while the channel may still void it. Unlike the other ' +
+        'guardrails this one OVERRIDES fulfillment_mode, including "auto". Turning it off restores ' +
+        'the chosen workflow for those orders.'),
     auto_reconcile_orders: z
       .boolean()
       .optional()
       .describe('Periodically re-sync open sales-channel orders with their channel (manual reconcile always works regardless).'),
     notify_on_new_order: z.boolean().optional().describe('Send a notification when a new order arrives.'),
     notify_on_shipment: z.boolean().optional().describe('Send a notification when an order ships.'),
+    notify_on_tracked_orders: z
+      .boolean()
+      .optional()
+      .describe("Also notify about orders for the merchant's own products (not made in ApparelHub, fulfilled by their store). Off by default; the orders are recorded either way."),
     workspace: workspaceField,
   }),
   annotations: { idempotentHint: true, openWorldHint: true },
@@ -359,8 +375,13 @@ export const setOrderPaymentMethod = defineTool({
 export const syncOrders = defineTool({
   name: 'sync_orders',
   description:
-    'Pull the latest orders from connected fulfillment providers. Pass store_uuid to sync one store; ' +
-    'omit it to sync all of your stores. Use to refresh orders that have not come through yet.',
+    'Import orders that never reached ApparelHub and refresh order status from fulfillment providers. ' +
+    'For each connected Shopify shop it imports recent orders a webhook should have delivered, scoped to ' +
+    'orders placed after the shop was connected and excluding cancelled or already-fulfilled ones (an ' +
+    'imported paid order is sent to the fulfillment provider like a live one). Pass store_uuid to sync one ' +
+    'store; omit it for all stores. Read `shopify[]`: `processed` imported now, `not_eligible_reasons` why ' +
+    'others were left alone, `truncated` means run again, `outcome: "auth_revoked"` carries a reconnect_url ' +
+    'the merchant must open. Report `errors[]`.',
   inputSchema: z.object({
     store_uuid: z.string().optional().describe('Scope the sync to one store (omit for all stores).'),
     workspace: workspaceField,
@@ -376,6 +397,7 @@ export const syncOrders = defineTool({
     });
     return {
       synced_count: num(raw, 'synced_count') ?? 0,
+      shopify: asArray(isRecord(raw) ? raw.shopify : undefined),
       errors: asArray(isRecord(raw) ? raw.errors : undefined),
       message: str(raw, 'message'),
     };
@@ -385,9 +407,14 @@ export const syncOrders = defineTool({
 export const estimateOrderCosts = defineTool({
   name: 'estimate_order_costs',
   description:
-    'Estimate shipping + tax + total for an order WITHOUT creating it (read-only against the ' +
-    'fulfillment provider, no order placed). Give the store, the recipient (country_code required), and ' +
-    'the variants + quantities. Use to preview costs before placing an order.',
+    'Estimate production + shipping + tax + total for an order WITHOUT creating it (read-only against ' +
+    'the fulfillment provider, no order placed). Give the store, the recipient, and the variants + ' +
+    'quantities. Use to preview landed cost before placing an order. ' +
+    'AVAILABLE FOR PRINTFUL AND GELATO ONLY: Printify offers no pre-order estimate, so a Printify-' +
+    'fulfilled store returns a refusal rather than a number — do not retry it, and do not present a ' +
+    'cross-provider landed-cost comparison that silently omits Printify. ' +
+    'Both country_code AND address1 are required; the platform rejects the request without a street ' +
+    'address. The variants must already be synced to the fulfillment provider.',
   inputSchema: z.object({
     store_uuid: z.string().min(1).describe('The store the order would be placed in.'),
     recipient: z
@@ -396,10 +423,15 @@ export const estimateOrderCosts = defineTool({
         state_code: z.string().optional().describe('State / province code, e.g. "CA".'),
         city: z.string().optional(),
         zip: z.string().optional(),
-        address1: z.string().optional().describe('Street address (optional but improves accuracy).'),
+        address1: z
+          .string()
+          .min(1)
+          .describe('Street address (REQUIRED — the platform rejects an estimate without it).'),
         name: z.string().optional(),
       })
-      .describe('Ship-to details. country_code is required; more fields improve accuracy.'),
+      .describe(
+        'Ship-to details. country_code and address1 are both required; city/state/zip improve accuracy.',
+      ),
     items: z
       .array(
         z.object({

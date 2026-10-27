@@ -37,6 +37,82 @@ describe('list_my_designs', () => {
     const url = calls[0]?.url ?? '';
     expect(url).toContain('limit=20');
     expect(url).toContain('sort=newest');
+    // No filter unless asked for: omitted booleans must not appear at all.
+    expect(url).not.toContain('on_products');
+    expect(url).not.toContain('archived');
+  });
+
+  it('surfaces why a design failed, so an agent can tell retry from hopeless', async () => {
+    // apparelhub-ai#886. Without these an agent sees a null full_url and no
+    // reason, so it cannot distinguish a transient failure worth retrying from
+    // a content block that will fail identically every time.
+    const { api } = apiRecording({
+      images: [
+        {
+          uuid: 'd-blocked',
+          prompt: 'something the provider refused',
+          url: null,
+          processing_status: 'failed',
+          processing_error: 'This prompt was blocked by the model provider.',
+          processing_error_code: 'content_blocked',
+        },
+      ],
+      total: 1,
+    });
+    const res = (await listMyDesigns.handler({}, fakeContext(api))) as any;
+    expect(res.designs[0]).toMatchObject({
+      design_uuid: 'd-blocked',
+      processing_status: 'failed',
+      processing_error: 'This prompt was blocked by the model provider.',
+      processing_error_code: 'content_blocked',
+    });
+  });
+
+  it('says a design is still in flight rather than looking like a failure', async () => {
+    const { api } = apiRecording({
+      images: [{ uuid: 'd-pending', url: null, processing_status: 'pending' }],
+      total: 1,
+    });
+    const res = (await listMyDesigns.handler({}, fakeContext(api))) as any;
+    expect(res.designs[0].processing_status).toBe('pending');
+    // Nothing has gone wrong yet, so there is no reason to invent one.
+    expect(res.designs[0]).not.toHaveProperty('processing_error');
+  });
+
+  it('keeps a healthy design lean — no failure keys at all', async () => {
+    // The platform returns processing_status: null for a completed image.
+    // Emitting the keys anyway would put three nulls on every row of every
+    // design listing an agent reads.
+    const { api } = apiRecording({
+      images: [
+        {
+          uuid: 'd-ok',
+          url: 'https://cdn.example/f.png',
+          processing_status: null,
+          processing_error: null,
+          processing_error_code: null,
+        },
+      ],
+      total: 1,
+    });
+    const res = (await listMyDesigns.handler({}, fakeContext(api))) as any;
+    expect(res.designs[0].full_url).toBe('https://cdn.example/f.png');
+    expect(res.designs[0]).not.toHaveProperty('processing_status');
+    expect(res.designs[0]).not.toHaveProperty('processing_error');
+    expect(res.designs[0]).not.toHaveProperty('processing_error_code');
+  });
+
+  it('passes on_products=false so orphan designs are discoverable', async () => {
+    const { api, calls } = apiRecording({ images: [], total: 0 });
+    await listMyDesigns.handler({ on_products: false }, fakeContext(api));
+    // The backend compares the raw string, so it must serialize as "false", not "0"/"".
+    expect(calls[0]?.url ?? '').toContain('on_products=false');
+  });
+
+  it('passes archived=true to list archived designs', async () => {
+    const { api, calls } = apiRecording({ images: [], total: 0 });
+    await listMyDesigns.handler({ archived: true }, fakeContext(api));
+    expect(calls[0]?.url ?? '').toContain('archived=true');
   });
 });
 
@@ -50,6 +126,8 @@ describe('list_my_products', () => {
           price: 27.99,
           display_image: 'https://cdn.example/p.png',
           status: 'active',
+          created: '2026-07-09T05:35:25',
+          updated: '2026-07-09T06:00:00',
           fulfillment_status: { provider_name: 'Printful', sync_status: 'Synced' },
           channel_statuses: [
             { integration_uuid: 'i1', channel_name: 'Shopify', sync_status: 'Synced', external_id: '999' },
@@ -64,6 +142,8 @@ describe('list_my_products', () => {
       product_uuid: 'p1',
       name: 'Cactus Tee',
       price: 27.99,
+      created: '2026-07-09T05:35:25', // exposed so a reconciler can measure recency/stability
+      updated: '2026-07-09T06:00:00',
       view_url: 'https://apparelhub.ai/merchandise/my-products/p1',
     });
     expect(res.products[0].fulfillment_status).toEqual({ provider: 'Printful', sync_status: 'Synced' });
@@ -110,6 +190,79 @@ describe('list_my_orders', () => {
   });
 });
 
+describe('needs_attention (apparelhub-ai#1302)', () => {
+  const att = {
+    kind: 'provider_failed',
+    severity: 'error',
+    title: 'The provider could not process this order',
+    message: 'The provider rejected this order: No payment method added.',
+  };
+
+  it('list_my_orders passes it through, and omits it when null', async () => {
+    const raw = {
+      orders: [
+        { uuid: 'o1', status: 'cancelled', needs_attention: att },
+        { uuid: 'o2', status: 'cancelled', needs_attention: null },
+      ],
+    };
+    const res = (await listMyOrders.handler({}, fakeContext(apiReturning(raw)))) as any;
+    expect(res.orders[0].needs_attention).toEqual(att);
+    expect('needs_attention' in res.orders[1]).toBe(false);
+  });
+
+  it('get_order_details passes it through', async () => {
+    const raw = { order: { uuid: 'o9', status: 'cancelled', needs_attention: att } };
+    const res = (await getOrderDetails.handler({ order_uuid: 'o9' }, fakeContext(apiReturning(raw)))) as any;
+    expect(res.order.needs_attention).toEqual(att);
+  });
+});
+
+describe('ship_by_at (apparelhub-ai#1322)', () => {
+  it('passes the ship-by deadline through, and omits it when absent', async () => {
+    const raw = {
+      orders: [
+        { uuid: 'o1', status: 'in_production', ship_by_at: '2026-10-21T06:59:59' },
+        { uuid: 'o2', status: 'in_production', ship_by_at: null },
+      ],
+    };
+    const res = (await listMyOrders.handler({}, fakeContext(apiReturning(raw)))) as any;
+    expect(res.orders[0].ship_by_at).toBe('2026-10-21T06:59:59');
+    expect('ship_by_at' in res.orders[1]).toBe(false);
+  });
+
+  it('get_order_details includes it', async () => {
+    const raw = { order: { uuid: 'o9', ship_by_at: '2026-10-21T06:59:59' } };
+    const res = (await getOrderDetails.handler({ order_uuid: 'o9' }, fakeContext(apiReturning(raw)))) as any;
+    expect(res.order.ship_by_at).toBe('2026-10-21T06:59:59');
+  });
+});
+
+describe('fulfilled_by (apparelhub-ai#1330)', () => {
+  it("passes 'merchant' through, and omits it for ApparelHub-fulfilled orders", async () => {
+    const raw = {
+      orders: [
+        { uuid: 'o1', status: 'pending', fulfilled_by: 'merchant' },
+        { uuid: 'o2', status: 'pending', fulfilled_by: null },
+      ],
+    };
+    const res = (await listMyOrders.handler({}, fakeContext(apiReturning(raw)))) as any;
+    expect(res.orders[0].fulfilled_by).toBe('merchant');
+    expect('fulfilled_by' in res.orders[1]).toBe(false);
+  });
+
+  it('forwards the fulfilled_by filter', async () => {
+    const { api, calls } = apiRecording({ orders: [] });
+    await listMyOrders.handler({ fulfilled_by: 'merchant' }, fakeContext(api));
+    expect(new URL(calls[0].url).searchParams.get('fulfilled_by')).toBe('merchant');
+  });
+
+  it('get_order_details includes it', async () => {
+    const raw = { order: { uuid: 'o9', fulfilled_by: 'merchant' } };
+    const res = (await getOrderDetails.handler({ order_uuid: 'o9' }, fakeContext(apiReturning(raw)))) as any;
+    expect(res.order.fulfilled_by).toBe('merchant');
+  });
+});
+
 describe('get_order_details', () => {
   it('unwraps a {order:...} envelope and includes payment/fulfillment fields', async () => {
     const raw = {
@@ -132,5 +285,98 @@ describe('get_order_details', () => {
       fulfillment_substatus: 'design_approval_pending',
       view_url: 'https://apparelhub.ai/orders/o9',
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Listing health on channel statuses (apparelhub-ai#1024 / #1028).
+//
+// An agent that reads only `sync_status` will keep reporting a listing as fine
+// after the channel has taken it down — the whole point of surfacing health.
+// ---------------------------------------------------------------------------
+describe('list_my_products — listing health', () => {
+  const productWith = (channel: Record<string, unknown>) => ({
+    products: [
+      {
+        uuid: 'p1',
+        name: 'Root Cause Tee',
+        channel_statuses: [
+          {
+            integration_uuid: 'i1',
+            provider_name: 'TikTok Shop',
+            sync_status: 'Not Synced',
+            ...channel,
+          },
+        ],
+      },
+    ],
+  });
+
+  it('surfaces health so a removed listing is not read as merely un-synced', async () => {
+    const { api } = apiRecording(productWith({ health: 'Removed' }));
+    const res = (await listMyProducts.handler({}, fakeContext(api))) as any;
+    expect(res.products[0].channel_statuses[0].health).toBe('Removed');
+  });
+
+  it("carries the channel's own takedown reason when it gave one", async () => {
+    const { api } = apiRecording(
+      productWith({ health: 'Removed', health_detail: { channel_reason: 'Prohibited product' } }),
+    );
+    const res = (await listMyProducts.handler({}, fakeContext(api))) as any;
+    expect(res.products[0].channel_statuses[0].health_reason).toBe('Prohibited product');
+  });
+
+  it('omits health_reason rather than emitting an empty one', async () => {
+    const { api } = apiRecording(productWith({ health: 'Removed', health_detail: {} }));
+    const res = (await listMyProducts.handler({}, fakeContext(api))) as any;
+    expect(res.products[0].channel_statuses[0]).not.toHaveProperty('health_reason');
+  });
+
+  it('keeps a large channel product id as a string', async () => {
+    // TikTok product ids exceed 2^53; as a JS number this value corrupts.
+    const { api } = apiRecording(
+      productWith({ external_id: '1732547368555024494', health: 'In Sync' }),
+    );
+    const res = (await listMyProducts.handler({}, fakeContext(api))) as any;
+    const ext = res.products[0].channel_statuses[0].external_id;
+    expect(typeof ext).toBe('string');
+    expect(ext).toBe('1732547368555024494');
+  });
+
+  it('a never-checked listing reports no health rather than a false healthy', async () => {
+    const { api } = apiRecording(productWith({ sync_status: 'Synced' }));
+    const res = (await listMyProducts.handler({}, fakeContext(api))) as any;
+    const ch = res.products[0].channel_statuses[0];
+    expect(ch.sync_status).toBe('Synced');
+    expect(ch.health).toBeUndefined();
+  });
+});
+
+describe('profit and checkout_split (apparelhub-ai#1347)', () => {
+  const split = {
+    order_count: 2,
+    profit: 0.22,
+    profit_complete: true,
+    checkout_total: 76.29,
+    orders: [
+      { uuid: 'o9', profit: -7.11, is_current: true },
+      { uuid: 'o8', profit: 7.33, is_current: false },
+    ],
+  };
+
+  it('returns the order profit and the whole checkout profit for a split order', async () => {
+    const raw = { order: { uuid: 'o9', cost_total: 22.82, profit_margin: -7.11, checkout_split: split } };
+    const res = (await getOrderDetails.handler({ order_uuid: 'o9' }, fakeContext(apiReturning(raw)))) as any;
+    expect(res.order.cost).toBe(22.82);
+    expect(res.order.profit).toBe(-7.11);
+    expect(res.order.checkout_split).toEqual(split);
+  });
+
+  it('omits checkout_split for an order that was not split, and profit until priced', async () => {
+    const raw = { order: { uuid: 'o9', cost_total: 0, profit_margin: 0, checkout_split: null } };
+    const res = (await getOrderDetails.handler({ order_uuid: 'o9' }, fakeContext(apiReturning(raw)))) as any;
+    expect('checkout_split' in res.order).toBe(false);
+    expect('profit' in res.order).toBe(false);
+    expect('cost' in res.order).toBe(false);
   });
 });

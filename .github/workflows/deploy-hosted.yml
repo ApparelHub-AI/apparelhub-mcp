@@ -18,12 +18,16 @@ on:
           - dev
           - production
 
+# SECURITY (public repo): this workflow assumes the AWS IaCProvisioningRole via OIDC.
+# It is `workflow_dispatch` only (write-access gated) and runs under a protected GitHub
+# Environment, so its OIDC subject is `repo:ApparelHub-AI/apparelhub-mcp:environment:<env>`
+# and the AWS OIDC trust is scoped to exactly that. NEVER add a `pull_request` /
+# `pull_request_target` trigger here, and never grant `id-token: write` to any
+# PR-triggered workflow in this repo — a fork PR could otherwise assume this deploy role.
+# AWS account ids + the Hub role ARN live in secrets, not in this public file.
 permissions:
   id-token: write # OIDC
   contents: read
-
-env:
-  HUB_ROLE_ARN: arn:aws:iam::413277327426:role/IaCProvisioningRole
 
 jobs:
   deploy:
@@ -45,20 +49,11 @@ jobs:
           npm ci
           deploy/hosted/build.sh
 
-      - name: Resolve target AWS account
-        id: acct
-        run: |
-          if [ "${{ inputs.environment }}" = "production" ]; then
-            echo "account=488590374995" >> "$GITHUB_OUTPUT"
-          else
-            echo "account=602216272608" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Configure AWS credentials (OIDC -> Hub IaCProvisioningRole)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: us-east-1
-          role-to-assume: ${{ env.HUB_ROLE_ARN }}
+          role-to-assume: ${{ secrets.HUB_ROLE_ARN }}
           role-duration-seconds: 3600
           role-skip-session-tagging: true
           unset-current-credentials: true
@@ -67,7 +62,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: us-east-1
-          role-to-assume: "arn:aws:iam::${{ steps.acct.outputs.account }}:role/IaCProvisioningRole"
+          role-to-assume: "arn:aws:iam::${{ secrets.TARGET_ACCOUNT_ID }}:role/IaCProvisioningRole"
           role-chaining: true
           role-skip-session-tagging: true
           role-duration-seconds: 3600
