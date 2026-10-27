@@ -105,7 +105,7 @@ describe('fallbackLadder', () => {
   });
 
   it('honors an explicit edit on any edit-capable source, but keeps the auto ladder conservative', () => {
-    // Replicate + GPT Image 2 edits are now honored (apparelhub-ai#705/#702).
+    // Replicate + GPT Image 2 edits are now honored (an internal platform ticket).
     expect(fallbackLadder({ source: 'Seedream 4.5', edit: true })).toEqual(['Seedream 4.5', 'Nano Banana', 'OpenAI']);
     expect(fallbackLadder({ source: 'GPT Image 2', edit: true })).toEqual(['GPT Image 2', 'Nano Banana', 'OpenAI']);
     // ...but the DEFAULT edit ladder stays the two reliable, provider-diverse models.

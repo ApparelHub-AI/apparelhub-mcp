@@ -43,7 +43,7 @@ describe('list_my_designs', () => {
   });
 
   it('surfaces why a design failed, so an agent can tell retry from hopeless', async () => {
-    // apparelhub-ai#886. Without these an agent sees a null full_url and no
+    // The platform returns the failure reason. Without these an agent sees a null full_url and no
     // reason, so it cannot distinguish a transient failure worth retrying from
     // a content block that will fail identically every time.
     const { api } = apiRecording({
@@ -190,7 +190,7 @@ describe('list_my_orders', () => {
   });
 });
 
-describe('needs_attention (apparelhub-ai#1302)', () => {
+describe('needs_attention (an internal platform ticket)', () => {
   const att = {
     kind: 'provider_failed',
     severity: 'error',
@@ -217,7 +217,7 @@ describe('needs_attention (apparelhub-ai#1302)', () => {
   });
 });
 
-describe('ship_by_at (apparelhub-ai#1322)', () => {
+describe('ship_by_at (an internal platform ticket)', () => {
   it('passes the ship-by deadline through, and omits it when absent', async () => {
     const raw = {
       orders: [
@@ -237,7 +237,7 @@ describe('ship_by_at (apparelhub-ai#1322)', () => {
   });
 });
 
-describe('fulfilled_by (apparelhub-ai#1330)', () => {
+describe('fulfilled_by (an internal platform ticket)', () => {
   it("passes 'merchant' through, and omits it for ApparelHub-fulfilled orders", async () => {
     const raw = {
       orders: [
@@ -289,7 +289,7 @@ describe('get_order_details', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Listing health on channel statuses (apparelhub-ai#1024 / #1028).
+// Listing health on channel statuses (an internal platform ticket).
 //
 // An agent that reads only `sync_status` will keep reporting a listing as fine
 // after the channel has taken it down — the whole point of surfacing health.
@@ -352,7 +352,7 @@ describe('list_my_products — listing health', () => {
   });
 });
 
-describe('profit and checkout_split (apparelhub-ai#1347)', () => {
+describe('profit and checkout_split (an internal platform ticket)', () => {
   const split = {
     order_count: 2,
     profit: 0.22,

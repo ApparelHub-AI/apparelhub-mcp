@@ -35,7 +35,7 @@ export interface MockupResult {
   /**
    * Present when the design behind this mockup has an opaque background and
    * will therefore print as a coloured rectangle on a placed print
-   * (apparelhub-ai#1151). Computed server side and returned by the poll.
+   * (an internal platform ticket). Computed server side and returned by the poll.
    *
    * This defect has already shipped through an unattended run: a scheduled
    * build produced products whose printed artwork carried the green screen it

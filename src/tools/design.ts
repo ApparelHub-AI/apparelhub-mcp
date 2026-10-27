@@ -106,7 +106,7 @@ async function processTransparencyImpl(
       !opts.force
     ) {
       keyingMode = 'dominance';
-      // Only claimed below once the result is verified clean (apparelhub-ai#1289).
+      // Only claimed below once the result is verified clean (an internal platform ticket).
       note =
         'The generator produced a tinted/muted green background (not pure #00FF00), so the standard keyer was blocked. Re-keyed in green-dominance mode, which strips a tinted green screen safely. If the design contains intentionally bright-green or lime elements, verify they were not affected (verify_design_quality).';
       await ctx.progress.report(55, 'Tinted background — re-keying in dominance mode...');
@@ -117,7 +117,7 @@ async function processTransparencyImpl(
     }
   }
 
-  // Verify the key actually happened BEFORE anything is uploaded (apparelhub-ai#1289). The
+  // Verify the key actually happened BEFORE anything is uploaded (an internal platform ticket). The
   // keyer exits 3 ("written, corners not clear") for both a mostly-keyed design whose artwork
   // touches a corner AND a design where it removed nothing at all. The second case is real:
   // a yellow-lime screen (#CBCD5C) is not green-dominant (G barely exceeds R), so the

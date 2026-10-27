@@ -5,7 +5,7 @@ import { asArray, bool, isRecord, num, str, total, viewUrl } from '../util/shape
 
 // Collection (store-category) management (capability-gap tools). These wrap the
 // /agents/v1/store/{store}/collections/* endpoints. Backend facts confirmed against
-// apparelhub-ai api/collections.py + common/models/store_collections.py:
+// the platform backend api/collections.py + common/models/store_collections.py:
 //   - The stored/serialized name field is `title` (NOT `name`). create_collection REQUIRES
 //     `title`; update accepts `title`. We expose a friendly `name` on the tool input and send
 //     it to the backend as `title`, and map `title` back to `name` on the way out.

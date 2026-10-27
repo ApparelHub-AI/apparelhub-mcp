@@ -57,7 +57,7 @@ export const EDIT_CAPABLE_SOURCES = new Set<string>([
   'Seedream 4.0', 'Seedream 4.5', 'Flux 2 Pro', 'Grok Imagine', 'Wan 2.7',
 ]);
 
-// Sources that can answer ONE request with a themed SET of designs (apparelhub-ai#1175). The
+// Sources that can answer ONE request with a themed SET of designs (an internal platform ticket). The
 // platform is the authority (GET /images/sources carries `supports_collection` per source) and
 // reduces `concepts` to 1 on anything else, so this set is used only to TELL the agent when that
 // happened, most often because the fallback ladder moved off Nano Banana. It never blocks a call.
@@ -125,7 +125,7 @@ const FALLBACKABLE_CODES = new Set<string>([
   'network_error', // legacy alias of request_not_sent (belt-and-braces; no longer emitted)
   'generation_timeout', // async poll never completed — try a (faster) different model
   // The model finished without producing an image, for a reason unrelated to content policy
-  // (platform code `no_image_returned`, apparelhub-ai#825). Model-specific and NOT caused by the
+  // (platform code `no_image_returned`, an internal platform ticket). Model-specific and NOT caused by the
   // prompt, so a different model is exactly the right next move. Before the platform
   // distinguished this from a policy refusal it arrived as a bare `generation_failed` and killed
   // the whole ladder on the first rung.
