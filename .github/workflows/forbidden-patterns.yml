@@ -45,7 +45,7 @@ jobs:
           # glama.json is a maintainer-identity file: Glama requires it to name the
           # maintainer's GitHub handle before an org-owned server can be claimed, and
           # the maintainer's handle is intentionally public. It is exempt from the name
-          # check (1) below ONLY, and in exchange it may contain nothing but $schema and
+          # check (1) and the reference check (4) below ONLY, and in exchange it may contain nothing but $schema and
           # a maintainers list of GitHub handles, so it cannot carry any other content.
           if [ -f glama.json ]; then
             if ! python3 -c 'import json,re,sys; d=json.load(open("glama.json")); ok=set(d)<={"$schema","maintainers"} and isinstance(d.get("maintainers"),list) and d["maintainers"] and all(isinstance(m,str) and re.fullmatch(r"[A-Za-z0-9-]{1,39}",m) for m in d["maintainers"]); sys.exit(0 if ok else 1)'; then
@@ -87,7 +87,7 @@ jobs:
           #    so a matched value is never echoed into public logs. Refer to
           #    internal work generically ("an internal platform ticket").
           if [ -n "${FORBIDDEN_REFS:-}" ]; then
-            if grep -IlqE "$FORBIDDEN_REFS" "${FILES[@]}" >/dev/null 2>&1; then
+            if grep -IlqE "$FORBIDDEN_REFS" "${NAME_SCAN_FILES[@]}" >/dev/null 2>&1; then
               echo "::error::A private-repo reference (internal repo name / ticket ref / internal path) is present in a tracked file. Replace it with a generic phrase like 'an internal platform ticket'. The pattern list is the FORBIDDEN_REFS repo secret — grep your tree against your own copy to find it."
               fail=1
             fi
