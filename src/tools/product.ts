@@ -40,7 +40,7 @@ interface GarmentInfo {
 
 /**
  * The one line an agent needs when the platform says this design will print as
- * a rectangle (apparelhub-ai#1151).
+ * a rectangle (an internal platform ticket).
  *
  * A warning rather than a refusal on purpose. An unattended run that stops dead
  * is worse than one that ships something it flagged clearly, and someone may
@@ -373,14 +373,14 @@ async function syncFulfillmentHealingThreadColors(
 }
 
 /** What a merchandise sync actually did. `deferred` is set when the provider rate-limited the
- *  update and the platform will finish it automatically (apparelhub-ai#1266). */
+ *  update and the platform will finish it automatically (an internal platform ticket). */
 interface FulfillmentSyncOutcome {
   healedOptionId?: string;
   deferred?: { retryAfter?: number; message?: string };
 }
 
 /**
- * Read a deferral out of a merchandise-sync response (apparelhub-ai#1266).
+ * Read a deferral out of a merchandise-sync response (an internal platform ticket).
  *
  * When the fulfillment provider rate-limits a price update past what one request can wait, the
  * platform answers 202 with `deferred: true` and finishes the update itself a minute or so later.

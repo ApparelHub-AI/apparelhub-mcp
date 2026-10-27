@@ -157,7 +157,7 @@ describe('runGenerationWithFallback', () => {
     expect(sources).toEqual(['Nano Banana', 'Flux 1.1 Pro']);
   });
 
-  // apparelhub-ai#825: the platform now distinguishes three failure kinds that used to be one
+  // Per an internal platform ticket: the platform now distinguishes three failure kinds that used to be one
   // opaque string. They have three different remedies, and crucially two of the three are worth
   // another model while the third is not.
   const asyncFailure = (errorCode: string, message: string) => {

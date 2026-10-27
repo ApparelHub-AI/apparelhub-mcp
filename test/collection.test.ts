@@ -5,7 +5,7 @@ import { ApiClient } from '../src/http/client.js';
 import { fakeContext } from './helpers/ctx.js';
 import { jsonResponse, queueFetch, noSleep } from './helpers/fakeFetch.js';
 
-// Brand briefs and collections (apparelhub-ai#1174 / #1175). Generic placeholders only: this is a
+// Brand briefs and collections (an internal platform ticket). Generic placeholders only: this is a
 // public repo, so no real account data or uuids.
 
 function apiFrom(bodies: Response[]) {

@@ -3,7 +3,7 @@ import { diagnoseTiktokListings, updateProduct } from '../src/tools/product.js';
 import { fakeContext } from './helpers/ctx.js';
 import { apiRecording } from './helpers/fakeFetch.js';
 
-// The TikTok listing-quality loop (apparelhub-ai#950). Two properties matter
+// The TikTok listing-quality loop (an internal platform ticket). Two properties matter
 // most here and both are about blast radius:
 //   - a bare call is a READ, never a write;
 //   - applying TikTok's copy recommendations goes through a TikTok-only

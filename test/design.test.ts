@@ -234,7 +234,7 @@ describe('process_transparency', () => {
   });
 });
 
-describe('process_transparency: fails loud when nothing was keyed (apparelhub-ai#1289)', () => {
+describe('process_transparency: fails loud when nothing was keyed (an internal platform ticket)', () => {
   // The real case: a yellow-lime screen (#CBCD5C) is not green-dominant, so the dominance
   // fallback cleared 0 pixels and the keyer exited 3. The old code uploaded the untouched
   // opaque square and returned a success payload with a note claiming a safe re-key.

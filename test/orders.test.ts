@@ -57,7 +57,7 @@ describe('approve_order', () => {
     expect(calls[0]?.url).toContain('/orders/o1/approve');
   });
 
-  // apparelhub-ai#1300: approve returns 200 even when the auto-submit failed.
+  // Per an internal platform ticket: approve returns 200 even when the auto-submit failed.
   it('surfaces a failed auto-submit instead of reporting a clean approve', async () => {
     const { api } = apiFrom([
       {
@@ -155,7 +155,7 @@ describe('submit_order_to_fulfillment', () => {
     expect(calls[0]?.url).toContain('/orders/o1/submit-fulfillment');
   });
 
-  // apparelhub-ai#1300: a body-less POST 500'd on the deployed API.
+  // Per an internal platform ticket: a body-less POST 500'd on the deployed API.
   it('sends a JSON body', async () => {
     const { api, calls } = apiFrom([{ success: true }]);
     await submitOrderToFulfillment.handler({ order_uuid: 'o1' }, fakeContext(api));

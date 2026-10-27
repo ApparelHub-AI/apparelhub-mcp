@@ -27,7 +27,7 @@ export interface GenerateOptions {
   listingStyle?: string;
   /** Which of the product's existing listing images to edit. Defaults to its best mockup. */
   sourceImageUrl?: string;
-  /** Ask ONE generation for a themed set of designs (apparelhub-ai#1175). Sent only when > 1. The
+  /** Ask ONE generation for a themed set of designs (an internal platform ticket). Sent only when > 1. The
    *  platform clamps it and silently reduces it to 1 on a source that cannot answer with a set. */
   concepts?: number;
   workspace?: string;
@@ -43,7 +43,7 @@ export interface GeneratedImage {
   image_uuid: string;
   image_url: string;
   source_used: string;
-  /** The platform's advisory prompt-improvement block, when it returned one (apparelhub-ai#1146).
+  /** The platform's advisory prompt-improvement block, when it returned one (an internal platform ticket).
    *  Passed through untouched: it is the only place an agent learns the prompt was a brand brief. */
   prompt_improvement?: Record<string, unknown>;
 }
@@ -286,7 +286,7 @@ async function pollGeneration(
       'unknown';
     const url = str(s, 'url') ?? str(gi, 'url') ?? str(data, 'url');
     const error = str(s, 'error') ?? str(gi, 'error') ?? str(data, 'error');
-    // Machine-readable failure code (apparelhub-ai#825). Absent on older platform builds and on
+    // Machine-readable failure code (an internal platform ticket). Absent on older platform builds and on
     // failures recorded before it shipped, so every use below stays optional.
     const errorCode = str(s, 'error_code') ?? str(gi, 'error_code') ?? str(data, 'error_code');
 
@@ -313,7 +313,7 @@ async function pollGeneration(
         });
       }
       // The platform distinguishes three failure kinds that used to be one opaque string
-      // (apparelhub-ai#825), and they have three DIFFERENT remedies.
+      // (an internal platform ticket), and they have three DIFFERENT remedies.
       //
       // `content_blocked` is the one caused by the prompt, but that does NOT make it terminal:
       // content guards are provider-specific, so switching model is in fact the single most

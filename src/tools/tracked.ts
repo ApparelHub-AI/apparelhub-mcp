@@ -3,7 +3,7 @@ import { AhError } from '../errors.js';
 import { defineTool, type ToolDef } from './registry.js';
 import { asArray, bool, isRecord, num, str, total } from '../util/shape.js';
 
-// Catalog import: TRACKED listings (platform epic apparelhub-ai#1326, API #1328).
+// Catalog import: TRACKED listings (an internal platform epic).
 //
 // An established seller already has products live on a sales channel that ApparelHub never
 // made. These tools bring those listings in so an agent can see the merchant's whole catalog.

@@ -621,7 +621,7 @@ describe('sync_to_fulfillment', () => {
   });
 });
 
-describe('sync_to_fulfillment: provider rate-limit deferral (apparelhub-ai#1266)', () => {
+describe('sync_to_fulfillment: provider rate-limit deferral (an internal platform ticket)', () => {
   it('reports pending, not synced, when the platform deferred the update', async () => {
     const { api } = apiFrom([
       {},

@@ -179,7 +179,7 @@ export function mapHttpError(
     // cannot resolve this itself, and WHERE the owner resolves it depends on who
     // bills them: sending a Shopify-billed merchant to apparelhub.ai is a dead
     // end, because we never took their card. Read the provider off the body
-    // rather than assuming (epic apparelhub-ai#729).
+    // rather than assuming (an internal platform epic).
     const billingProvider = extractField(body, 'billing_provider');
     const billingUrl = extractField(body, 'billing_url');
     const where =
@@ -328,7 +328,7 @@ export function mapHttpError(
     // must be able to tell them apart.
     if (errorCode === 'provider_rate_limited') {
       // A FULFILLMENT PROVIDER (Printify, Gelato) throttled a credential check or
-      // catalog call (platform contract, apparelhub-ai#1168:
+      // catalog call (platform contract:
       // {"error": "provider_rate_limited", "provider": "<name>", "retry_after": <seconds>}).
       // ApparelHub accepted the request fine and this key is not throttled, so
       // backing off the key -- the advice the platform_rate_limited branch gives --

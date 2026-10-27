@@ -31,7 +31,7 @@ this package implements tool surface **v1**.
 ### Added
 - `get_order_details` returns `cost` and `profit` (this order's own figures, once the provider
   has priced it) and, for an order whose checkout was split across several of the merchant's
-  stores, `checkout_split` (apparelhub-ai#1347): the number of orders in the split and the whole
+  stores, `checkout_split` (an internal platform ticket): the number of orders in the split and the whole
   checkout's `profit`. Each split order holds only its share of the sale, so its own profit can
   be negative while the sale made money; report `checkout_split.profit` for the sale, and do not
   add it up across the orders in the split.
@@ -40,7 +40,7 @@ this package implements tool surface **v1**.
 
 ### Changed
 - `sync_orders` now also imports orders that never reached ApparelHub from each connected
-  Shopify shop (apparelhub-ai#1355; the Shopify review found an order that only existed on
+  Shopify shop (an internal platform ticket; the Shopify review found an order that only existed on
   Shopify). The import is scoped to orders placed after the shop was connected and excludes
   cancelled or already-fulfilled ones, because an imported paid order is sent to the fulfillment
   provider like a live one. The result passes through the API's per-shop `shopify[]` detail
@@ -51,7 +51,7 @@ this package implements tool surface **v1**.
 ## [0.18.0]
 
 ### Added
-- Orders for the merchant's own products (apparelhub-ai#1330). Once a merchant brings in their
+- Orders for the merchant's own products (an internal platform ticket). Once a merchant brings in their
   channel catalog, an order for one of those products is recorded, marked
   `fulfilled_by: 'merchant'` on `list_my_orders` and `get_order_details`. Their store fulfils it;
   ApparelHub never sends it to a fulfillment provider, and the fulfillment actions (approve,
@@ -63,7 +63,7 @@ this package implements tool surface **v1**.
 ## [0.17.0]
 
 ### Added
-- Catalog import: tracked listings (apparelhub-ai#1326, #1328). An established seller already
+- Catalog import: tracked listings (an internal platform ticket). An established seller already
   has products live on a sales channel that ApparelHub never made; these tools let an agent
   bring them in and see the merchant's whole catalog. Read-only against the channel: nothing is
   written to the merchant's store, and those products keep being fulfilled exactly as today
@@ -125,7 +125,7 @@ this package implements tool surface **v1**.
   source whose `supports_collection` is true can do it (Nano Banana today). On any other
   source the platform quietly reduces it to 1, which includes a source the fallback ladder
   moved to, so the tool now says so in a `warning` rather than let one design read as a set.
-  One model call, so one generation credit; the extras cost nothing. (apparelhub-ai#1175)
+  One model call, so one generation credit; the extras cost nothing. (an internal platform ticket)
 - `generate_image` returns the platform's advisory `prompt_improvement` block. It was dropped
   before, which hid the one signal that matters here: an `issues` entry of `brand_brief` means
   the prompt is a whole brand rather than one design, and `improved_prompt` is the strongest
@@ -137,7 +137,7 @@ this package implements tool surface **v1**.
   so the tool warns when any design is `opaque_varied` (it will print with its background)
   and its description tells the agent not to build from one without telling the user, and not
   to call it "a photograph" either, because textured art reports the same state. An ordinary
-  design returns an empty list. Read-only, not metered. (apparelhub-ai#1174)
+  design returns an empty list. Read-only, not metered. (an internal platform ticket)
 
 ### Changed
 - `generate_image` description and input schema changed. Hosts that remember per-tool
@@ -153,11 +153,11 @@ this package implements tool surface **v1**.
   result fails with `transparency_not_applied` (nothing uploaded), and a partial key
   returns `transparency_clean: false` with a `warning` instead of the success note.
   `design_apparel` treats the new code like `transparency_failed` (keeps the raw design,
-  flagged). (apparelhub-ai#1289)
+  flagged). (an internal platform ticket)
 - `sync_to_fulfillment` / `ship_product` report a provider rate-limit deferral as
   `fulfillment_status: 'pending'` with `retry_after` and a do-not-retry warning. The
   platform now finishes a rate-limited price update automatically (202, `deferred: true`)
-  instead of failing it; previously any 2xx was reported as `synced`. (apparelhub-ai#1266)
+  instead of failing it; previously any 2xx was reported as `synced`. (an internal platform ticket)
 
 No input schema or tool description changed.
 
@@ -386,7 +386,7 @@ No input schema or tool description changed.
 
 **Composition + placement now run on the platform.** `ship_product` / `create_product` send the
 design + garment ref + print style to the platform's print-data preparation service and receive the
-fully-composed per-placement `print_data` (Garment Intelligence epic apparelhub-ai#549 Phase 3 +
+fully-composed per-placement `print_data` (Garment Intelligence epic, Phase 3 +
 mcp#101). The client no longer holds the per-garment layout knowledge — so new placement
 calibrations reach every client as a platform data update, with no npm release.
 
@@ -411,7 +411,7 @@ calibrations reach every client as a platform data update, with no npm release.
 ### Changed
 
 **The hosted server now resolves garment print-geometry from the platform at runtime** (Garment
-Intelligence epic, apparelhub-ai#549 Phase 2b). When `MCP_SERVICE_KEY` is configured (the hosted
+Intelligence epic, Phase 2b). When `MCP_SERVICE_KEY` is configured (the hosted
 deployment only), product composition resolves per-garment **face layouts + print-style routing +
 interior-surface blanking** from the platform's `garment_layouts` store instead of the bundled
 `knowledge/garments.ts` tables. New calibrations reach the hosted server the moment they land as DB
@@ -678,7 +678,7 @@ Tool surface unchanged (internal fill-geometry knowledge only). No schema/descri
 
 ### Added
 
-- **Fulfillment-issue tools** (platform epic apparelhub-ai#510): a post-sale problem-report group
+- **Fulfillment-issue tools** (an internal platform epic): a post-sale problem-report group
   for defects on fulfilled orders — the item doesn't match the approved mockup, print quality,
   damaged in transit, wrong / missing item, late or lost. Printful/Printify accept problem
   reports **only in their own dashboards, within 30 days of delivery** (resolved as a free

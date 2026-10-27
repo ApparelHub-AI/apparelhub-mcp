@@ -100,7 +100,7 @@ function mapDesign(raw: unknown): Record<string, unknown> {
   // full_url. Without these an agent sees a null url and no way to tell a
   // transient failure it should retry from a content block it never will, so
   // it either gives up on a recoverable design or retries a hopeless one
-  // forever. The platform started returning the reason in apparelhub-ai#886.
+  // forever. The platform started returning the reason in an internal platform release.
   //
   // Only emitted when there is something to say: a healthy design carries a
   // null processing_status and stays as lean as it is today.
@@ -363,17 +363,17 @@ function mapOrderListItem(raw: unknown): Record<string, unknown> {
     channel: str(raw, 'channel', 'provider_name', 'sales_channel'),
     items: asArray(isRecord(raw) ? (raw.items ?? raw.line_items) : undefined).map(mapOrderItem),
   };
-  // apparelhub-ai#1302: the server flags an order the merchant must act on
+  // Per an internal platform ticket: the server flags an order the merchant must act on
   // (provider failed or cancelled it, buyer cancelled after production started,
   // or it was paid but never sent to production). Passed through untouched so
   // an agent can tell the user instead of reading an ordinary "cancelled".
   const attention = isRecord(raw) ? raw.needs_attention : undefined;
   if (isRecord(attention)) out.needs_attention = attention;
-  // apparelhub-ai#1322: the sales channel's ship-by deadline (UTC). TikTok Shop
+  // Per an internal platform ticket: the sales channel's ship-by deadline (UTC). TikTok Shop
   // sets one on every order and counts a late shipping update against the shop.
   const shipBy = str(raw, 'ship_by_at');
   if (shipBy) out.ship_by_at = shipBy;
-  // apparelhub-ai#1330: 'merchant' marks an order for the merchant's own
+  // Per an internal platform ticket: 'merchant' marks an order for the merchant's own
   // products (listings brought in from their channel, not made in ApparelHub).
   // Their store fulfils it; ApparelHub only records it.
   const fulfilledBy = str(raw, 'fulfilled_by');
@@ -404,7 +404,7 @@ function mapOrderDetail(raw: unknown): Record<string, unknown> {
     const profit = num(raw, 'profit_margin');
     if (profit !== undefined) out.profit = profit;
   }
-  // apparelhub-ai#1347: one storefront checkout split across several of the
+  // Per an internal platform ticket: one storefront checkout split across several of the
   // merchant's stores becomes one order per store, each with only its share of
   // the sale, so `profit` above can be negative while the sale made money.
   // `checkout_split.profit` is the whole checkout's. Passed through untouched.

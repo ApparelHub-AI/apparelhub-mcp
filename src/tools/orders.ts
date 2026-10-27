@@ -99,7 +99,7 @@ export const approveOrder = defineTool({
     });
     const out = actionResult(input.order_uuid, raw);
     if (isRecord(raw) && raw.auto_submitted !== undefined) out.auto_submitted = raw.auto_submitted;
-    // apparelhub-ai#1300: approve succeeds even when the automatic submit to
+    // Per an internal platform ticket: approve succeeds even when the automatic submit to
     // the provider fails. Dropping the error here is how an agent (and a
     // merchant) believed a paid order was on its way when it was not.
     if (isRecord(raw) && raw.auto_submitted === false) {
@@ -190,7 +190,7 @@ export const submitOrderToFulfillment = defineTool({
   handler: async (input, ctx) => {
     const raw = await ctx.api.post(`orders/${enc(input.order_uuid)}/submit-fulfillment`, {
       // A JSON body is required by deployed servers that predate
-      // apparelhub-ai#1300; without it the request 500s before the order is
+      // an internal platform fix; without it the request 500s before the order is
       // even looked up. Empty = use the stored/channel recipient.
       body: {},
       workspace: input.workspace,
@@ -208,7 +208,7 @@ export const submitOrderToFulfillment = defineTool({
 });
 
 // ---------------------------------------------------------------------------
-// Draft-order item edit (apparelhub-ai#643)
+// Draft-order item edit (an internal platform ticket)
 // ---------------------------------------------------------------------------
 
 /** Relay the edit_method envelope so the caller knows if the order was re-created. */

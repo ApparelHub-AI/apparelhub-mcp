@@ -58,7 +58,7 @@ describe('mapHttpError', () => {
   });
   // A suspended account is a plan problem, and where the owner fixes it depends
   // on who bills them. Pointing a Shopify-billed merchant at ApparelHub billing
-  // is a dead end: we never took their card (epic apparelhub-ai#729).
+  // is a dead end: we never took their card (an internal platform epic).
   it('402 -> account_suspended, and says do not retry', () => {
     const e = mapHttpError(402, {
       error: 'account_suspended', tier: 'Enterprise',
@@ -74,7 +74,7 @@ describe('mapHttpError', () => {
   it('402 for a Shopify-billed account points at the Shopify admin', () => {
     const e = mapHttpError(402, {
       error: 'account_suspended', billing_provider: 'shopify',
-      billing_url: 'https://admin.shopify.com/store/s/charges/apparelhub-ai/pricing_plans',
+      billing_url: 'https://admin.shopify.com/store/s/charges/your-app/pricing_plans',
     });
     expect(e.suggestion).toContain('Shopify admin');
     expect(e.suggestion).not.toContain('Billing on ApparelHub');
@@ -222,7 +222,7 @@ describe('mapHttpError', () => {
     expect(e.suggestion).toMatch(/switching models will not help/i);
   });
 
-  // apparelhub-ai#1168: a FULFILLMENT PROVIDER throttling a credential check is a
+  // Per an internal platform ticket: a FULFILLMENT PROVIDER throttling a credential check is a
   // third, distinct 429. Reading it as platform_rate_limited tells the agent to
   // back off its own key, which is not the thing being throttled.
   it('429 provider_rate_limited is attributed to the provider, not this key', () => {
@@ -261,7 +261,7 @@ describe('parseRetryAfter', () => {
   });
 });
 
-// Structured 400s (apparelhub-ai#814/#870/#791). These are refusals that name a
+// Structured 400s (an internal platform ticket). These are refusals that name a
 // condition and return the data to satisfy it — NOT malformed requests. Telling an
 // agent to "check field names" for a knitted garment with an unreadable design
 // sends it looking for a bug that does not exist.
