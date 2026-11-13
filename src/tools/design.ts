@@ -350,8 +350,8 @@ function unkeyableReason(printReady: Record<string, unknown> | undefined): strin
 export const generateImage = defineTool({
   name: 'generate_image',
   description:
-    'Generate a design image (split primitive of design_apparel). Returns the raw generated image; follow with process_transparency for apparel that needs a transparent background. Rate-limit errors are classified (model_rate_limited = one model\'s provider vs platform_rate_limited = this key\'s ApparelHub throttle vs request_not_sent = the call never reached ApparelHub), and fallback_trail shows any model substitutions. ' +
-    'When the platform has advice on the prompt it is returned as prompt_improvement (advisory, never applied for you). If its issues include "brand_brief", the prompt describes a whole brand, collection or storefront rather than one design, and improved_prompt is the single strongest design EXTRACTED from it: either generate that one design, or keep the brief and call again with concepts (4 is a good default) to get a themed set from one generation. ' +
+    'Generate a design image (split primitive of design_apparel). The platform decides the background from the prompt and reports it: isolated artwork (a logo, lettering, a character) comes back with its background already removed, while a full scene, poster or all-over pattern is left exactly as written. Read print_ready, background_state and design_intent on the result, and call process_transparency only when the design needs a transparent background and print_ready.applied is not true. Rate-limit errors are classified (model_rate_limited = one model\'s provider vs platform_rate_limited = this key\'s ApparelHub throttle vs request_not_sent = the call never reached ApparelHub), and fallback_trail shows any model substitutions. ' +
+    'When the platform has advice on the prompt it is returned as prompt_improvement. It is advice with one exception: when the prompt names or depicts the product ("a hoodie with a wolf on it"), the image model is sent improved_prompt instead of your wording, because naming a product makes image models draw the product. The result then has prompt_improvement.applied true and a prompt_rewritten note; pass prompt_improvement "skip" to keep your wording. If its issues include "brand_brief", the prompt describes a whole brand, collection or storefront rather than one design, and improved_prompt is the single strongest design EXTRACTED from it: either generate that one design, or keep the brief and call again with concepts (4 is a good default) to get a themed set from one generation. ' +
     'With concepts > 1 this still returns ONE image; the other designs from the same generation are saved to the workspace and read with get_design_collection(image_uuid).',
   inputSchema: z.object({
     prompt: z.string().min(1),
@@ -369,6 +369,18 @@ export const generateImage = defineTool({
       .boolean()
       .optional()
       .describe('Add the solid-green-background hint so the background can be keyed out (default true).'),
+    prompt_improvement: z
+      .enum(['advisory', 'skip'])
+      .optional()
+      .describe(
+        'Leave unset (advisory) for ordinary work. "skip" keeps your exact wording when the prompt names or depicts the product; a background instruction may still be added and the background is still removed for isolated artwork. Use it when the wording itself was approved by the user.',
+      ),
+    auto_key: z
+      .boolean()
+      .optional()
+      .describe(
+        'Leave unset for ordinary work. false sends the prompt exactly as written and removes no background: use it for an all-over or full-bleed design, or when you want the raw image. It also turns off the green-background hint unless augment_prompt_for_transparency is set true.',
+      ),
     no_fallback: z
       .boolean()
       .optional()
@@ -389,7 +401,9 @@ export const generateImage = defineTool({
   handler: async (input, ctx) => {
     const concepts =
       input.concepts !== undefined && input.concepts > 1 ? Math.min(input.concepts, MAX_CONCEPTS) : undefined;
-    const augment = input.augment_prompt_for_transparency ?? true;
+    // auto_key: false means "as written, nothing removed". Appending the green hint by default
+    // would then produce a green-framed image that nothing keys, so the default flips with it.
+    const augment = input.augment_prompt_for_transparency ?? input.auto_key !== false;
     const prompt = augment ? augmentPromptForTransparency(input.prompt) : input.prompt;
     // Normalize a near-miss source (case/spelling) to its canonical name, or reject it clearly (#70).
     const source = input.source !== undefined ? normalizeSource(input.source) : undefined;
@@ -405,6 +419,8 @@ export const generateImage = defineTool({
         workspace: input.workspace,
         noFallback: input.no_fallback,
         concepts,
+        autoKey: input.auto_key,
+        promptImprovement: input.prompt_improvement,
       },
       { progress: ctx.progress, signal: ctx.signal },
     );
