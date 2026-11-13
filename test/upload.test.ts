@@ -216,6 +216,90 @@ describe('upload_design', () => {
       uploadDesign.handler({ image_base64: PNG.toString('base64') }, ctxWith(api, put.impl)),
     ).rejects.toMatchObject({ code: 'upload_processing_failed' });
   });
+
+  // A refused SVG is a VALID file exported the wrong way. One generic failure telling the
+  // agent to "check the file opens as a valid PNG/JPEG/WEBP" sent it to the wrong fix.
+  it.each([
+    ['svg_text_not_outlined', /outlines/i],
+    ['svg_external_reference', /embedded/i],
+    ['svg_no_size', /artboard/i],
+    ['svg_rendered_blank', /flattened/i],
+    ['svg_too_large', /simplified/i],
+    ['svg_invalid', /exported again/i],
+  ])('reports a refused SVG by its own code: %s', async (code, advice) => {
+    const { api } = apiSequence([
+      INITIATE,
+      { message: 'Processing started' },
+      { image_uuid: 'design-1', processing_status: 'failed', error: 'That SVG could not be used.', error_code: code },
+    ]);
+    const put = rawFetch([jsonResponse(200)]);
+    const err = await uploadDesign
+      .handler({ image_base64: SVG.toString('base64') }, ctxWith(api, put.impl))
+      .then(
+        () => undefined,
+        (e: unknown) => e as AhError,
+      );
+    expect(err).toBeInstanceOf(AhError);
+    expect(err).toMatchObject({ code, message: 'That SVG could not be used.' });
+    expect(err?.suggestion).toMatch(advice);
+  });
+
+  it('keeps the generic code for a failure code it has no advice for', async () => {
+    const { api } = apiSequence([
+      INITIATE,
+      { message: 'Processing started' },
+      { image_uuid: 'design-1', processing_status: 'failed', error: 'Nope.', error_code: 'something_new' },
+    ]);
+    const put = rawFetch([jsonResponse(200)]);
+    await expect(
+      uploadDesign.handler({ image_base64: PNG.toString('base64') }, ctxWith(api, put.impl)),
+    ).rejects.toMatchObject({ code: 'upload_processing_failed' });
+  });
+});
+
+// --- what kind of image the upload is ---------------------------------------
+
+describe('upload_assessment', () => {
+  const upload = async (assessment: Record<string, boolean> | undefined) => {
+    const { api } = apiSequence([
+      INITIATE,
+      { message: 'Processing started' },
+      {
+        image_uuid: 'design-1',
+        processing_status: 'completed',
+        url: 'https://cdn.example.test/d.png',
+        background_state: 'opaque_box',
+        ...(assessment ? { upload_assessment: assessment } : {}),
+      },
+    ]);
+    const put = rawFetch([jsonResponse(200)]);
+    return (await uploadDesign.handler(
+      { image_base64: PNG.toString('base64') },
+      ctxWith(api, put.impl),
+    )) as { upload_assessment?: unknown; background_state?: string; warnings: string[] };
+  };
+
+  it('passes the block through and says a flat background can be removed', async () => {
+    const assessment = { has_transparency: false, opaque_uniform_background: true, looks_like_photo: false };
+    const res = await upload(assessment);
+    expect(res.upload_assessment).toEqual(assessment);
+    expect(res.background_state).toBe('opaque_box');
+    expect(res.warnings.join(' ')).toContain('remove-background');
+  });
+
+  it('says a photograph will not be helped by background removal', async () => {
+    const res = await upload({ has_transparency: false, opaque_uniform_background: false, looks_like_photo: true });
+    expect(res.warnings.join(' ')).toContain('photograph');
+    expect(res.warnings.join(' ')).not.toContain('remove-background');
+  });
+
+  it('adds no warning for a transparent file, or when the platform sent no assessment', async () => {
+    const clear = await upload({ has_transparency: true, opaque_uniform_background: false, looks_like_photo: false });
+    expect(clear.warnings).toEqual([]);
+    const absent = await upload(undefined);
+    expect(absent.warnings).toEqual([]);
+    expect(absent.upload_assessment).toBeUndefined();
+  });
 });
 
 // --- guardrails --------------------------------------------------------------
