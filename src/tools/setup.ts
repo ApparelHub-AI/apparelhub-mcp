@@ -312,8 +312,21 @@ export const startChannelConnect = defineTool({
       );
     } else {
       const body: Record<string, unknown> = {};
+      const storeName = input.store_name?.trim();
       if (input.store_uuid) body.store_uuid = input.store_uuid;
-      else if (input.store_name) body.name = input.store_name;
+      else if (storeName) body.name = storeName;
+      else {
+        // Without a store_uuid this call CREATES a store, and the platform refuses one with no
+        // name. Answer here, with the choice the agent actually has, rather than spend a round
+        // trip on a refusal. Same shape as the missing-store_uuid answer above.
+        return {
+          started: false,
+          error_code: 'store_name_required',
+          error: 'Connecting fulfillment without store_uuid creates a new store, and a new store needs a name.',
+          guidance:
+            'If the account already has the store the user means, call list_my_stores and call again with its store_uuid: the provider is connected into that store and no second store is created. Only when the user wants a NEW store, ask what to call it and pass store_name.',
+        };
+      }
       if (input.callback_url) body.callback_url = input.callback_url;
       raw = rec(
         await ctx.api.post(`store/create/merchandise_provider/${enc(input.provider_uuid)}`, {

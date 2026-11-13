@@ -136,6 +136,13 @@ const STRUCTURED_BAD_REQUESTS: Record<string, { suggestion: string; fallbackMess
       'higher-contrast design within `max_colors`, or choose a printed garment. `available_colors` ' +
       'in the body lists the yarns the provider offers.',
   },
+  store_name_required: {
+    fallbackMessage: 'A store name is required to create a new store.',
+    suggestion:
+      'No store was created. If the account already has the store the user means (list_my_stores), ' +
+      'connect into it by passing its store_uuid instead of creating another. Only when the user ' +
+      'wants a NEW store: ask them what to call it and retry with that name. Do not invent one.',
+  },
 };
 
 // Map an HTTP status + parsed body into a broad, memorable AhError (api-contract §5).
@@ -149,11 +156,16 @@ export function mapHttpError(
   const capability = extractField(body, 'capability');
 
   if (status === 400) {
-    const structured = errorCode ? STRUCTURED_BAD_REQUESTS[errorCode] : undefined;
+    // `error_code` is read as well as `error`: the API is not uniform about which key carries
+    // the code (see the 409 branch), and matching one spelling silently loses the other.
+    const badRequestCode = [errorCode, extractField(body, 'error_code')].find(
+      (c) => c !== undefined && STRUCTURED_BAD_REQUESTS[c] !== undefined,
+    );
+    const structured = badRequestCode ? STRUCTURED_BAD_REQUESTS[badRequestCode] : undefined;
     if (structured) {
       return new AhError({
         httpStatus: status,
-        code: errorCode as string,
+        code: badRequestCode as string,
         message: message ?? structured.fallbackMessage,
         suggestion: structured.suggestion,
       });

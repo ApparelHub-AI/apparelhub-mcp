@@ -242,6 +242,42 @@ describe('start_channel_connect', () => {
     expect(res.store_uuid).toBe('s9');
   });
 
+  // Without store_uuid the call CREATES a store, and the platform refuses a nameless one.
+  // Sending neither used to reach the platform and (before it refused) produce a store
+  // named ''. Answer locally, with the choice the agent really has.
+  it.each([[undefined], [''], ['   ']])(
+    'does not call the platform to create a store with no usable name (%j)',
+    async (storeName) => {
+      const { api, calls } = apiRecording({});
+      const res = (await startChannelConnect.handler(
+        { provider_uuid: 'p2', kind: 'fulfillment', ...(storeName === undefined ? {} : { store_name: storeName }) },
+        fakeContext(api),
+      )) as any;
+      expect(calls).toHaveLength(0);
+      expect(res.started).toBe(false);
+      expect(res.error_code).toBe('store_name_required');
+      expect(res.guidance).toContain('store_uuid');
+    },
+  );
+
+  it('connects into an existing store without sending a name', async () => {
+    const { api, calls } = apiRecording({ redirect_url: 'https://provider.example.com/oauth' });
+    await startChannelConnect.handler(
+      { provider_uuid: 'p2', kind: 'fulfillment', store_uuid: 's1', store_name: 'Ignored' },
+      fakeContext(api),
+    );
+    expect(JSON.parse(calls[0]!.init?.body as string)).toEqual({ store_uuid: 's1' });
+  });
+
+  it('trims the name of a new store', async () => {
+    const { api, calls } = apiRecording({ uuid: 's9', redirect_url: 'https://provider.example.com/oauth' });
+    await startChannelConnect.handler(
+      { provider_uuid: 'p2', kind: 'fulfillment', store_name: '  Acme Apparel ' },
+      fakeContext(api),
+    );
+    expect(JSON.parse(calls[0]!.init?.body as string)).toEqual({ name: 'Acme Apparel' });
+  });
+
   // Shopify's consent screen lives on the merchant's OWN domain, so unlike
   // every other provider it cannot build an authorize URL from the provider
   // row alone. The tool named Shopify in its description while having no way

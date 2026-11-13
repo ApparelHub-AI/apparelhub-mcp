@@ -284,6 +284,24 @@ describe('structured 400 refusals keep their code', () => {
     });
   }
 
+  // The store routes report their code under `error_code`, not `error`. Reading one spelling
+  // only would hand the agent a generic bad_request telling it to check field names.
+  it('reads store_name_required from error_code and steers to the existing store', () => {
+    const err = mapHttpError(400, {
+      message: 'A store name is required to create a new store. Enter a name and try again.',
+      error_code: 'store_name_required',
+      field: 'name',
+    });
+    expect(err.code).toBe('store_name_required');
+    expect(err.message).toContain('store name is required');
+    expect(err.suggestion).toMatch(/store_uuid/);
+    expect(err.suggestion).not.toMatch(/check field names/i);
+  });
+
+  it('an unknown error_code on a 400 is still an ordinary bad_request', () => {
+    expect(mapHttpError(400, { message: 'no', error_code: 'something_else' }).code).toBe('bad_request');
+  });
+
   it('an ordinary 400 still maps to bad_request', () => {
     const err = mapHttpError(400, { message: 'missing required field' });
     expect(err.code).toBe('bad_request');
