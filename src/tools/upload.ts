@@ -297,7 +297,30 @@ interface UploadOutcome {
   title?: string;
   low_res_upscaled?: Record<string, unknown>;
   rasterized_from_svg?: Record<string, unknown>;
+  /** What kind of image the upload is (has_transparency / opaque_uniform_background /
+   *  looks_like_photo). Absent on platform builds that predate it. */
+  upload_assessment?: Record<string, unknown>;
+  background_state?: string;
 }
+
+/**
+ * Why the platform refused an SVG, by its stable `error_code`, as the next step for the
+ * merchant. The generic advice ("check the file opens as a valid PNG/JPEG/WEBP") is wrong for
+ * every one of these: the file is a valid SVG, and what has to change is how it was exported.
+ */
+const SVG_REFUSALS: Record<string, string> = {
+  svg_no_size:
+    'The SVG has no page size that could be read. Ask for a re-export with the artboard fitted to the artwork, or a PNG at print size.',
+  svg_text_not_outlined:
+    'The SVG contains live text. Ask for it to be exported again with text converted to outlines (Illustrator: Type > Create Outlines; Figma: Flatten; Inkscape: Path > Object to Path). Do not retype or recreate the lettering yourself.',
+  svg_external_reference:
+    'The SVG links to an image instead of containing it. Ask for a re-export with the image embedded, or a PNG.',
+  svg_rendered_blank:
+    'The SVG rendered empty. Ask for the artwork to be flattened and exported again, or a PNG.',
+  svg_too_large:
+    'The SVG is over the size limit for vector uploads. Ask for a simplified export, or a PNG at print size.',
+  svg_invalid: 'The file could not be read as an SVG. Ask for it to be exported again, or a PNG.',
+};
 
 function readStatus(raw: unknown, uuid: string): UploadOutcome {
   const status = str(raw, 'processing_status', 'status') ?? 'unknown';
@@ -310,6 +333,10 @@ function readStatus(raw: unknown, uuid: string): UploadOutcome {
   if (isRecord(lru)) out.low_res_upscaled = lru;
   const svg = isRecord(raw) ? raw.rasterized_from_svg : undefined;
   if (isRecord(svg)) out.rasterized_from_svg = svg;
+  const assessment = isRecord(raw) ? raw.upload_assessment : undefined;
+  if (isRecord(assessment)) out.upload_assessment = assessment;
+  const state = str(raw, 'background_state');
+  if (state) out.background_state = state;
   return out;
 }
 
@@ -336,6 +363,17 @@ async function completeAndPoll(
     const last = readStatus(raw, imageUuid);
     if (last.processing_status === 'completed') return last;
     if (last.processing_status === 'failed') {
+      // A refused SVG carries a stable code. Report THAT code, so the agent can branch on it
+      // and tell the merchant what to change, instead of one generic failure for all six.
+      const refusal = str(raw, 'error_code');
+      const svgAdvice = refusal ? SVG_REFUSALS[refusal] : undefined;
+      if (refusal && svgAdvice) {
+        throw new AhError({
+          code: refusal,
+          message: str(raw, 'error') ?? 'The platform could not use that SVG.',
+          suggestion: svgAdvice,
+        });
+      }
       throw new AhError({
         code: 'upload_processing_failed',
         message: str(raw, 'error') ?? 'The platform could not process that image.',
@@ -544,6 +582,19 @@ function finish(
     }
   }
 
+  // What kind of image this is decides the next step, so say it in words as well as passing
+  // the block through. At most one flag is true.
+  const assessment = outcome.upload_assessment;
+  if (assessment?.opaque_uniform_background === true) {
+    warnings.push(
+      'This file has a solid, flat background, so placed on a product it prints as a coloured rectangle. The platform can very likely remove it: call api_request with method POST and path images/generated/<design_uuid>/remove-background (no image generation is used, and tell the user you are doing it), read background_state on the result, then check the mockup. process_transparency is for generated key-colour backgrounds and is the wrong tool here. If the client said the mark must not be altered, ask for a version with a transparent background instead.',
+    );
+  } else if (assessment?.looks_like_photo === true) {
+    warnings.push(
+      'This looks like a photograph (of a product or a scene) rather than artwork to print. Background removal will not help. Ask whether they have the artwork file itself; if the photo IS the design, it will print with its background as it is.',
+    );
+  }
+
   if (outcome.processing_status !== 'completed') {
     return {
       status: 'processing',
@@ -561,6 +612,8 @@ function finish(
     title: outcome.title,
     transport,
     ...(bytes !== undefined ? { bytes } : {}),
+    ...(assessment ? { upload_assessment: assessment } : {}),
+    ...(outcome.background_state ? { background_state: outcome.background_state } : {}),
     warnings,
     next_step:
       'Pass design_uuid to ship_product (or create_product) exactly as you would a generated design.',

@@ -30,6 +30,16 @@ export interface GenerateOptions {
   /** Ask ONE generation for a themed set of designs (an internal platform ticket). Sent only when > 1. The
    *  platform clamps it and silently reduces it to 1 on a source that cannot answer with a set. */
   concepts?: number;
+  /** `all_over` tells the platform the design is full-bleed: it leaves the prompt and the
+   *  background alone. Sent only when set. Without it the platform decides the background from
+   *  the prompt, and an isolated subject meant for an all-over product would come back keyed. */
+  intent?: 'all_over';
+  /** `false` opts out of the platform's background handling: the prompt is sent verbatim and
+   *  nothing is removed. Sent only when set. */
+  autoKey?: boolean;
+  /** `skip` keeps the caller's wording when the prompt names the product (the platform would
+   *  otherwise generate from its rewrite). Sent only when set. */
+  promptImprovement?: 'advisory' | 'skip';
   workspace?: string;
 }
 
@@ -46,6 +56,30 @@ export interface GeneratedImage {
   /** The platform's advisory prompt-improvement block, when it returned one (an internal platform ticket).
    *  Passed through untouched: it is the only place an agent learns the prompt was a brand brief. */
   prompt_improvement?: Record<string, unknown>;
+  /** What the platform did to the background (applied / reason / message). On an async
+   *  generation this is the OUTCOME from the status poll, not the 202's statement of intent. */
+  print_ready?: Record<string, unknown>;
+  /** What the platform understood the prompt to be asking for (background, key_color, garment,
+   *  source). Absent on edits and on platform builds that predate it. */
+  design_intent?: Record<string, unknown>;
+  /** Measured from the stored design: transparent | opaque_box | opaque_varied | unknown. */
+  background_state?: string;
+}
+
+/** The blocks describing what the platform decided and did, read off any generate or status
+ *  body. Only well-formed values are kept, so a surprise type never reaches the agent. */
+function platformOutcome(
+  ...bodies: unknown[]
+): Pick<GeneratedImage, 'print_ready' | 'design_intent' | 'background_state'> {
+  const out: Pick<GeneratedImage, 'print_ready' | 'design_intent' | 'background_state'> = {};
+  for (const b of bodies) {
+    if (!isRecord(b)) continue;
+    if (isRecord(b.print_ready)) out.print_ready = b.print_ready;
+    if (isRecord(b.design_intent)) out.design_intent = b.design_intent;
+    const state = str(b, 'background_state');
+    if (state) out.background_state = state;
+  }
+  return out;
 }
 
 /** One rung of a fallback attempt: the model that was tried and why it was abandoned. */
@@ -97,6 +131,10 @@ export async function runGeneration(
   if (opts.sourceImageUrl) body.source_image_url = opts.sourceImageUrl;
   // Omitted at 1 so an ordinary generation's request body is byte-for-byte what it was before.
   if (opts.concepts !== undefined && opts.concepts > 1) body.concepts = opts.concepts;
+  // Each is omitted unless the caller chose it, so an ordinary request body is unchanged.
+  if (opts.intent) body.intent = opts.intent;
+  if (opts.autoKey !== undefined) body.auto_key = opts.autoKey;
+  if (opts.promptImprovement) body.prompt_improvement = opts.promptImprovement;
 
   await deps.progress?.report(10, `Generating with ${opts.source}...`);
   const res = await api.post('images/generate', {
@@ -123,7 +161,13 @@ export async function runGeneration(
   // Fast path: the image came back inline.
   if (directUrl && status !== 'pending' && status !== 'processing') {
     await deps.progress?.report(100, 'Design ready.');
-    return { image_uuid: uuid, image_url: directUrl, source_used: opts.source, ...extra };
+    return {
+      image_uuid: uuid,
+      image_url: directUrl,
+      source_used: opts.source,
+      ...extra,
+      ...platformOutcome(res),
+    };
   }
 
   // Async path: poll to completion.
@@ -133,8 +177,16 @@ export async function runGeneration(
       message: 'Generation returned neither an image URL nor a pollable image_uuid.',
     });
   }
-  const url = await pollGeneration(api, uuid, deps, opts.workspace);
-  return { image_uuid: uuid, image_url: url, source_used: opts.source, ...extra };
+  const done = await pollGeneration(api, uuid, deps, opts.workspace);
+  // The 202 goes first and the completed poll last, so the poll's OUTCOME replaces the 202's
+  // statement of what was going to be attempted (`print_ready: { pending: true }`).
+  return {
+    image_uuid: uuid,
+    image_url: done.url,
+    source_used: opts.source,
+    ...extra,
+    ...platformOutcome(res, done.status),
+  };
 }
 
 /**
@@ -265,7 +317,7 @@ async function pollGeneration(
   uuid: string,
   deps: GenerateDeps,
   workspace?: string,
-): Promise<string> {
+): Promise<{ url: string; status: unknown }> {
   const sleep = deps.sleep ?? defaultSleep;
   const timeoutMs = deps.timeoutMs ?? 600_000;
   const intervalMs = deps.intervalMs ?? 5_000;
@@ -357,7 +409,7 @@ async function pollGeneration(
     }
     if (status === 'completed' && url) {
       await deps.progress?.report(100, 'Design ready.');
-      return url;
+      return { url, status: s };
     }
     if (Date.now() - start >= timeoutMs) {
       throw new AhError({

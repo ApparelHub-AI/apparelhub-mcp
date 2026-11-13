@@ -75,6 +75,9 @@ export interface MakeTransparentOptions {
   mode?: 'box' | 'dominance';
   /** Bypass the box-mode chroma sanity check (`--force-chroma`). Ignored in dominance mode. */
   force?: boolean;
+  /** Key nothing; only tight-crop (`--crop-only`). For a design that already has real
+   *  transparency, where keying again could clear artwork that shares the old key colour. */
+  cropOnly?: boolean;
 }
 
 export interface RecomposeFillOptions {
@@ -192,8 +195,9 @@ export class LocalImaging implements Imaging {
   async makeTransparent(inputPath: string, opts: MakeTransparentOptions = {}): Promise<TransparencyResult> {
     const out = join(await this.dir(), `t-${Date.now()}.png`);
     const args = [MAKE_TRANSPARENT, inputPath, out];
-    if (opts.mode === 'dominance') args.push('--dominance');
-    if (opts.force) args.push('--force-chroma');
+    if (opts.cropOnly) args.push('--crop-only');
+    else if (opts.mode === 'dominance') args.push('--dominance');
+    if (opts.force && !opts.cropOnly) args.push('--force-chroma');
     let r: RunResult;
     try {
       r = await run(PYTHON, args);

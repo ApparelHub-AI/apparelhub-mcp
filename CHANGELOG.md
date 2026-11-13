@@ -9,6 +9,38 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.20.1]
+
+The platform now decides a design's background from the prompt and reports what it did. This
+release carries that report through and stops this server working against it. No tool's
+advertised schema or description changes in this release.
+
+### Changed
+- `generate_image` and each `design_apparel` design return `design_intent` (what the platform
+  understood: `background`, `key_color`, `garment`, `source`), `print_ready` (what it did, with
+  the new reasons `full_scene_intent`, `scene_on_key_cropped` and
+  `fake_transparency_checkerboard`) and `background_state`. `design_apparel` also returns
+  `prompt_improvement`. When the platform generated from its own rewrite because the prompt named
+  the product, the result carries a `prompt_rewritten` note.
+- `design_apparel` with `needs_transparency: false` tells the platform the design is all-over, so
+  it is not keyed.
+- `upload_design` returns `upload_assessment` and `background_state`, and warns in words when the
+  file has a flat removable background or looks like a photograph.
+
+### Fixed
+- `process_transparency` (and `design_apparel`) no longer key a design that already has a
+  transparent background. The platform can remove a non-green key colour from behind green
+  artwork; keying that result again cleared the green artwork. Such a design is now cropped and
+  sized only, reported as `keying_mode: "none"`.
+- `design_apparel` leaves alone a design the platform stored as a full scene or flagged as a
+  painted checkerboard, with a warning, instead of running the keyer on it.
+- A refused SVG upload is reported by its own code (`svg_no_size`, `svg_text_not_outlined`,
+  `svg_external_reference`, `svg_rendered_blank`, `svg_too_large`, `svg_invalid`) with the next
+  step for the merchant, instead of one generic failure advising a PNG check.
+- `store_name_required` (a new store with no usable name) is reported as its own error code with
+  the real choice in the suggestion. `start_channel_connect` no longer sends a request that would
+  create a nameless store.
+
 ## [0.20.0]
 
 ### Added

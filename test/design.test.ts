@@ -41,15 +41,29 @@ function fakeImaging(over: Partial<Imaging> = {}): Imaging {
     }),
     readBytes: async () => new Uint8Array([1, 2, 3]),
     imageSize: async () => ({ width: 900, height: 700 }),
-    imageStats: async () => ({
-      width: 900,
-      height: 700,
-      mode: 'RGBA',
-      has_alpha: true,
-      transparent_ratio: 0.4,
-      corner_alpha: [0, 0, 0, 0],
-      premultiplied_white: true,
-    }),
+    // Path-aware: the download (the generator's raw image) is opaque, the keyer's output is
+    // transparent. process_transparency measures BOTH now, so one answer for every path would
+    // make every input look already keyed.
+    imageStats: async (p: string) =>
+      p === '/tmp/fake-in.png'
+        ? {
+            width: 1024,
+            height: 1024,
+            mode: 'RGB',
+            has_alpha: false,
+            transparent_ratio: 0,
+            corner_alpha: [255, 255, 255, 255],
+            premultiplied_white: false,
+          }
+        : {
+            width: 900,
+            height: 700,
+            mode: 'RGBA',
+            has_alpha: true,
+            transparent_ratio: 0.4,
+            corner_alpha: [0, 0, 0, 0],
+            premultiplied_white: true,
+          },
     ocr: async () => ({ available: true, text: 'STAY WILD' , confidence: null }),
     recomposeFill: async () => {
       throw new Error('not expected in this test');
