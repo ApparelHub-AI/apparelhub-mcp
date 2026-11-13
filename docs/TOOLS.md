@@ -28,10 +28,10 @@ the human-readable summary. Read tools are read-only; mutating tools default to 
 
 | Tool | Summary |
 |---|---|
-| `design_apparel` | **Atomic.** Generate a design with the rules baked in (solid-green background prompt, transparency keying, optional text check). Streams progress. |
+| `design_apparel` | **Atomic.** Generate a design with the rules baked in (solid-green background prompt, transparency keying, optional text check). Streams progress. Each design carries the platform's `design_intent`, `print_ready` and `prompt_improvement`; `needs_transparency: false` marks the design as all-over so it is not keyed. |
 | `iterate_design` | img2img variation of an existing design (Nano Banana / OpenAI only). |
-| `generate_image` | *(split)* Generate the raw image; handles the async slow-model poll. Returns the platform's advisory `prompt_improvement` (a `brand_brief` issue means the prompt is a whole brand; `improved_prompt` is one design extracted from it). `concepts` asks one generation for a themed set (Nano Banana only, capped at 7, one generation credit); read the rest with `get_design_collection`. |
-| `process_transparency` | *(split)* Key the background to true RGBA + upload (server-side Python/Pillow). Auto-recovers in green-dominance mode when the model produced a tinted/muted green instead of pure #00FF00; `background_mode` (`auto`/`box`/`dominance`) + `force` pin the strategy. |
+| `generate_image` | *(split)* Generate a design image; handles the async slow-model poll. The platform decides the background from the prompt (isolated artwork comes back transparent, a full scene is left as written) and the result reports it in `design_intent`, `print_ready` and `background_state`. Returns the platform's `prompt_improvement` (a `brand_brief` issue means the prompt is a whole brand; `improved_prompt` is one design extracted from it). `concepts` asks one generation for a themed set (Nano Banana only, capped at 7, one generation credit); read the rest with `get_design_collection`. |
+| `process_transparency` | *(split)* Key the background to true RGBA + upload (server-side Python/Pillow). A design that already has a transparent background is cropped and sized, not keyed again. Auto-recovers in green-dominance mode when the model produced a tinted/muted green instead of pure #00FF00; `background_mode` (`auto`/`box`/`dominance`) + `force` pin the strategy. |
 | `verify_design_text` | *(split)* Read text via local OCR (tesseract) so the agent can confirm spelling. Advisory. |
 
 ## Product
