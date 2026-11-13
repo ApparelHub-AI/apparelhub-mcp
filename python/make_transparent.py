@@ -191,6 +191,10 @@ def main():
                     help="only flood from the border; do NOT clear enclosed chroma (rarely wanted).")
     ap.add_argument("--despill", action="store_true",
                     help="neutralize residual green fringe on anti-aliased edges.")
+    ap.add_argument("--crop-only", action="store_true",
+                    help="do not key anything: only tight-crop an image that already has real "
+                         "transparency. For a design whose background was removed upstream, where "
+                         "keying again could clear artwork that shares the old key colour.")
     ap.add_argument("--no-crop", action="store_true",
                     help="skip the post-key tight-crop. Off by default (v1.7 and earlier behavior).")
     ap.add_argument("--crop-padding", type=int, default=16,
@@ -222,7 +226,7 @@ def main():
     # provided --chroma explicitly (they know what they're doing) or when
     # --dominance is used (dominance-mode handles muted greens fine).
     chroma_distance = chroma_distance_from_pure_green(target)
-    if args.chroma is None and not args.dominance and not args.force_chroma:
+    if args.chroma is None and not args.dominance and not args.force_chroma and not args.crop_only:
         if chroma_distance > args.chroma_max_distance:
             sys.stderr.write(
                 f"chroma SANITY CHECK FAILED\n"
@@ -246,9 +250,12 @@ def main():
 
     is_bg = make_matcher(target, args.tolerance, args.dominance)
 
-    cleared = flood_from_border(px, w, h, is_bg)
-    swept = 0 if args.keep_enclosed else sweep_enclosed(px, w, h, is_bg)
-    fringe = despill(px, w, h) if args.despill else 0
+    if args.crop_only:
+        cleared = swept = fringe = 0
+    else:
+        cleared = flood_from_border(px, w, h, is_bg)
+        swept = 0 if args.keep_enclosed else sweep_enclosed(px, w, h, is_bg)
+        fringe = despill(px, w, h) if args.despill else 0
 
     # Tight-crop the result so downstream sizing reflects the actual design
     # extent, not the AI canvas + transparent margin. Skipped with --no-crop.

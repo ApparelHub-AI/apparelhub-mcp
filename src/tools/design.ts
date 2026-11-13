@@ -62,7 +62,8 @@ interface TransparencyOutcome {
   transparency_clean: boolean;
   /** Fraction of the keyed design that is transparent, when it could be measured. */
   transparent_ratio?: number;
-  keying_mode: 'box' | 'dominance';
+  /** `none` = the design already had real transparency, so nothing was keyed (crop + size only). */
+  keying_mode: 'box' | 'dominance' | 'none';
   note?: string;
   warning?: string;
 }
@@ -88,11 +89,33 @@ async function processTransparencyImpl(
   const inPath = await ctx.imaging.downloadToTemp(url);
   await ctx.progress.report(50, 'Keying background to transparency...');
 
-  let keyingMode: 'box' | 'dominance' = opts.mode ?? 'box';
+  let keyingMode: 'box' | 'dominance' | 'none' = opts.mode ?? 'box';
   let note: string | undefined;
   let t;
+  // The platform now removes the background at generation, and not always a green one: it picks
+  // a key colour that contrasts with the artwork (magenta behind a green subject). Such a design
+  // arrives here already transparent. Keying it AGAIN is not a no-op: its transparent corners
+  // fail the green sanity check, the dominance fallback below then sweeps every green-dominant
+  // pixel, and the green subject the platform deliberately preserved is cleared. An image model
+  // cannot produce real alpha, so transparent corners mean the background is already gone and
+  // only the crop + resolution steps are still wanted. An explicit mode or force is respected.
+  const pre =
+    opts.mode === undefined && !opts.force ? await ctx.imaging.imageStats(inPath) : undefined;
+  const alreadyTransparent =
+    pre !== undefined &&
+    pre.has_alpha &&
+    pre.transparent_ratio >= MIN_KEYED_TRANSPARENT_RATIO &&
+    pre.corner_alpha.length > 0 &&
+    pre.corner_alpha.every((a) => a === 0);
   try {
-    t = await ctx.imaging.makeTransparent(inPath, { mode: keyingMode, force: opts.force });
+    if (alreadyTransparent) {
+      keyingMode = 'none';
+      note =
+        'This design already had a transparent background (the platform removes it at generation), so nothing was keyed. It was cropped to the artwork and sized for print.';
+      t = await ctx.imaging.makeTransparent(inPath, { cropOnly: true });
+    } else {
+      t = await ctx.imaging.makeTransparent(inPath, { mode: opts.mode ?? 'box', force: opts.force });
+    }
   } catch (err) {
     // Self-heal the single most common failure: the AI produced a tinted / muted green (not pure
     // #00FF00), so the box keyer's sanity check refused it. Green-DOMINANCE keying strips a tinted
@@ -138,7 +161,9 @@ async function processTransparencyImpl(
         `Background removal did not remove the background: after ${keyingMode}-mode keying the design is still opaque ` +
         `(transparent: ${pct}, corners not clear). Nothing was uploaded; the original design is unchanged.`,
       suggestion:
-        keyingMode === 'dominance'
+        keyingMode === 'none'
+          ? 'The design reported transparency but none survived the crop. Regenerate it, or upload an already-transparent file with upload_design.'
+          : keyingMode === 'dominance'
           ? 'The background is likely not green at all (for example a yellow-lime), so green-dominance keying cannot see it. Regenerate the design on a pure #00FF00 background, or upload an already-transparent file with upload_design.'
           : 'The background does not match the key colour. Regenerate the design on a pure #00FF00 background, retry with background_mode=dominance for a tinted green, or upload an already-transparent file with upload_design.',
     });
@@ -148,7 +173,7 @@ async function processTransparencyImpl(
     // Partially keyed. Usable, but never framed as a clean success.
     warning =
       'Transparency is NOT clean: at least one corner of the keyed design is still opaque, so part of the background may print as a visible block. Inspect it (verify_design_quality) before using it on a product.';
-    note = undefined; // the dominance note asserts a safe re-key, which this result does not show
+    note = undefined; // the note asserts a clean result, which this one does not show
   }
 
   // Resolution floor after keying: the flood-fill + tight-crop can shrink a design below the QC
@@ -280,6 +305,46 @@ async function verifyTextImpl(
   };
 }
 
+/** What the platform decided and did at generation, passed through as-is, plus one plain
+ *  sentence when it generated from its own rewrite instead of the caller's words. */
+function platformReport(g: {
+  print_ready?: Record<string, unknown>;
+  design_intent?: Record<string, unknown>;
+  background_state?: string;
+  prompt_improvement?: Record<string, unknown>;
+}): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (g.design_intent) out.design_intent = g.design_intent;
+  if (g.print_ready) out.print_ready = g.print_ready;
+  if (g.background_state) out.background_state = g.background_state;
+  if (g.prompt_improvement?.applied === true) {
+    out.prompt_rewritten =
+      'The prompt named or depicted the product, so the image model was sent prompt_improvement.improved_prompt instead of your wording (naming a product makes image models draw the product). Judge this design against improved_prompt. The product you named is in design_intent.garment.';
+  }
+  return out;
+}
+
+/** print_ready reasons after which there is no key-colour background left to remove. Returns
+ *  the warning to attach, or undefined when keying may proceed. */
+function unkeyableReason(printReady: Record<string, unknown> | undefined): string | undefined {
+  const reason = str(printReady, 'reason');
+  if (reason === 'fake_transparency_checkerboard') {
+    const message = str(printReady, 'message');
+    return (
+      'Not print-ready (fake_transparency_checkerboard): a checkered "transparency" pattern is drawn into this design and would print on the product. ' +
+      (message ? `${message} ` : '') +
+      'Generate again, describing only the artwork. Transparency was not applied.'
+    );
+  }
+  if (reason === 'scene_on_key_cropped' || reason === 'full_scene_intent') {
+    return (
+      `The platform stored this design as a full scene (${reason}), so it is opaque on purpose and will print as a rectangle. ` +
+      'Transparency was not applied. If isolated artwork was wanted, generate again describing only the subject.'
+    );
+  }
+  return undefined;
+}
+
 // --- Split primitives ---
 
 export const generateImage = defineTool({
@@ -351,6 +416,7 @@ export const generateImage = defineTool({
       generation_latency_ms: Date.now() - started,
     };
     if (g.prompt_improvement) out.prompt_improvement = g.prompt_improvement;
+    Object.assign(out, platformReport(g));
     if (concepts !== undefined) {
       out.concepts_requested = concepts;
       if (COLLECTION_CAPABLE_SOURCES.has(g.source_used)) {
@@ -463,7 +529,19 @@ export const designApparel = defineTool({
         : input.prompt.trim();
       const gen = await runGenerationWithFallback(
         ctx.api,
-        { prompt, source: sources[0]!, sources, workspace: input.workspace, noFallback: input.no_fallback },
+        {
+          prompt,
+          source: sources[0]!,
+          sources,
+          workspace: input.workspace,
+          noFallback: input.no_fallback,
+          // needs_transparency=false is this tool's all-over-print switch. The platform now
+          // decides the background from the prompt, so a bare "sleeping cat illustration" meant
+          // for a pillow would be read as isolated artwork and come back keyed, printing as a
+          // cat on bare white fabric. Saying all_over keeps the prompt and the background as
+          // they are, which is what this branch has always promised.
+          ...(needsTransparency ? {} : { intent: 'all_over' as const }),
+        },
         { progress: ctx.progress, signal: ctx.signal },
       );
 
@@ -473,9 +551,18 @@ export const designApparel = defineTool({
         source_used: gen.source_used,
         fallback_trail: gen.fallback_trail,
         transparency_clean: false,
+        ...(gen.prompt_improvement ? { prompt_improvement: gen.prompt_improvement } : {}),
+        ...platformReport(gen),
       };
 
-      if (needsTransparency) {
+      // The platform stored an opaque scene, or flagged a painted checkerboard. Neither has a
+      // key-colour background left to remove, and the local keyer's green-dominance fallback
+      // would clear foliage or grass out of a scene and report a re-key. Keep the design as the
+      // platform stored it and say why.
+      const unkeyable = needsTransparency ? unkeyableReason(gen.print_ready) : undefined;
+      if (unkeyable) {
+        design.warning = unkeyable;
+      } else if (needsTransparency) {
         try {
           const t = await processTransparencyImpl(ctx, gen.image_uuid, gen.image_url, input.workspace);
           design.design_uuid = t.image_uuid;
