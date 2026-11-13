@@ -9,6 +9,25 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.21.0]
+
+Advertised-surface release: two tools' schema or description change, so a client's standing
+approval for those two tools is asked for again after deploy. Every other tool is unchanged.
+
+### Added
+- `generate_image` takes two optional inputs for the platform's opt-outs: `prompt_improvement`
+  (`"skip"` keeps your wording when the prompt names the product) and `auto_key` (`false` sends
+  the prompt as written and removes no background; it also turns off the green-background hint
+  unless `augment_prompt_for_transparency` is set true). Both are sent only when set.
+
+### Changed
+- `generate_image` description corrected. It said the prompt suggestion was never applied and
+  that the result was a raw image to key afterwards; the platform now generates from its rewrite
+  when the prompt names the product, and returns isolated artwork already transparent.
+- `start_channel_connect`: the `store_uuid` and `store_name` descriptions now say to connect a
+  fulfillment provider into the store the account already has, and that a new store needs a
+  name. Descriptions only; no field added or retyped.
+
 ## [0.20.1]
 
 The platform now decides a design's background from the prompt and reports what it did. This
