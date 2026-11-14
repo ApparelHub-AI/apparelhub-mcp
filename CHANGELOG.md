@@ -9,6 +9,26 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.21.1]
+
+Hosted-server reliability fix. No tool's advertised schema or description changes in this
+release, so no client approval is asked for again.
+
+### Fixed
+- Hosted server: a connected client opening its event stream (an authenticated `GET`) right
+  after `initialize` made the invocation fail with no response and no log line. The server is
+  stateless and offers no stream, but the request was handed on and waited on a stream that
+  nothing would ever write to or close, so the process exited mid-request. It now answers
+  `405 Method Not Allowed` with `Allow: POST, DELETE, OPTIONS`, which clients take as "no
+  stream here" and carry on over `POST`.
+
+### Added
+- Hosted server: a last-resort guard so every request settles. An unexpected error becomes a
+  logged `500` and a request that cannot finish before the function deadline becomes a logged
+  `504`, both as JSON-RPC `-32603` errors an agent can retry, instead of a failed invocation.
+  The access line now carries a `failure` field on those paths, and a streaming answer from the
+  transport is refused rather than drained.
+
 ## [0.21.0]
 
 Advertised-surface release: two tools' schema or description change, so a client's standing
