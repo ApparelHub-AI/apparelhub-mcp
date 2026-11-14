@@ -55,7 +55,6 @@ function redactPath(path: string): string {
     .join('/');
 }
 
-
 // --- CORS (apparelhub-mcp#44 follow-up) ---
 //
 // Editor clients that issue MCP requests from a browser/renderer context are
@@ -200,6 +199,83 @@ function checkStaticAuth(event: FunctionUrlEvent, path: string, secret: string):
   return { authorized: false, path };
 }
 
+// --- Settlement guarantees (an internal platform ticket) ---
+//
+// A Node Lambda dies with Runtime.NodeJsExit ("a Promise that was never settled") when the
+// event loop goes empty while the handler's promise is still pending: nothing is left that
+// could ever settle it, so Node exits, the invocation fails, and no access line is written.
+// That is exactly what an authenticated `GET` did: the SDK answered it with an open-ended SSE
+// stream that nothing in a stateless, one-request-per-invocation server ever writes to or
+// closes, and draining it (`await response.text()`) waited on a promise with no timer or
+// socket behind it. The primary fix is the 405 below; these guards make sure the NEXT path of
+// the same shape fails as a logged, retryable error instead of a silent runtime crash.
+
+/** The subset of the Lambda context object this handler reads. */
+export interface InvocationContext {
+  getRemainingTimeInMillis?: () => number;
+}
+
+/**
+ * How long before the Lambda deadline the guard answers. Enough to serialize the error and hand
+ * it back to the runtime before the platform kills the sandbox.
+ */
+const DEADLINE_MARGIN_MS = 1000;
+/** Used when no Lambda context is available (local invocation). Below the 300 s function timeout. */
+const DEFAULT_DEADLINE_MS = 290_000;
+/** JSON-RPC "Internal error". The message tells the agent it may retry. */
+const INTERNAL_ERROR_CODE = -32603;
+
+function internalErrorResult(statusCode: number, message: string): FunctionUrlResult {
+  return jsonResult(statusCode, {
+    jsonrpc: '2.0',
+    id: null,
+    error: { code: INTERNAL_ERROR_CODE, message },
+  });
+}
+
+function deadlineFor(context: InvocationContext | undefined): number {
+  const remaining = context?.getRemainingTimeInMillis?.();
+  if (typeof remaining === 'number' && Number.isFinite(remaining)) {
+    return Math.max(0, remaining - DEADLINE_MARGIN_MS);
+  }
+  return DEFAULT_DEADLINE_MS;
+}
+
+type GuardOutcome =
+  | { kind: 'ok'; result: FunctionUrlResult }
+  | { kind: 'threw'; error: unknown }
+  | { kind: 'deadline' };
+
+/**
+ * Race the request against a REF'd timer. The timer has two jobs: it keeps the event loop
+ * non-empty, so an orphaned promise can no longer let Node exit underneath a pending handler,
+ * and when it fires it settles the invocation with an error we log. Cleared as soon as the work
+ * settles, so a normal request pays nothing.
+ */
+async function settleWithin(
+  work: () => Promise<FunctionUrlResult>,
+  deadlineMs: number,
+): Promise<GuardOutcome> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<GuardOutcome>((resolve) => {
+    timer = setTimeout(() => resolve({ kind: 'deadline' }), deadlineMs);
+  });
+  const attempt = work().then(
+    (result): GuardOutcome => ({ kind: 'ok', result }),
+    (error: unknown): GuardOutcome => ({ kind: 'threw', error }),
+  );
+  try {
+    return await Promise.race([attempt, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function errorSummary(error: unknown): { name: string; message: string } {
+  if (error instanceof Error) return { name: error.name, message: error.message };
+  return { name: typeof error, message: String(error) };
+}
+
 /**
  * Build the handler with injectable server deps (tests pass a fake `fetchImpl`) and env.
  * The default export below is the production wiring.
@@ -207,18 +283,55 @@ function checkStaticAuth(event: FunctionUrlEvent, path: string, secret: string):
 export function makeHandler(
   deps: ServerDeps = {},
   env: NodeJS.ProcessEnv = process.env,
-): (event: FunctionUrlEvent) => Promise<FunctionUrlResult> {
-  return async function handle(event: FunctionUrlEvent): Promise<FunctionUrlResult> {
+): (event: FunctionUrlEvent, context?: InvocationContext) => Promise<FunctionUrlResult> {
+  return async function handle(
+    event: FunctionUrlEvent,
+    context?: InvocationContext,
+  ): Promise<FunctionUrlResult> {
     const started = Date.now();
     const method = event.requestContext?.http?.method ?? 'GET';
     const rawPath = event.rawPath || '/';
     // Answer the preflight before anything else. Placed in the OUTER handler on
     // purpose: handleInner owns auth, and a preflight that reaches auth gets a
     // 401, which kills the request the browser was about to make.
-    const result =
+    const outcome: GuardOutcome =
       method === 'OPTIONS'
-        ? { statusCode: 204, headers: { ...CORS_HEADERS }, body: '' }
-        : await handleInner(event, method, rawPath, deps, env);
+        ? { kind: 'ok', result: { statusCode: 204, headers: { ...CORS_HEADERS }, body: '' } }
+        : await settleWithin(
+            () => handleInner(event, method, rawPath, deps, env),
+            deadlineFor(context),
+          );
+    let result: FunctionUrlResult;
+    let failure: string | undefined;
+    if (outcome.kind === 'ok') {
+      result = outcome.result;
+    } else if (outcome.kind === 'threw') {
+      failure = 'unhandled_error';
+      const { name, message } = errorSummary(outcome.error);
+      console.error(
+        JSON.stringify({
+          event: 'request_failed',
+          reason: failure,
+          method,
+          path: redactPath(rawPath),
+          name,
+          message,
+        }),
+      );
+      result = internalErrorResult(500, 'Internal error, please retry.');
+    } else {
+      failure = 'deadline_exceeded';
+      console.error(
+        JSON.stringify({
+          event: 'request_failed',
+          reason: failure,
+          method,
+          path: redactPath(rawPath),
+          ms: Date.now() - started,
+        }),
+      );
+      result = internalErrorResult(504, 'The request did not finish in time, please retry.');
+    }
     const latencyMs = Date.now() - started;
     const { rpcMethod, toolName } =
       method === 'POST' ? parseRpc(event.body, event.isBase64Encoded === true) : {};
@@ -231,6 +344,7 @@ export function makeHandler(
         ms: latencyMs,
         rpc: rpcMethod,
         tool: toolName,
+        ...(failure ? { failure } : {}),
       }),
     );
     // Connector-traffic metrics (#36). Skip the unauthenticated liveness probe so health
@@ -327,6 +441,25 @@ async function handleInner(
     return jsonResult(401, { error: 'unauthorized' }, challengeHeaders);
   }
 
+  // A stateless server cannot hold a standalone SSE stream: there is no later invocation that
+  // could write to it, and nothing ever closes it. Handing the GET to the SDK produced exactly
+  // that stream, and draining it never settled. The Streamable HTTP spec lets a server
+  // that offers no GET stream answer 405, and clients then carry on over POST.
+  if (method === 'GET') {
+    return jsonResult(
+      405,
+      {
+        jsonrpc: '2.0',
+        id: null,
+        error: {
+          code: -32000,
+          message: 'Method not allowed: this server does not offer a GET stream. Use POST.',
+        },
+      },
+      { allow: 'POST, DELETE, OPTIONS' },
+    );
+  }
+
   // Reconstruct a web-standard Request for the transport. The Authorization header is
   // consumed above and deliberately not forwarded.
   const query = event.rawQueryString ? `?${event.rawQueryString}` : '';
@@ -359,6 +492,14 @@ async function handleInner(
   await server.connect(transport);
   try {
     const response = await transport.handleRequest(request);
+    // With enableJsonResponse every answer we serve is a complete JSON body. A streaming answer
+    // here means a path that would wait forever on a stream nobody closes, so refuse it
+    // loudly rather than drain it.
+    if ((response.headers.get('content-type') ?? '').includes('text/event-stream')) {
+      // Best-effort cleanup only: the error thrown next is what gets reported.
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error(`transport returned an event stream for ${method}; refusing to drain it`);
+    }
     const outHeaders: Record<string, string> = {};
     response.headers.forEach((value, key) => {
       outHeaders[key] = value;
