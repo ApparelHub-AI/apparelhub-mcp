@@ -262,12 +262,12 @@ export const startChannelConnect = defineTool({
       .string()
       .optional()
       .describe(
-        'Store to attach to. Required for sales_channel. For fulfillment, omit it together with store_name to create a new store.',
+        'Store to attach to. Required for sales_channel. For fulfillment, pass it whenever the account already has a store (see list_my_stores): the provider is connected into that store and no second store is created. Omit it only to create a NEW store, and then store_name is required.',
       ),
     store_name: z
       .string()
       .optional()
-      .describe('Name for a NEW store, when connecting fulfillment without an existing store_uuid.'),
+      .describe('Name for a NEW store. Required, and not blank, when connecting fulfillment without store_uuid. Not used when store_uuid is given.'),
     // Shopify cannot build an authorize URL without knowing WHICH shop: the
     // consent screen lives on the merchant's own domain
     // (https://<shop>.myshopify.com/admin/oauth/authorize). Every other

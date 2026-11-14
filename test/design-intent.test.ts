@@ -317,3 +317,38 @@ describe.skipIf(!hasPillow)('make_transparent.py --crop-only', () => {
     for (const f of [input, out, swept]) rmSync(f, { force: true });
   });
 });
+
+describe('generate_image: the opt-outs', () => {
+  const run = async (input: Record<string, unknown>) => {
+    const { api, calls } = apiFrom([jsonResponse(200, { image_uuid: 'g1', url: 'https://cdn.example/g.png' })]);
+    await generateImage.handler({ prompt: 'a howling wolf', source: 'OpenAI', ...input } as never, fakeContext(api));
+    return JSON.parse(calls[0]?.init?.body as string) as Record<string, unknown>;
+  };
+
+  it('sends neither opt-out by default, and still adds the green hint', async () => {
+    const body = await run({});
+    expect(body.auto_key).toBeUndefined();
+    expect(body.prompt_improvement).toBeUndefined();
+    expect(String(body.prompt)).toContain('#00FF00');
+  });
+
+  it('auto_key false sends the prompt as written, with no green hint for nothing to key', async () => {
+    const body = await run({ auto_key: false });
+    expect(body.auto_key).toBe(false);
+    expect(body.prompt).toBe('a howling wolf');
+  });
+
+  it('an explicit augment still wins over the auto_key default', async () => {
+    const body = await run({ auto_key: false, augment_prompt_for_transparency: true });
+    expect(String(body.prompt)).toContain('#00FF00');
+  });
+
+  it('prompt_improvement skip is passed through', async () => {
+    expect((await run({ prompt_improvement: 'skip' })).prompt_improvement).toBe('skip');
+  });
+
+  it('the description no longer says the suggestion is never applied', () => {
+    expect(generateImage.description).not.toContain('never applied for you');
+    expect(generateImage.description).toContain('prompt_improvement.applied');
+  });
+});
