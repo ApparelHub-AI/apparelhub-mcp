@@ -9,6 +9,8 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.23.0]
+
 ### Changed
 - **Breaking: `api_request` is replaced by four tools, each fixed to one kind of request**
   (#217): `api_get` (GET, read-only), `api_create` (POST), `api_update` (PATCH by default, or
