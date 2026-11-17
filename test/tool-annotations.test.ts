@@ -66,7 +66,9 @@ describe('tool annotations (#196)', () => {
   it('known write tools are never advertised as read-only', () => {
     const byName = new Map(listed().map((t) => [t.name, t]));
     for (const n of [
-      'api_request',
+      'api_create',
+      'api_update',
+      'api_delete',
       'create_product',
       'cancel_order',
       'submit_order_to_fulfillment',

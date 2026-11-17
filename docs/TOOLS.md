@@ -177,7 +177,12 @@ sync, price cascade or fulfilment). WooCommerce and TikTok Shop today.
 | Tool | Summary |
 |---|---|
 | `get_api_reference` | Compact index of the live agent OpenAPI spec (path, methods, summary). Optional `filter` substring. Use to discover endpoints no dedicated tool covers. |
-| `api_request` | Authenticated request to any `/agents/v1` endpoint (`method`, relative `path`, `query?`, `body?`, `workspace?`). Path-guarded (no host escape, no `..`); scoped to the account's own permissions. Prefer a dedicated tool when one exists. |
+| `api_get` | Read-only: authenticated GET to any `/agents/v1` endpoint (relative `path`, `query?`, `workspace?`). Cannot send a body or another method. |
+| `api_create` | Authenticated POST to any `/agents/v1` endpoint (`path`, `query?`, `body?`, `workspace?`): creates something or runs an action. Changes data. |
+| `api_update` | Authenticated PATCH (default) or PUT to any `/agents/v1` endpoint (`method?`, `path`, `query?`, `body?`, `workspace?`). Changes data. |
+| `api_delete` | Authenticated DELETE to any `/agents/v1` endpoint (`path`, `query?`, `body?`, `workspace?`). Changes data; may be irreversible. |
+
+All four are path-guarded (no host escape, no `..`), scoped to the account's own permissions, and replace the single `api_request` tool (removed in 0.23.0, #217). Prefer a dedicated tool when one exists.
 
 ## Conventions
 

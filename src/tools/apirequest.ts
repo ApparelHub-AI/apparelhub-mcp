@@ -20,7 +20,8 @@ function safeRelPath(raw: string): string {
   if (!rel) {
     throw new AhError({
       code: 'invalid_path',
-      message: 'path is required (a relative path under /agents/v1, e.g. "orders" or "store/<uuid>/collections").',
+      message:
+        'path is required (a relative path under /agents/v1, e.g. "orders" or "store/<uuid>/collections").',
     });
   }
   if (rel.includes('://') || path.startsWith('//')) {
@@ -89,7 +90,7 @@ function connectorSelfReport(
     '2. REMOVED — you can call it but it is NOT listed here. It is gone.\n' +
     '3. MODIFIED — same name on both sides, but its schema or wording changed ' +
     'under you. Compare `tool_fingerprints`: each entry is `name [#abcdef]`, and ' +
-    'the SAME marker is printed at the end of that tool\'s description in your own ' +
+    "the SAME marker is printed at the end of that tool's description in your own " +
     'tool list. Markers differ means your copy of THAT tool is out of date — ' +
     're-read it before calling it, and do NOT repeat its old description back to ' +
     'the user as fact. This is the dangerous one: nothing errors. You simply send ' +
@@ -101,8 +102,8 @@ function connectorSelfReport(
     're-read their own cached registry rather than re-requesting the tool list. ' +
     'This server is stateless and never caches — it cannot push a change ' +
     'notification, so a client only learns by asking again. Meanwhile you can ' +
-    'reach any missing capability through api_request using the endpoint index ' +
-    'below.';
+    'reach any missing capability through api_get / api_create / api_update / ' +
+    'api_delete using the endpoint index below.';
   return report;
 }
 
@@ -111,7 +112,8 @@ export const getApiReference = defineTool({
   description:
     'Discover the full ApparelHub agent API: returns a compact index of every ' +
     'endpoint (path, methods, summary) from the live OpenAPI spec. Use this when ' +
-    'no dedicated tool covers what you need, then call it with api_request. ' +
+    'no dedicated tool covers what you need, then call it with api_get (reads) or ' +
+    'api_create / api_update / api_delete (changes). ' +
     'Read-only.\n\n' +
     'Also returns `connector`, which reports what THIS server actually serves: ' +
     'its version, and the name of every tool. **If a capability seems missing, ' +
@@ -123,7 +125,9 @@ export const getApiReference = defineTool({
     filter: z
       .string()
       .optional()
-      .describe('Only return endpoints whose path contains this substring (e.g. "orders", "collections").'),
+      .describe(
+        'Only return endpoints whose path contains this substring (e.g. "orders", "collections").',
+      ),
   }),
   annotations: { readOnlyHint: true, openWorldHint: true },
   handler: async (input, ctx) => {
@@ -151,44 +155,127 @@ export const getApiReference = defineTool({
       // Deliberately NOT gated behind a `filter` — a stale client asking about
       // one namespace still needs to be able to discover that it is stale.
       connector: connectorSelfReport(ctx.toolNames, ctx.toolFingerprints),
-      hint: 'Call api_request({ method, path }) to invoke any of these. Paths are relative under /agents/v1.',
+      hint: 'Read with api_get({ path }); change data with api_create (POST), api_update (PATCH/PUT) or api_delete (DELETE). Paths are relative under /agents/v1.',
     };
   },
 });
 
-const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as const;
+// -----------------------------------------------------------------------------
+// The escape hatch, split by what it can do (#217).
+//
+// It used to be ONE tool, `api_request`, taking any method. A client decides from a
+// tool's hints whether a call can run without asking, and one tool that both reads
+// and writes can't be hinted honestly: it was either over-cautious on every read or
+// under-cautious on every write. Each tool below takes exactly one kind of method and
+// says so in its hints, so reads run freely and writes are confirmed.
+// -----------------------------------------------------------------------------
 
-export const apiRequest = defineTool({
-  name: 'api_request',
-  description:
-    'Escape hatch: make an authenticated request to any ApparelHub agent API ' +
-    'endpoint under /agents/v1, as the connected account. PREFER a dedicated ' +
-    'tool when one exists (they return clean, guarded results) — use this only ' +
-    'for capabilities no tool covers. Call get_api_reference first to find the ' +
-    'right path. `path` is relative (e.g. "orders", "store/<uuid>/settings"); ' +
-    'no full URLs. Scoped to the account\'s own permissions.',
-  inputSchema: z.object({
-    method: z.enum(METHODS).describe('HTTP method.'),
-    path: z.string().describe('Relative path under /agents/v1, e.g. "orders" or "product/<uuid>/archive". No host, no "..".'),
-    query: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()
-      .describe('Query-string parameters.'),
-    body: z.record(z.string(), z.unknown()).optional().describe('JSON request body (for POST/PUT/PATCH).'),
-    workspace: z.string().optional().describe('Workspace uuid to scope to (agency accounts).'),
-  }),
-  annotations: { openWorldHint: true },
-  handler: async (input, ctx) => {
-    const rel = safeRelPath(input.path);
-    const data = await ctx.api.request<unknown>(input.method, rel, {
-      query: input.query,
-      body: input.body,
-      workspace: input.workspace,
-      signal: ctx.signal,
-    });
-    return { ok: true, method: input.method, path: rel, data };
+/** Where the agent learns what it can call; named in every description (#217). */
+const API_DOCS = 'the ApparelHub Agent API (https://apparelhub.ai/developer/api-docs)';
+
+const pathField = z
+  .string()
+  .describe(
+    'Relative path under /agents/v1, e.g. "orders" or "product/<uuid>/archive". No host, no "..".',
+  );
+const queryField = z
+  .record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
+  .optional()
+  .describe('Query-string parameters.');
+const bodyField = z.record(z.string(), z.unknown()).optional().describe('JSON request body.');
+const workspaceField = z
+  .string()
+  .optional()
+  .describe('Workspace uuid to scope to (agency accounts).');
+
+type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+
+async function callApi(
+  method: HttpMethod,
+  input: {
+    path: string;
+    query?: Record<string, string | number | boolean>;
+    body?: Record<string, unknown>;
+    workspace?: string;
   },
+  ctx: Parameters<ToolDef['handler']>[1],
+) {
+  const rel = safeRelPath(input.path);
+  const data = await ctx.api.request<unknown>(method, rel, {
+    query: input.query,
+    body: input.body,
+    workspace: input.workspace,
+    signal: ctx.signal,
+  });
+  return { ok: true, method, path: rel, data };
+}
+
+const PREFER =
+  'PREFER a dedicated tool when one exists (they return clean, guarded results); use this ' +
+  'only for capabilities no tool covers. Call get_api_reference first to find the right ' +
+  'path. `path` is relative (e.g. "orders", "store/<uuid>/settings"); no full URLs. Scoped ' +
+  "to the account's own permissions.";
+
+export const apiGet = defineTool({
+  name: 'api_get',
+  description:
+    `Read from ${API_DOCS} with an authenticated GET, as the connected account. ` +
+    `Read-only: it cannot change anything. ${PREFER}`,
+  inputSchema: z.object({ path: pathField, query: queryField, workspace: workspaceField }),
+  annotations: { readOnlyHint: true, openWorldHint: true },
+  handler: async (input, ctx) => callApi('GET', input, ctx),
 });
 
-export const apiTools: ToolDef[] = [getApiReference, apiRequest];
+export const apiCreate = defineTool({
+  name: 'api_create',
+  description:
+    `Create something or run an action in ${API_DOCS} with an authenticated POST, as the ` +
+    `connected account. Changes data. ${PREFER}`,
+  inputSchema: z.object({
+    path: pathField,
+    query: queryField,
+    body: bodyField,
+    workspace: workspaceField,
+  }),
+  annotations: { destructiveHint: true, openWorldHint: true },
+  handler: async (input, ctx) => callApi('POST', input, ctx),
+});
+
+export const apiUpdate = defineTool({
+  name: 'api_update',
+  description:
+    `Update something in ${API_DOCS} with an authenticated PATCH (partial update, the ` +
+    `default) or PUT (full replace), as the connected account. Changes data. ${PREFER}`,
+  inputSchema: z.object({
+    method: z
+      .enum(['PATCH', 'PUT'])
+      .default('PATCH')
+      .describe('PATCH (default) or PUT, as the endpoint requires.'),
+    path: pathField,
+    query: queryField,
+    body: bodyField,
+    workspace: workspaceField,
+  }),
+  annotations: { destructiveHint: true, openWorldHint: true },
+  handler: async (input, ctx) => callApi(input.method, input, ctx),
+});
+
+export const apiDelete = defineTool({
+  name: 'api_delete',
+  description:
+    `Delete something in ${API_DOCS} with an authenticated DELETE, as the connected ` +
+    `account. Changes data and may be irreversible: confirm with the user first. ${PREFER}`,
+  inputSchema: z.object({
+    path: pathField,
+    query: queryField,
+    body: bodyField,
+    workspace: workspaceField,
+  }),
+  annotations: { destructiveHint: true, openWorldHint: true },
+  handler: async (input, ctx) => callApi('DELETE', input, ctx),
+});
+
+export const apiTools: ToolDef[] = [getApiReference, apiGet, apiCreate, apiUpdate, apiDelete];
 
 // Exposed for unit tests.
 export const __test = { safeRelPath };

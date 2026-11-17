@@ -138,5 +138,8 @@ export const TOOL_TITLES: Readonly<Record<string, string>> = {
   archive_product: 'Archive product',
   restore_product: 'Restore product',
   get_api_reference: 'Get API reference',
-  api_request: 'Call the ApparelHub API',
+  api_get: 'Read from the ApparelHub API',
+  api_create: 'Create via the ApparelHub API',
+  api_update: 'Update via the ApparelHub API',
+  api_delete: 'Delete via the ApparelHub API',
 };

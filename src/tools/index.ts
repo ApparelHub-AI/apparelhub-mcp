@@ -32,7 +32,7 @@ export function allTools(): ToolDef[] {
     ...systemsTools,
     ...safetyTools,
     // Capability-gap tools (epic #47): order management, analytics, collections,
-    // cross-workspace transfer, tier-2 management, and the api_request escape hatch.
+    // cross-workspace transfer, tier-2 management, and the api_get / api_create / api_update / api_delete escape hatch.
     ...orderTools,
     // Post-sale fulfillment-issue reporting + resolution (platform epic #510).
     ...issueTools,
