@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
+import { SUPPORTED_PROTOCOL_VERSIONS } from '@modelcontextprotocol/sdk/types.js';
 import { API_BASE_URL, loadConfig } from '../config.js';
 import { createServer, type ServerDeps } from '../server.js';
 import { emitConnectorMetric, outcomeForStatus, parseRpc } from './metrics.js';
@@ -271,6 +272,38 @@ async function settleWithin(
   }
 }
 
+// --- Modern-era probes (#1433) ---
+//
+// MCP revision 2026-07-28 drops the `initialize` handshake: every request carries its protocol
+// version (the MCP-Protocol-Version header and `_meta`), and `server/discover` replaces the
+// handshake's capability exchange. A client that speaks BOTH eras probes in the modern shape
+// first and, on Streamable HTTP, falls back to `initialize` when it gets a 400 whose body is
+// NOT a recognized modern error (spec: basic/transports/streamable-http, "Backward
+// Compatibility"). The SDK we run (and its newest release) only speaks up to 2025-11-25, so it
+// answers such a probe with exactly that: 400 + a generic -32000 "Unsupported protocol
+// version". That is the correct legacy-server answer, and it is what lets those clients connect.
+//
+// What we must NOT do is "improve" it. A 404/-32601 ("Method not found") or a -32022
+// UnsupportedProtocolVersionError are modern signals: a dual-era client would conclude this is
+// a modern server, stop falling back, and never connect. The contract test in
+// http-lambda.test.ts pins that, so an SDK upgrade that changes the answer fails CI instead of
+// silently cutting off new clients. When the SDK gains real 2026-07-28 support, implement
+// `server/discover` properly and retire this block together with that test.
+
+function header(event: FunctionUrlEvent, name: string): string | undefined {
+  const h = event.headers ?? {};
+  const direct = h[name];
+  if (direct !== undefined) return direct;
+  const key = Object.keys(h).find((k) => k.toLowerCase() === name);
+  return key === undefined ? undefined : h[key];
+}
+
+/** True when the request declares a protocol version this server does not implement. */
+function isModernEraProbe(headerVersion: string | undefined, bodyVersion: string | undefined) {
+  const declared = headerVersion?.trim() || bodyVersion;
+  return declared !== undefined && !SUPPORTED_PROTOCOL_VERSIONS.includes(declared);
+}
+
 function errorSummary(error: unknown): { name: string; message: string } {
   if (error instanceof Error) return { name: error.name, message: error.message };
   return { name: typeof error, message: String(error) };
@@ -333,9 +366,14 @@ export function makeHandler(
       result = internalErrorResult(504, 'The request did not finish in time, please retry.');
     }
     const latencyMs = Date.now() - started;
-    const { rpcMethod, toolName } =
+    const { rpcMethod, toolName, protocolVersion, client } =
       method === 'POST' ? parseRpc(event.body, event.isBase64Encoded === true) : {};
+    const headerVersion =
+      method === 'POST' ? header(event, 'mcp-protocol-version')?.trim().slice(0, 32) : undefined;
+    const eraProbe = method === 'POST' && isModernEraProbe(headerVersion, protocolVersion);
     // One structured line per request; path secrets are redacted to length + hash prefix.
+    // `pv` + `client` show which clients send modern-era probes and, by the next line from the
+    // same client, whether they then fell back to initialize and connected (#1433).
     console.log(
       JSON.stringify({
         method,
@@ -344,13 +382,20 @@ export function makeHandler(
         ms: latencyMs,
         rpc: rpcMethod,
         tool: toolName,
+        ...(headerVersion || protocolVersion ? { pv: headerVersion || protocolVersion } : {}),
+        ...(client ? { client } : {}),
+        ...(eraProbe && result.statusCode === 400 ? { era: 'modern_probe_fallback' } : {}),
         ...(failure ? { failure } : {}),
       }),
     );
     // Connector-traffic metrics (#36). Skip the unauthenticated liveness probe so health
     // checks don't drown the real traffic signal.
     if (rawPath !== '/healthz') {
-      emitConnectorMetric({ outcome: outcomeForStatus(result.statusCode), latencyMs, toolName });
+      emitConnectorMetric({
+        outcome: outcomeForStatus(result.statusCode, eraProbe),
+        latencyMs,
+        toolName,
+      });
     }
     return result;
   };

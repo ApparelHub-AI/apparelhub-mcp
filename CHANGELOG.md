@@ -9,6 +9,17 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+### Fixed
+- Hosted server: requests sent in the 2026-07-28 protocol shape (for example a
+  `server/discover` probe) are now counted under their own `legacy_fallback` outcome instead
+  of `client_error`, and the access log records the requested protocol version and client
+  name (internal ticket #1433). The response itself is unchanged on purpose: a 400 with a
+  generic error body is what the spec tells a dual-era client to read as "fall back to
+  `initialize`". Answering with `Method not found` or an `UnsupportedProtocolVersionError`
+  would tell those clients this server speaks 2026-07-28, so they would stop falling back
+  and never connect. New contract tests pin that behavior so an SDK upgrade cannot change it
+  silently.
+
 ## [0.23.0]
 
 ### Changed
