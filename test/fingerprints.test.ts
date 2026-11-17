@@ -15,7 +15,7 @@ import { z } from 'zod';
 import { ToolRegistry, defineTool, toolFingerprint } from '../src/tools/registry.js';
 
 const tool = (name: string, description: string, inputSchema: z.ZodType) =>
-  defineTool({ name, description, inputSchema, handler: async () => ({}) });
+  defineTool({ name, title: name, description, inputSchema, handler: async () => ({}) });
 
 const base = () => tool('alpha', 'does alpha things', z.object({ a: z.string() }));
 
@@ -29,7 +29,9 @@ function markerOf(registry: ToolRegistry, name: string): string {
 describe('tool fingerprints', () => {
   it('changes when only the DESCRIPTION changes', () => {
     const before = toolFingerprint(base());
-    const after = toolFingerprint(tool('alpha', 'does alpha things differently', z.object({ a: z.string() })));
+    const after = toolFingerprint(
+      tool('alpha', 'does alpha things differently', z.object({ a: z.string() })),
+    );
     expect(after).not.toBe(before);
   });
 

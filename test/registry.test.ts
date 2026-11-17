@@ -5,6 +5,7 @@ import { fakeContext } from './helpers/ctx.js';
 
 const echo = defineTool({
   name: 'echo',
+  title: 'Echo',
   description: 'echo the message back',
   inputSchema: z.object({ msg: z.string() }),
   handler: async (input) => ({ echoed: input.msg }),
