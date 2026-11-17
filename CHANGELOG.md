@@ -9,6 +9,8 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.23.1]
+
 ### Fixed
 - Hosted server: requests sent in the 2026-07-28 protocol shape (for example a
   `server/discover` probe) are now counted under their own `legacy_fallback` outcome instead
