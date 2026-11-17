@@ -58,17 +58,33 @@ const EXT_FOR: Record<ContentType, string> = {
  * an opaque S3 signature error, so sniff rather than trust.
  */
 export function sniffContentType(bytes: Uint8Array): ContentType | undefined {
-  if (bytes.length >= 8 &&
-      bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 &&
-      bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a) {
+  if (
+    bytes.length >= 8 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a
+  ) {
     return 'image/png';
   }
   if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
     return 'image/jpeg';
   }
-  if (bytes.length >= 12 &&
-      bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
-      bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) {
+  if (
+    bytes.length >= 12 &&
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  ) {
     return 'image/webp';
   }
   return undefined;
@@ -91,7 +107,9 @@ export function looksLikeSvg(bytes: Uint8Array): boolean {
 }
 
 function rejectUnsupportedFormat(bytes: Uint8Array): never {
-  const head = new TextDecoder('utf-8', { fatal: false }).decode(bytes.subarray(0, 256)).trimStart();
+  const head = new TextDecoder('utf-8', { fatal: false })
+    .decode(bytes.subarray(0, 256))
+    .trimStart();
   if (/^%PDF-/.test(head)) {
     throw new AhError({
       code: 'unsupported_format',
@@ -102,8 +120,7 @@ function rejectUnsupportedFormat(bytes: Uint8Array): never {
   }
   throw new AhError({
     code: 'unsupported_format',
-    message:
-      'Unsupported image format. The file is not PNG, JPEG, WEBP or SVG.',
+    message: 'Unsupported image format. The file is not PNG, JPEG, WEBP or SVG.',
     suggestion:
       'Adobe Illustrator (.ai) and EPS files need exporting first: save as SVG to keep it vector (rendered at print resolution, best quality), or export a PNG at the size you intend to print. Do NOT redraw or approximate the mark.',
   });
@@ -115,14 +132,14 @@ function ipv4IsPrivate(ip: string): boolean {
   const p = ip.split('.').map((n) => Number.parseInt(n, 10));
   if (p.length !== 4 || p.some((n) => Number.isNaN(n))) return true; // unparseable = refuse
   const [a, b] = p as [number, number, number, number];
-  if (a === 0 || a === 10 || a === 127) return true;                  // this-host, private, loopback
-  if (a === 169 && b === 254) return true;                            // link-local (incl. cloud metadata)
-  if (a === 172 && b >= 16 && b <= 31) return true;                   // private
-  if (a === 192 && b === 168) return true;                            // private
-  if (a === 100 && b >= 64 && b <= 127) return true;                  // carrier-grade NAT
-  if (a === 192 && b === 0) return true;                              // IETF protocol assignments
-  if (a === 198 && (b === 18 || b === 19)) return true;               // benchmarking
-  if (a >= 224) return true;                                          // multicast + reserved
+  if (a === 0 || a === 10 || a === 127) return true; // this-host, private, loopback
+  if (a === 169 && b === 254) return true; // link-local (incl. cloud metadata)
+  if (a === 172 && b >= 16 && b <= 31) return true; // private
+  if (a === 192 && b === 168) return true; // private
+  if (a === 100 && b >= 64 && b <= 127) return true; // carrier-grade NAT
+  if (a === 192 && b === 0) return true; // IETF protocol assignments
+  if (a === 198 && (b === 18 || b === 19)) return true; // benchmarking
+  if (a >= 224) return true; // multicast + reserved
   return false;
 }
 
@@ -131,11 +148,11 @@ export function isBlockedAddress(ip: string): boolean {
   const addr = ip.toLowerCase();
   if (addr.includes('.') && !addr.startsWith('::ffff:')) return ipv4IsPrivate(addr);
   if (addr.startsWith('::ffff:')) return ipv4IsPrivate(addr.slice('::ffff:'.length));
-  if (addr === '::' || addr === '::1') return true;                   // unspecified, loopback
+  if (addr === '::' || addr === '::1') return true; // unspecified, loopback
   const head = Number.parseInt(addr.split(':')[0] || '0', 16);
-  if ((head & 0xfe00) === 0xfc00) return true;                        // fc00::/7 unique-local
-  if ((head & 0xffc0) === 0xfe80) return true;                        // fe80::/10 link-local
-  if ((head & 0xff00) === 0xff00) return true;                        // ff00::/8 multicast
+  if ((head & 0xfe00) === 0xfc00) return true; // fc00::/7 unique-local
+  if ((head & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
+  if ((head & 0xff00) === 0xff00) return true; // ff00::/8 multicast
   return false;
 }
 
@@ -144,13 +161,17 @@ async function assertPublicUrl(raw: string): Promise<URL> {
   try {
     url = new URL(raw);
   } catch {
-    throw new AhError({ code: 'invalid_source_url', message: `source_url is not a valid URL: ${raw}` });
+    throw new AhError({
+      code: 'invalid_source_url',
+      message: `source_url is not a valid URL: ${raw}`,
+    });
   }
   if (url.protocol !== 'https:') {
     throw new AhError({
       code: 'invalid_source_url',
       message: 'source_url must be https.',
-      suggestion: 'Host the file over https, or use the presigned mode and upload the bytes directly.',
+      suggestion:
+        'Host the file over https, or use the presigned mode and upload the bytes directly.',
     });
   }
   let addresses: Array<{ address: string }>;
@@ -195,7 +216,10 @@ async function fetchSourceBytes(ctx: ToolContext, sourceUrl: string): Promise<Ui
     if (res.status >= 300 && res.status < 400) {
       const location = res.headers.get('location');
       if (!location) {
-        throw new AhError({ code: 'source_fetch_failed', message: `source_url returned ${res.status} with no redirect target.` });
+        throw new AhError({
+          code: 'source_fetch_failed',
+          message: `source_url returned ${res.status} with no redirect target.`,
+        });
       }
       current = new URL(location, url).toString();
       continue;
@@ -204,7 +228,8 @@ async function fetchSourceBytes(ctx: ToolContext, sourceUrl: string): Promise<Ui
       throw new AhError({
         code: 'source_fetch_failed',
         message: `Could not fetch source_url (HTTP ${res.status}).`,
-        suggestion: 'Check the link is publicly readable — a share link that requires sign-in will not work.',
+        suggestion:
+          'Check the link is publicly readable — a share link that requires sign-in will not work.',
       });
     }
 
@@ -224,7 +249,10 @@ async function fetchSourceBytes(ctx: ToolContext, sourceUrl: string): Promise<Ui
       });
     }
     if (bytes.byteLength === 0) {
-      throw new AhError({ code: 'source_fetch_failed', message: 'source_url returned an empty body.' });
+      throw new AhError({
+        code: 'source_fetch_failed',
+        message: 'source_url returned an empty body.',
+      });
     }
     return bytes;
   }
@@ -354,7 +382,8 @@ async function completeAndPoll(
     // 404 here means "already processing" (the platform only accepts complete
     // once). That is the normal case when re-entering to resume a poll, so it is
     // not an error — anything else is.
-    if (!(err instanceof AhError) || (err.code !== 'not_found' && err.code !== 'conflict')) throw err;
+    if (!(err instanceof AhError) || (err.code !== 'not_found' && err.code !== 'conflict'))
+      throw err;
   }
 
   const deadline = now() + PROCESS_TIMEOUT_MS;
@@ -392,8 +421,8 @@ const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeou
 export const uploadDesign = defineTool({
   name: 'upload_design',
   description:
-    "Upload artwork the merchant ALREADY OWNS and turn it into a design_uuid usable by " +
-    'create_product / ship_product. This is the way to build products from a client\'s own ' +
+    'Upload artwork the merchant ALREADY OWNS and turn it into a design_uuid usable by ' +
+    "create_product / ship_product. This is the way to build products from a client's own " +
     'files — a logo, a brand mark, a cleared cover, a photograph — instead of generating ' +
     'something new. If a client says their mark must not be redrawn, use this; never ' +
     'regenerate or approximate a mark to work around a missing file.\n\n' +
@@ -417,7 +446,9 @@ export const uploadDesign = defineTool({
       .string()
       .url()
       .optional()
-      .describe('Public https URL of the artwork. The server fetches it. Must not require sign-in.'),
+      .describe(
+        'Public https URL of the artwork. The server fetches it. Must not require sign-in.',
+      ),
     image_base64: z
       .string()
       .optional()
@@ -431,7 +462,10 @@ export const uploadDesign = defineTool({
         'Finish a presigned upload: pass the image_uuid from a previous upload_design call after you have PUT the bytes. Also use this to resume polling if processing was still running.',
       ),
     filename: z.string().optional().describe('Original filename. Used for the default title.'),
-    title: z.string().optional().describe('Display title for the design. Defaults to the filename stem.'),
+    title: z
+      .string()
+      .optional()
+      .describe('Display title for the design. Defaults to the filename stem.'),
     content_type: z
       .enum(['image/png', 'image/jpeg', 'image/webp', 'image/svg+xml'])
       .optional()
@@ -484,7 +518,10 @@ export const uploadDesign = defineTool({
       const uploadUrl = str(init, 'upload_url');
       const imageUuid = str(init, 'image_uuid', 'uuid');
       if (!uploadUrl || !imageUuid) {
-        throw new AhError({ code: 'upstream_unexpected', message: 'The platform did not return an upload URL.' });
+        throw new AhError({
+          code: 'upstream_unexpected',
+          message: 'The platform did not return an upload URL.',
+        });
       }
       return {
         mode: 'presigned',
@@ -505,7 +542,8 @@ export const uploadDesign = defineTool({
       ? await fetchSourceBytes(ctx, input.source_url)
       : decodeBase64(input.image_base64 as string);
 
-    const detected: ContentType | undefined = sniffContentType(bytes) ?? (looksLikeSvg(bytes) ? 'image/svg+xml' : undefined);
+    const detected: ContentType | undefined =
+      sniffContentType(bytes) ?? (looksLikeSvg(bytes) ? 'image/svg+xml' : undefined);
     if (!detected) rejectUnsupportedFormat(bytes);
     if (input.content_type && input.content_type !== detected) {
       warnings.push(
@@ -515,7 +553,9 @@ export const uploadDesign = defineTool({
 
     const filename =
       input.filename ??
-      (input.source_url ? guessFilename(input.source_url, detected) : `upload.${EXT_FOR[detected]}`);
+      (input.source_url
+        ? guessFilename(input.source_url, detected)
+        : `upload.${EXT_FOR[detected]}`);
 
     await ctx.progress.report(35, 'Reserving storage...');
     const init = await ctx.api.post('images/upload/initiate', {
@@ -532,7 +572,10 @@ export const uploadDesign = defineTool({
     const uploadUrl = str(init, 'upload_url');
     const imageUuid = str(init, 'image_uuid', 'uuid');
     if (!uploadUrl || !imageUuid) {
-      throw new AhError({ code: 'upstream_unexpected', message: 'The platform did not return an upload URL.' });
+      throw new AhError({
+        code: 'upstream_unexpected',
+        message: 'The platform did not return an upload URL.',
+      });
     }
 
     await ctx.progress.report(60, 'Uploading artwork...');
@@ -587,7 +630,7 @@ function finish(
   const assessment = outcome.upload_assessment;
   if (assessment?.opaque_uniform_background === true) {
     warnings.push(
-      'This file has a solid, flat background, so placed on a product it prints as a coloured rectangle. The platform can very likely remove it: call api_request with method POST and path images/generated/<design_uuid>/remove-background (no image generation is used, and tell the user you are doing it), read background_state on the result, then check the mockup. process_transparency is for generated key-colour backgrounds and is the wrong tool here. If the client said the mark must not be altered, ask for a version with a transparent background instead.',
+      'This file has a solid, flat background, so placed on a product it prints as a coloured rectangle. The platform can very likely remove it: call api_create with path images/generated/<design_uuid>/remove-background (no image generation is used, and tell the user you are doing it), read background_state on the result, then check the mockup. process_transparency is for generated key-colour backgrounds and is the wrong tool here. If the client said the mark must not be altered, ask for a version with a transparent background instead.',
     );
   } else if (assessment?.looks_like_photo === true) {
     warnings.push(

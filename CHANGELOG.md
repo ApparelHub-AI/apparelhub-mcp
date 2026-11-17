@@ -9,6 +9,17 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+### Changed
+- **Breaking: `api_request` is replaced by four tools, each fixed to one kind of request**
+  (#217): `api_get` (GET, read-only), `api_create` (POST), `api_update` (PATCH by default, or
+  PUT) and `api_delete` (DELETE). One tool that both read and wrote couldn't carry honest
+  hints, so every read through it had to be confirmed. Reads now run without asking; changes
+  still ask. Same path guard, workspace scoping and permissions as before. An agent with a
+  stale tool list that still calls `api_request` gets `unknown_tool`; `get_api_reference`
+  reports the current tool names.
+- `get_api_reference`'s description and hint now point at the four tools, so clients see it
+  as changed and may ask to approve it again.
+
 ## [0.22.0]
 
 Every tool now advertises a display title and whether it is read-only. No tool's description

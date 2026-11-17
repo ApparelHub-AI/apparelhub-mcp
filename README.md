@@ -230,7 +230,8 @@ your agent for the authoritative live schemas.
   `set_prices_by_margin`, `recover_from_outage`.
 - **Safety** — `verify_design_quality`, `verify_mockup_quality`, `check_design_compliance`.
 - **API escape hatch** — `get_api_reference` (discover the full agent API from the live OpenAPI
-  spec) and `api_request` (call any `/agents/v1` endpoint when no dedicated tool fits).
+  spec), then `api_get` (read-only GET), `api_create` (POST), `api_update` (PATCH/PUT) and
+  `api_delete` (DELETE) to call any `/agents/v1` endpoint when no dedicated tool fits.
 
 Read tools are read-only. Product and design tools default to **draft, never live**, enforce
 pricing floors, and guard known variant traps. Systems-of-action mutations default to a **dry run**
