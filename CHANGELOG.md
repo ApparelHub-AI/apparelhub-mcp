@@ -9,6 +9,25 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.22.0]
+
+Every tool now advertises a display title and whether it is read-only. No tool's description
+or input schema changes, so tool fingerprints are unchanged and no client approval is asked
+for again.
+
+### Added
+- Every tool in `tools/list` carries a human-readable `title`, at the top level and in
+  `annotations`, so clients can show "List stores" instead of `list_my_stores` (#196).
+- Every tool advertises exactly one of `readOnlyHint: true` or `destructiveHint: true`
+  (50 read-only, 79 that can change data). A tool counts as read-only only when it is
+  declared so; anything else is advertised as able to change data, so clients ask first.
+- A test fails the build if a tool ships without a title or hint, or if a known write tool
+  is ever advertised as read-only.
+
+### Changed
+- `import_channel_catalog`, `bind_tracked_listing` and `unbind_tracked_listing` change data
+  and now advertise `destructiveHint: true` (they previously said `false`).
+
 ## [0.21.1]
 
 Hosted-server reliability fix. No tool's advertised schema or description changes in this
