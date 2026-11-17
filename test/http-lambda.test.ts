@@ -1,4 +1,4 @@
-import { beforeEach, describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import {
   _clearResolveCacheForTests,
   makeHandler,
@@ -50,7 +50,6 @@ const initializeReq = {
 };
 const toolsListReq = { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} };
 
-
 describe('CORS (editor clients that run MCP from a browser context)', () => {
   it('answers the preflight WITHOUT auth', async () => {
     // A preflight never carries credentials, so if it reaches the auth gate it
@@ -88,7 +87,6 @@ describe('CORS (editor clients that run MCP from a browser context)', () => {
     expect(res.headers?.['access-control-allow-origin']).toBe('*');
   });
 });
-
 
 describe('server display metadata (connector widgets)', () => {
   it('advertises a human title, site, description and icon', async () => {
@@ -265,7 +263,9 @@ describe('lambda handler OAuth bearer resolution (#41)', () => {
     const res = await handle(toolCall('opaque-token-dev'));
     expect(res.statusCode).toBe(200);
     // resolve-token goes to the dev host, not the hardcoded prod default.
-    expect(calls[0].url).toBe('https://api.dev.example.test/agents/v1/service/connector/resolve-token');
+    expect(calls[0].url).toBe(
+      'https://api.dev.example.test/agents/v1/service/connector/resolve-token',
+    );
     // the downstream platform call (tool) also hits the dev host.
     expect(calls[1].url.startsWith('https://api.dev.example.test/agents/v1/')).toBe(true);
   });
@@ -297,5 +297,107 @@ describe('lambda handler OAuth bearer resolution (#41)', () => {
     const handle = makeHandler({}, OAUTH_ENV);
     const res = await handle(postEvent(toolsListReq, { path: `/${SECRET}/mcp` }));
     expect(res.statusCode).toBe(401);
+  });
+});
+
+// --- #1433: modern-era (2026-07-28) probes must keep falling back to initialize ---
+//
+// Spec, Streamable HTTP "Backward Compatibility": a dual-era client sends a modern request
+// first; on 400 it falls back to `initialize` ONLY IF the body is not a recognized modern
+// error. A modern server signals itself with -32020 (HeaderMismatch), -32021 (missing
+// required client capability), -32022 (UnsupportedProtocolVersion), or 404/-32601 for an
+// unknown method. If we ever answer a probe with one of those, new clients stop falling back
+// and never connect -- which is why these tests exist. Retire them only when the server
+// implements 2026-07-28 for real.
+const MODERN = '2026-07-28';
+const MODERN_ERROR_CODES = [-32020, -32021, -32022, -32601];
+
+function modernEvent(method: string, params: Record<string, unknown> = {}): FunctionUrlEvent {
+  const ev = postEvent(
+    {
+      jsonrpc: '2.0',
+      id: 1,
+      method,
+      params: {
+        ...params,
+        _meta: {
+          'io.modelcontextprotocol/protocolVersion': MODERN,
+          'io.modelcontextprotocol/clientInfo': { name: 'probe-client', version: '9.9.9' },
+          'io.modelcontextprotocol/clientCapabilities': {},
+        },
+      },
+    },
+    { bearer: SECRET },
+  );
+  ev.headers = { ...ev.headers, 'mcp-protocol-version': MODERN, 'mcp-method': method };
+  return ev;
+}
+
+describe('modern-era probes fall back to initialize (#1433)', () => {
+  let lines: string[];
+  beforeEach(() => {
+    lines = [];
+    vi.spyOn(console, 'log').mockImplementation((l: unknown) => {
+      lines.push(String(l));
+    });
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it('answers server/discover with a 400 whose body is NOT a modern error, then initialize works', async () => {
+    const handle = makeHandler({}, ENV);
+    const probe = await handle(modernEvent('server/discover'));
+    expect(probe.statusCode).toBe(400);
+    const body = JSON.parse(probe.body);
+    expect(body.jsonrpc).toBe('2.0');
+    expect(MODERN_ERROR_CODES).not.toContain(body.error.code);
+    // An UnsupportedProtocolVersionError carries data.supported; its presence would mean
+    // "modern server, retry with one of these" instead of "fall back".
+    expect(body.error.data?.supported).toBeUndefined();
+
+    // The fallback the client then performs must succeed.
+    const init = await handle(postEvent(initializeReq, { bearer: SECRET }));
+    expect(init.statusCode).toBe(200);
+    expect(JSON.parse(init.body).result.serverInfo.name).toBeTruthy();
+  });
+
+  it('gives the same legacy answer to any modern-shaped request, not just discover', async () => {
+    const handle = makeHandler({}, ENV);
+    const res = await handle(modernEvent('tools/list'));
+    expect(res.statusCode).toBe(400);
+    expect(MODERN_ERROR_CODES).not.toContain(JSON.parse(res.body).error.code);
+  });
+
+  it('logs the declared version and client, and buckets it as legacy_fallback, not client_error', async () => {
+    const handle = makeHandler({}, ENV);
+    await handle(modernEvent('server/discover'));
+    const access = lines.map((l) => JSON.parse(l)).find((o) => o.rpc === 'server/discover');
+    expect(access).toMatchObject({
+      status: 400,
+      pv: MODERN,
+      client: 'probe-client/9.9.9',
+      era: 'modern_probe_fallback',
+    });
+    const emf = lines.map((l) => JSON.parse(l)).find((o) => o._aws);
+    expect(emf.Outcome).toBe('legacy_fallback');
+  });
+
+  it('still counts a genuinely bad request as client_error', async () => {
+    // The new bucket must not swallow real client faults.
+    const handle = makeHandler({}, ENV);
+    const ev = postEvent(initializeReq, { bearer: SECRET });
+    ev.body = '{not json';
+    const res = await handle(ev);
+    expect(res.statusCode).toBe(400);
+    const emf = lines.map((l) => JSON.parse(l)).find((o) => o._aws);
+    expect(emf.Outcome).toBe('client_error');
+  });
+
+  it('logs the client name on a normal initialize so a fallback can be matched to its probe', async () => {
+    const handle = makeHandler({}, ENV);
+    await handle(postEvent(initializeReq, { bearer: SECRET }));
+    const access = lines.map((l) => JSON.parse(l)).find((o) => o.rpc === 'initialize');
+    expect(access).toMatchObject({ status: 200, pv: '2025-03-26', client: 'test-client/0.0.0' });
+    expect(access.era).toBeUndefined();
+    expect(lines.map((l) => JSON.parse(l)).find((o) => o._aws).Outcome).toBe('ok');
   });
 });
