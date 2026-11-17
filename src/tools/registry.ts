@@ -2,8 +2,11 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { AhError } from '../errors.js';
 import type { ToolContext } from './context.js';
+import { TOOL_TITLES } from './titles.js';
 
 export interface ToolAnnotations {
+  /** Human-readable display name (mirrors the top-level `title`). */
+  title?: string;
   /** Advertised MCP hint: does not modify state. */
   readOnlyHint?: boolean;
   /** Advertised MCP hint: may perform destructive updates. */
@@ -16,6 +19,8 @@ export interface ToolAnnotations {
 
 export interface ToolDef<I = any, O = unknown> {
   name: string;
+  /** Display title. Optional here: real tools take theirs from src/tools/titles.ts. */
+  title?: string;
   description: string;
   inputSchema: z.ZodType<I>;
   handler: (input: I, ctx: ToolContext) => Promise<O>;
@@ -29,6 +34,7 @@ export function defineTool<I, O>(def: ToolDef<I, O>): ToolDef<I, O> {
 
 export interface ListedTool {
   name: string;
+  title: string;
   description: string;
   inputSchema: Record<string, unknown>;
   annotations?: ToolAnnotations;
@@ -109,9 +115,41 @@ export function fingerprintMarker(fingerprint: string): string {
 }
 
 function formatZodError(error: z.ZodError): string {
-  return error.issues
-    .map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`)
-    .join('; ');
+  return error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
+}
+
+/** The display title for a tool. Throws rather than serving a tool without one. */
+export function titleFor(def: Pick<ToolDef, 'name' | 'title'>): string {
+  const title = def.title ?? TOOL_TITLES[def.name];
+  if (!title)
+    throw new Error(`Tool ${def.name} has no display title in src/tools/titles.ts (#196)`);
+  return title;
+}
+
+/**
+ * The annotations a client sees (#196).
+ *
+ * Every tool advertises exactly one of two shapes:
+ *   - readOnlyHint: true,  destructiveHint: false  — explicitly declared read-only
+ *   - readOnlyHint: false, destructiveHint: true   — everything else
+ *
+ * ⚠️ Fail-safe on purpose: a tool counts as read-only ONLY if its definition says
+ * `readOnlyHint: true`. Anything that writes, or that someone forgot to annotate,
+ * is advertised as able to change data, so clients ask before running it. Getting
+ * this wrong in the other direction (a write tool advertised as read-only) would let
+ * a client run it without asking. Other hints (idempotentHint, openWorldHint) pass
+ * through unchanged.
+ */
+export function servedAnnotations(
+  def: Pick<ToolDef, 'name' | 'title' | 'annotations'>,
+): ToolAnnotations {
+  const readOnly = def.annotations?.readOnlyHint === true;
+  return {
+    ...def.annotations,
+    title: titleFor(def),
+    readOnlyHint: readOnly,
+    destructiveHint: !readOnly,
+  };
 }
 
 export class ToolRegistry {
@@ -146,8 +184,9 @@ export class ToolRegistry {
       // The fingerprint ships INSIDE the description so a stale client holds a
       // stale marker (#173). Appended after it is computed, never folded in.
       description: `${t.description}\n\n${fingerprintMarker(toolFingerprint(t))}`,
+      title: titleFor(t),
       inputSchema: toJsonSchema(t.inputSchema),
-      ...(t.annotations ? { annotations: t.annotations } : {}),
+      annotations: servedAnnotations(t),
     }));
   }
 
