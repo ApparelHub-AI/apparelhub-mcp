@@ -33,6 +33,19 @@ describe('ships_to', () => {
     expect(res.garments[0].ships_to).toEqual(['US']);
   });
 
+  // The platform's display name is changing from "ToolboxPOD" to "Toolbox POD"; the lookup must
+  // depend on neither exact string. Every input spelling must resolve against both platform names.
+  for (const platformName of ['ToolboxPOD', 'Toolbox POD']) {
+    for (const input of ['toolbox pod', 'Toolbox POD', 'ToolboxPOD', 'toolbox-pod', 'TOOLBOXPOD']) {
+      it(`resolves "${input}" when the platform calls the provider "${platformName}"`, async () => {
+        const providers = { providers: [{ uuid: 'p0', name: 'Printful' }, { uuid: 'tb', name: platformName, ships_to: ['US'] }] };
+        const { api, calls } = apiSequence([providers, { products: [] }]);
+        await browseCatalog.handler({ provider: input }, fakeContext(api));
+        expect(calls[1]?.url).toContain('/merchandise/tb/products');
+      });
+    }
+  }
+
   it('carries ships_to on garment detail and the provider list', async () => {
     const { api } = apiSequence([PROVIDERS, { name: 'Softstyle Tee', ships_to: ['US'], variants: [] }]);
     const res = (await getGarmentDetails.handler(
