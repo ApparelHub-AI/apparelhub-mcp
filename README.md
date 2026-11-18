@@ -171,14 +171,15 @@ environment.
 
 ## Tools
 
-127 tools. [`docs/TOOLS.md`](./docs/TOOLS.md) walks through the core groups; call `tools/list` from
+134 tools. [`docs/TOOLS.md`](./docs/TOOLS.md) walks through the core groups; call `tools/list` from
 your agent for the authoritative live schemas.
 
 - **Setup & connect** — `check_setup_readiness` (what the account has, what it needs, the single
   next action), `list_connectable_providers`, `connect_fulfillment_provider` and
   `connect_sales_channel` (API-token providers connected entirely in chat), plus
   `start_channel_connect` / `check_connection_status` for the browser-based ones (Printful,
-  Shopify, TikTok Shop, Fourthwall).
+  Toolbox POD, Shopify, TikTok Shop, Fourthwall), and `check_fulfillment_connection` (live check of
+  a provider connection, with the exact fixes the merchant needs).
 - **Read** — `list_my_workspaces`, `list_my_stores`, `list_my_designs`, `get_design_collection`,
   `list_my_products`, `list_my_orders`, `get_order_details`.
 - **Catalog** — `browse_catalog`, `get_garment_details`, `find_garments` (search every connected
@@ -191,7 +192,8 @@ your agent for the authoritative live schemas.
   `diagnose_tiktok_listings`, and split primitives `create_product`, `add_variants`,
   `sync_to_fulfillment`, `sync_to_channel`.
 - **Orders** — lifecycle (`approve_order`, `unapprove_order`, `hold_order`, `cancel_order`,
-  `confirm_order`, `submit_order_to_fulfillment`, `check_order_status`, `reconcile_order`),
+  `confirm_order`, `submit_order_to_fulfillment`, `check_order_status`, `reconcile_order`,
+  `reroute_order` for an order held because its provider cannot deliver to the address),
   draft edits (`add_order_item`, `remove_order_item`), and design-approval holds
   (`list_order_holds`, `approve_order_hold`, `request_hold_changes`).
 - **Fulfillment issues** — `report_fulfillment_issue` (report a defect on an order),

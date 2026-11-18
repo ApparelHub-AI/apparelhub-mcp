@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { defineTool, type ToolDef } from './registry.js';
 import { AhError } from '../errors.js';
-import { asArray, isRecord, num, str, total, variantRef } from '../util/shape.js';
+import { asArray, isRecord, num, shipsToField, str, total, variantRef } from '../util/shape.js';
 import {
   garmentWarnings,
   pricingFloor,
@@ -27,6 +27,11 @@ const providerInput = z
     'The fulfillment provider to browse, by name (case-insensitive). Must be a provider this account has access to — call list_catalog_providers to see valid values (the set is account-specific). An unrecognized name returns the list of providers available to the account.',
   );
 
+/** Lowercase and drop everything but letters and digits, so "Toolbox POD" matches "ToolboxPOD". */
+export function normalizeProviderName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
 /**
  * Resolve a provider NAME to its provider_uuid via the account's LIVE GET /merchandise/providers list.
  * That endpoint is account-scoped and auth-gated, so it is the single source of truth for which
@@ -40,10 +45,13 @@ async function resolveProviderUuid(
 ): Promise<string> {
   const raw = await ctx.api.get('merchandise/providers', { workspace, signal: ctx.signal });
   const providers = asArray(raw, 'providers', 'merchandise_providers');
-  const target = providerName.toLowerCase();
+  // Compared with spaces and punctuation stripped: a provider's public name and the name the
+  // platform returns can differ only in spacing ("Toolbox POD" vs "ToolboxPOD"), and an agent
+  // that uses the public name must still resolve it.
+  const target = normalizeProviderName(providerName);
   for (const p of providers) {
-    const name = (str(p, 'name', 'provider_name') ?? '').toLowerCase();
-    if (name.includes(target)) {
+    const name = normalizeProviderName(str(p, 'name', 'provider_name') ?? '');
+    if (target && name.includes(target)) {
       const uuid = str(p, 'uuid', 'provider_uuid');
       if (uuid) return uuid;
     }
@@ -102,13 +110,14 @@ function mapGarment(raw: unknown): Record<string, unknown> {
     image_url: str(raw, 'image_url', 'thumbnail_url', 'image'),
     variant_count: num(raw, 'variant_count', 'variants_count') ?? (variants.length || undefined),
     ...decorationFields(raw),
+    ...shipsToField(raw),
   };
 }
 
 export const browseCatalog = defineTool({
   name: 'browse_catalog',
   description:
-    "Browse ONE fulfillment provider's catalog for garments to print on. `category` is resolved against THAT provider's own taxonomy (providers use different vocabularies for the same idea) and an unknown category is rejected with the valid list rather than quietly returning everything. `keyword` matches product names across the whole catalog. ALWAYS read `warnings` in the response: they tell you when your results are narrower than you asked for -- e.g. a category that only exists inside one department. Each garment carries `decoration_method` / `accepts_photoreal` (`accepts_photoreal` absent means the provider publishes no signal -- unchecked, NOT unsuitable). This searches a SINGLE provider: to ask what the whole account can do, or before concluding a garment cannot take a design, use find_garments. Read-only.",
+    "Browse ONE fulfillment provider's catalog for garments to print on. `category` is resolved against THAT provider's own taxonomy (providers use different vocabularies for the same idea) and an unknown category is rejected with the valid list rather than quietly returning everything. `keyword` matches product names across the whole catalog. ALWAYS read `warnings` in the response: they tell you when your results are narrower than you asked for -- e.g. a category that only exists inside one department. Each garment carries `decoration_method` / `accepts_photoreal` (`accepts_photoreal` absent means the provider publishes no signal -- unchecked, NOT unsuitable). This searches a SINGLE provider: to ask what the whole account can do, or before concluding a garment cannot take a design, use find_garments. A garment carrying `ships_to` (ISO country codes, e.g. [\"US\"]) can only be delivered to those countries: orders going anywhere else are held, never printed. No `ships_to` means worldwide. Read-only.",
   inputSchema: z.object({
     provider: providerInput,
     category: z.string().optional().describe('e.g. "t-shirts", "hoodies", "mugs".'),
@@ -197,7 +206,7 @@ function mapTemplate(raw: unknown): Record<string, unknown> {
 export const getGarmentDetails = defineTool({
   name: 'get_garment_details',
   description:
-    'Full detail for one garment: the variant matrix (colors/sizes/costs), print templates, ApparelHub pricing floor, and quality tier. Read-only.',
+    'Full detail for one garment: the variant matrix (colors/sizes/costs), print templates, ApparelHub pricing floor, and quality tier. Variant `cost` is the provider\'s live base cost; read it here every time rather than reusing a number from memory, because provider prices change. `ships_to` (ISO country codes) appears when the garment can only be delivered to some countries; tell the user before building on it if they sell to buyers elsewhere. Toolbox POD garments ship to US addresses only and their shipping is one flat charge per order, not per item, so the cost advantage grows with items per order. Read-only.',
   inputSchema: z.object({
     provider: providerInput,
     product_ref_id: z
@@ -247,6 +256,7 @@ export const getGarmentDetails = defineTool({
         base_cost: baseCost,
         image_url: str(g, 'image_url', 'thumbnail_url', 'image'),
         ...decorationFields(g),
+        ...shipsToField(g),
       },
       variants: asArray(variantsRaw).map(mapVariant),
       print_templates: asArray(templatesRaw).map(mapTemplate),
@@ -338,6 +348,7 @@ export const findGarments = defineTool({
       image_url: str(r, 'image_url', 'image'),
       variant_count: num(r, 'variant_count'),
       ...decorationFields(r),
+      ...shipsToField(r),
     }));
 
     // providers_searched / providers_unavailable / warnings are passed through
@@ -386,7 +397,7 @@ export const recommendGarmentTool = defineTool({
 export const listCatalogProviders = defineTool({
   name: 'list_catalog_providers',
   description:
-    'List the fulfillment providers this account can browse catalogs from. Use this to discover valid `provider` values for browse_catalog / get_garment_details — the set is account-specific and auth-gated on the platform (a provider only appears if this account is entitled to it), so never assume a fixed list. Read-only.',
+    'List the fulfillment providers this account can browse catalogs from. Use this to discover valid `provider` values for browse_catalog / get_garment_details — the set is account-specific and auth-gated on the platform (a provider only appears if this account is entitled to it), so never assume a fixed list. A provider with `ships_to` (ISO country codes) delivers only to those countries; no `ships_to` means worldwide. Read-only.',
   inputSchema: z.object({
     workspace: z.string().optional(),
   }),
@@ -402,6 +413,7 @@ export const listCatalogProviders = defineTool({
         uuid: str(p, 'uuid', 'provider_uuid'),
         active: isRecord(p) ? Boolean(p.active) : undefined,
         auth_mode: str(p, 'user_auth_mode'),
+        ...shipsToField(p),
       }))
       .filter((p) => p.name);
     return { providers, total: providers.length };

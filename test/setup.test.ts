@@ -445,11 +445,16 @@ describe('check_connection_status', () => {
 });
 
 describe('setup tool surface', () => {
-  it('exports all six tools with sane annotations', () => {
-    expect(setupTools).toHaveLength(6);
+  it('exports all seven tools with sane annotations', () => {
+    expect(setupTools).toHaveLength(7);
     const readOnly = setupTools.filter((t) => t.annotations?.readOnlyHint).map((t) => t.name);
     expect(readOnly.sort()).toEqual(
-      ['check_connection_status', 'check_setup_readiness', 'list_connectable_providers'].sort(),
+      [
+        'check_connection_status',
+        'check_fulfillment_connection',
+        'check_setup_readiness',
+        'list_connectable_providers',
+      ].sort(),
     );
     // Every tool talks to the platform.
     expect(setupTools.every((t) => t.annotations?.openWorldHint)).toBe(true);

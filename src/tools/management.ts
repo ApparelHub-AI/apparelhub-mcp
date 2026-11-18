@@ -410,9 +410,11 @@ export const estimateOrderCosts = defineTool({
     'Estimate production + shipping + tax + total for an order WITHOUT creating it (read-only against ' +
     'the fulfillment provider, no order placed). Give the store, the recipient, and the variants + ' +
     'quantities. Use to preview landed cost before placing an order. ' +
-    'AVAILABLE FOR PRINTFUL AND GELATO ONLY: Printify offers no pre-order estimate, so a Printify-' +
+    'AVAILABLE FOR PRINTFUL, GELATO AND TOOLBOX POD ONLY: Printify offers no pre-order estimate, so a Printify-' +
     'fulfilled store returns a refusal rather than a number — do not retry it, and do not present a ' +
-    'cross-provider landed-cost comparison that silently omits Printify. ' +
+    'cross-provider landed-cost comparison that silently omits Printify. Toolbox POD delivers to US ' +
+    'addresses only (a non-US recipient is refused) and charges one flat shipping fee per order, so ' +
+    'estimate the real basket rather than a single item when comparing it. ' +
     'Both country_code AND address1 are required; the platform rejects the request without a street ' +
     'address. The variants must already be synced to the fulfillment provider.',
   inputSchema: z.object({

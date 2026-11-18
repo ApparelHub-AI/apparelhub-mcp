@@ -82,3 +82,15 @@ export function total(raw: unknown, pageLength: number): number {
   const t = num(raw, 'total', 'count', 'total_count');
   return t ?? pageLength;
 }
+
+/**
+ * Where a provider (and so every garment and product on it) can ship, as ISO 3166-1 alpha-2
+ * codes. The platform sends `ships_to: null` (or no field) for worldwide. An EMPTY list is also
+ * worldwide, never "ships nowhere". Only a non-empty list is a limit, and only then is the field
+ * emitted, so an agent sees `ships_to` exactly when it has to act on it.
+ */
+export function shipsToField(raw: unknown): Record<string, unknown> {
+  if (!isRecord(raw) || !Array.isArray(raw.ships_to)) return {};
+  const codes = (raw.ships_to as unknown[]).filter((c): c is string => typeof c === 'string');
+  return codes.length ? { ships_to: codes } : {};
+}
