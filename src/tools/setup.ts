@@ -115,7 +115,7 @@ export const checkSetupReadiness = defineTool({
 export const listConnectableProviders = defineTool({
   name: 'list_connectable_providers',
   description:
-    'Fulfillment providers and sales channels this account may connect, each marked with how it connects: connect_mode "in_chat" means you can complete it here by asking for a credential, "browser" means you must dispatch an authorization link with start_channel_connect and poll. Also returns where the merchant generates the credential, when there is one. Use this before asking a user for anything, so you ask for the right thing.',
+    'Fulfillment providers and sales channels this account may connect, each marked with how it connects: connect_mode "in_chat" means you can complete it here by asking for a credential, "browser" means you must dispatch an authorization link with start_channel_connect and poll. Also returns where the merchant generates the credential, when there is one. Use this before asking a user for anything, so you ask for the right thing. Toolbox POD (a US print shop) connects by browser sign-in only: never ask for a Toolbox POD key. A provider whose `ships_to` lists countries (Toolbox POD: US) can only deliver orders to those countries; mention it when the user sells to buyers elsewhere.',
   inputSchema: z.object({ workspace: WORKSPACE }),
   annotations: { readOnlyHint: true, openWorldHint: true },
   handler: async (input, ctx) => {
@@ -147,7 +147,7 @@ export const listConnectableProviders = defineTool({
 export const connectFulfillmentProvider = defineTool({
   name: 'connect_fulfillment_provider',
   description:
-    'Connect an API-token fulfillment provider (Printify, Gelato) to a store, entirely in chat. Validates the token first, so a bad token fails before anything is stored. If the token maps to more than one shop the result asks you to pick one and lists them — call again with shop_id set. For Printful use start_channel_connect instead: it needs a browser. Never repeat the token back to the user.',
+    'Connect an API-token fulfillment provider (Printify, Gelato) to a store, entirely in chat. Validates the token first, so a bad token fails before anything is stored. If the token maps to more than one shop the result asks you to pick one and lists them — call again with shop_id set. For Printful and Toolbox POD use start_channel_connect instead: they connect by browser sign-in, and Toolbox POD has no token to paste. Never repeat the token back to the user.',
   inputSchema: z.object({
     store_uuid: STORE_UUID,
     provider_uuid: PROVIDER_UUID,
@@ -252,7 +252,7 @@ export const connectSalesChannel = defineTool({
 export const startChannelConnect = defineTool({
   name: 'start_channel_connect',
   description:
-    'Begin a browser-based connection (Printful, Shopify, TikTok Shop, Fourthwall). Shopify additionally requires shop_url, the merchant myshopify domain — ask for it before calling. Returns an authorization URL to give the user. THE CONNECTION IS NOT FINISHED WHEN THIS RETURNS. You must keep polling check_connection_status (passing the same provider_uuid) until it reports connected, then tell the user. The browser tab where they authorize is NOT this conversation and cannot report back to you, so polling is the only way you or they will learn it worked. Poll every few seconds, up to about two minutes, and if it has not landed by then ask whether they finished authorizing rather than giving up silently. If they need to create an upstream account first, let them, then call this again for a fresh link.',
+    'Begin a browser-based connection (Printful, Toolbox POD, Shopify, TikTok Shop, Fourthwall). Toolbox POD: the user signs in to (or creates) their own Toolbox POD account, picks which of their Toolbox POD stores to connect, and approves; they pay Toolbox POD directly, and should set a spending limit on that consent screen, because until purchasing is on with a limit, orders wait for them to pay. After it connects, call check_fulfillment_connection and relay any `fixes` to the user word for word. Shopify additionally requires shop_url, the merchant myshopify domain — ask for it before calling. Returns an authorization URL to give the user. THE CONNECTION IS NOT FINISHED WHEN THIS RETURNS. You must keep polling check_connection_status (passing the same provider_uuid) until it reports connected, then tell the user. The browser tab where they authorize is NOT this conversation and cannot report back to you, so polling is the only way you or they will learn it worked. Poll every few seconds, up to about two minutes, and if it has not landed by then ask whether they finished authorizing rather than giving up silently. If they need to create an upstream account first, let them, then call this again for a fresh link.',
   inputSchema: z.object({
     provider_uuid: PROVIDER_UUID,
     kind: z
@@ -474,6 +474,42 @@ export const checkConnectionStatus = defineTool({
   },
 });
 
+export const checkFulfillmentConnection = defineTool({
+  name: 'check_fulfillment_connection',
+  description:
+    'Live check of one store\'s fulfillment provider connection: does the credential still work, and is anything on the provider side blocking orders. `healthy` is true (working), false (the merchant must act) or null (could not tell: the provider was throttling or unreachable; do NOT ask the user to reconnect on null). ' +
+    'Some providers (Toolbox POD) also return an itemised report: `checks` (token, me, scopes, mode, purchasing, webhook), each with `ok` true, false or null (unknown), and `fixes`, plain sentences telling the merchant exactly what to switch on. Relay every `fixes` entry to the user word for word. `checks.purchasing.ok` false means no spending limit is set, so paid orders will wait until the merchant turns purchasing on in their Toolbox POD account. `mode` "test" is a sandbox connection that never charges or prints. ' +
+    'Use after connecting a provider, and whenever orders are stuck before production. Read-only on the merchant\'s data, but it does call the provider (an OAuth probe may refresh the stored access token), so do not poll it: use check_connection_status for polling.',
+  inputSchema: z.object({
+    store_uuid: STORE_UUID,
+    provider_uuid: PROVIDER_UUID,
+    workspace: WORKSPACE,
+  }),
+  annotations: { readOnlyHint: true, openWorldHint: true },
+  handler: async (input, ctx) => {
+    const raw = rec(
+      await ctx.api.get(
+        `store/${enc(input.store_uuid)}/merchandise_provider/${enc(input.provider_uuid)}/connection/health`,
+        { workspace: input.workspace, signal: ctx.signal },
+      ),
+    );
+    const fixes = Array.isArray(raw.fixes)
+      ? raw.fixes.filter((f): f is string => typeof f === 'string')
+      : [];
+    return {
+      ...raw,
+      guidance:
+        raw.healthy === null
+          ? 'Could not tell: the provider was busy or unreachable. This says nothing about the connection; try again later and do not ask the user to reconnect.'
+          : fixes.length
+            ? `Tell the user what to fix: ${fixes.join(' ')}`
+            : raw.healthy === false
+              ? 'The connection needs the merchant. If `remedy` is reauthorize, dispatch start_channel_connect for a fresh sign-in link.'
+              : 'The connection is working.',
+    };
+  },
+});
+
 export const setupTools = [
   checkSetupReadiness,
   listConnectableProviders,
@@ -481,4 +517,5 @@ export const setupTools = [
   connectSalesChannel,
   startChannelConnect,
   checkConnectionStatus,
+  checkFulfillmentConnection,
 ];

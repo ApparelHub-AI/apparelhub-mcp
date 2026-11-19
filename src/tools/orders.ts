@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { defineTool, type ToolDef } from './registry.js';
 import { asArray, isRecord, num, str, total, viewUrl } from '../util/shape.js';
+import { holdFields } from './read.js';
 
 // Order lifecycle + design-approval holds (capability-gap tools). Thin, clean projections over
 // the /agents/v1/orders/{uuid}/... endpoints. Each tool takes an order_uuid (from list_my_orders)
@@ -63,6 +64,9 @@ function actionResult(orderUuid: string, raw: unknown): Record<string, unknown> 
     order_uuid: orderUuid,
     view_url: viewUrl.order(orderUuid),
     ...fulfillmentSummary(orderPayload(raw)),
+    // A lifecycle action can land on (or produce) a held order, e.g. a confirm or submit for an
+    // address the provider cannot deliver to. Without this the agent would read a bare status.
+    ...holdFields(orderPayload(raw)),
   };
 }
 
@@ -152,7 +156,7 @@ export const holdOrder = defineTool({
 export const cancelOrder = defineTool({
   name: 'cancel_order',
   description:
-    'Cancel an order. Cancels it locally and, where possible, cancels the draft/order at the fulfillment provider (Printful/Printify). This does NOT refund the customer on the sales channel — the channel is the source of payment. Destructive: only cancel when the user explicitly asks.',
+    'Cancel an order. Cancels it locally and, where possible, cancels the draft/order at the fulfillment provider (Printful/Printify). This does NOT refund the customer on the sales channel — the channel is the source of payment. Destructive: only cancel when the user explicitly asks. Toolbox POD: an order the merchant has already paid for is final and usually cannot be cancelled once paid; if the cancel is refused, tell the user to contact Toolbox POD support about that order. An order held because its provider cannot deliver to the address was never sent or charged, so cancelling it is always possible; remind the user to refund the customer on their storefront.',
   inputSchema: orderInput,
   annotations: { destructiveHint: true, openWorldHint: true },
   handler: async (input, ctx) => {
@@ -167,7 +171,7 @@ export const cancelOrder = defineTool({
 export const confirmOrder = defineTool({
   name: 'confirm_order',
   description:
-    'Confirm a DRAFT order to send it into production at the fulfillment provider. Only works for orders in "draft" status that have already been submitted to a provider (have a provider order id). Use after submit_order_to_fulfillment on a "prepare, then I confirm" store.',
+    'Confirm a DRAFT order to send it into production at the fulfillment provider. Only works for orders in "draft" status that have already been submitted to a provider (have a provider order id). Use after submit_order_to_fulfillment on a "prepare, then I confirm" store. Toolbox POD: confirming is what PAYS for the order, charged to the card on the merchant\'s own Toolbox POD account within the spending limit they set when connecting; with no spending limit on, the order waits for the merchant to pay. Once paid it is final (cancellation is usually not possible). If the result carries `hold_details`, the order was NOT confirmed: read get_order_details guidance.',
   inputSchema: orderInput,
   annotations: { idempotentHint: true, openWorldHint: true },
   handler: async (input, ctx) => {
@@ -184,7 +188,7 @@ export const confirmOrder = defineTool({
 export const submitOrderToFulfillment = defineTool({
   name: 'submit_order_to_fulfillment',
   description:
-    'Manually submit an order to its fulfillment provider (Printful/Printify) as a DRAFT. For sales-channel orders this auto-fetches the recipient from the channel. Use to un-stick a paid order that never got submitted; confirm it afterward with confirm_order if the store requires confirmation.',
+    'Manually submit an order to its fulfillment provider (Printful/Printify) as a DRAFT. For sales-channel orders this auto-fetches the recipient from the channel. Use to un-stick a paid order that never got submitted; confirm it afterward with confirm_order if the store requires confirmation. An order going to a country its provider cannot deliver to (see `ships_to`) is refused and stays held with `hold_details` code `destination_unsupported`; resubmitting will not help.',
   inputSchema: orderInput,
   annotations: { idempotentHint: true, openWorldHint: true },
   handler: async (input, ctx) => {
@@ -317,6 +321,48 @@ export const reconcileOrder = defineTool({
 });
 
 // ---------------------------------------------------------------------------
+// Destination holds: move an order its provider cannot deliver
+// ---------------------------------------------------------------------------
+
+export const rerouteOrder = defineTool({
+  name: 'reroute_order',
+  description:
+    'Move an order that is held because its fulfillment provider cannot deliver to the address (get_order_details shows `hold_details.code` `destination_unsupported`) to the same design on a provider that ships there. Pass the product_uuid from `hold_details.suggested_reroute.product_uuid`; use a different product only if the user names it. The platform creates the order in the store that sells that product, sends it there as a draft, and closes the held original; the storefront link and tracking move with it. ' +
+    'Allowed only when the target product\'s store is connected to the SAME storefront the order came from (an order entered by hand, with no storefront link, may move to any store). When `suggested_reroute` is null no move is allowed: do not call this, tell the user to cancel the order and refund the customer on their storefront. ' +
+    'Refusals (HTTP 409) carry a merchant-readable `message`; relay it: not_destination_held, destination_unsupported, product_not_in_connected_store, reroute_variants_missing, recipient_unavailable, reroute_channel_mismatch. Ask the user before calling: it changes which provider prints and charges for the order.',
+  inputSchema: z.object({
+    order_uuid: z.string().min(1).describe('The held order uuid (from list_my_orders / get_order_details).'),
+    product_uuid: z
+      .string()
+      .min(1)
+      .describe(
+        'The product to fulfill the order with: hold_details.suggested_reroute.product_uuid, unless the user names another product with the same design.',
+      ),
+    workspace: z.string().optional().describe('Workspace uuid (agency accounts).'),
+  }),
+  annotations: { openWorldHint: true },
+  handler: async (input, ctx) => {
+    const raw = await ctx.api.post(`orders/${enc(input.order_uuid)}/reroute`, {
+      body: { product_uuid: input.product_uuid },
+      workspace: input.workspace,
+      signal: ctx.signal,
+    });
+    const payload = orderPayload(raw);
+    // The move produces a NEW order in the target store; report its uuid when the platform
+    // returns one so the agent follows the order the merchant now has to watch.
+    const newUuid = str(payload, 'uuid', 'order_uuid');
+    const out: Record<string, unknown> = {
+      held_order_uuid: input.order_uuid,
+      ...actionResult(newUuid ?? input.order_uuid, raw),
+      rerouted_to_product_uuid: input.product_uuid,
+    };
+    const warnings = isRecord(raw) ? asArray(raw.warnings) : [];
+    if (warnings.length) out.warnings = warnings;
+    return out;
+  },
+});
+
+// ---------------------------------------------------------------------------
 // Design-approval holds
 // ---------------------------------------------------------------------------
 
@@ -430,6 +476,7 @@ export const orderTools: ToolDef[] = [
   removeOrderItem,
   checkOrderStatus,
   reconcileOrder,
+  rerouteOrder,
   listOrderHolds,
   approveOrderHold,
   requestHoldChanges,

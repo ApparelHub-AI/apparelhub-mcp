@@ -11,6 +11,7 @@
  */
 export const TOOL_TITLES: Readonly<Record<string, string>> = {
   check_setup_readiness: 'Check account setup',
+  check_fulfillment_connection: 'Check a fulfillment provider connection',
   list_connectable_providers: 'List connectable providers',
   connect_fulfillment_provider: 'Connect a fulfillment provider',
   connect_sales_channel: 'Connect a sales channel',
@@ -67,6 +68,7 @@ export const TOOL_TITLES: Readonly<Record<string, string>> = {
   remove_order_item: 'Remove order item',
   check_order_status: 'Refresh order status',
   reconcile_order: 'Reconcile order with its channel',
+  reroute_order: 'Move a held order to a provider that ships there',
   list_order_holds: 'List design-approval holds',
   approve_order_hold: 'Approve a design-approval hold',
   request_hold_changes: 'Request changes on a held order',

@@ -9,18 +9,18 @@ the human-readable summary. Read tools are read-only; mutating tools default to 
 | Tool | Summary |
 |---|---|
 | `list_my_workspaces` | The workspaces this account can act in, each with its uuid. Resolve a client/brand name to the uuid the other tools scope with. |
-| `list_my_stores` | Stores with their fulfillment providers + connected sales channels. |
+| `list_my_stores` | Stores with their fulfillment providers + connected sales channels. Providers carry `ships_to` when they deliver only to some countries; a store carries `shipping_warnings` when a channel sells to countries a provider cannot reach. |
 | `list_my_designs` | Generated design images (newest first). |
 | `get_design_collection` | The other designs from the same generation (a `concepts` set), with the product name and description the model wrote for each, and a warning for any that will print with their background. Empty for an ordinary design. |
 | `list_my_products` | Products with fulfillment + channel sync status (optionally per store). |
 | `list_my_orders` | Recent orders across channels. |
-| `get_order_details` | One order: line items, payment + fulfillment status, shipments. |
+| `get_order_details` | One order: line items, payment + fulfillment status, shipments. A held order carries `hold_details` (code `destination_unsupported` = going to a country its provider cannot deliver to; never sent, never charged) and, when a move is allowed, `suggested_reroute`. |
 
 ## Catalog
 
 | Tool | Summary |
 |---|---|
-| `browse_catalog` | Browse a provider catalog (Printful/Printify) for garments. |
+| `browse_catalog` | Browse one provider's catalog (Printful, Printify, Gelato, Toolbox POD, ...) for garments. Garments carry `ships_to` when they deliver only to some countries. |
 | `get_garment_details` | Variant matrix, print templates, pricing floor, quality tier. Surfaces the BC 3001 AQUA-vs-Navy variant warning. |
 | `recommend_garment` | Knowledge-based garment pick + rationale + alternatives (BC 3001 vs Comfort Colors, budget vs premium). |
 
@@ -76,6 +76,7 @@ Mutating tools **default to a dry run**; applying only takes safe actions.
 | `submit_order_to_fulfillment` | Submit an order to the fulfillment provider as a draft. |
 | `check_order_status` | Poll the provider + reconcile holds/tracking for one order. |
 | `reconcile_order` | Pull payment/refund/cancellation from the sales channel and push tracking to it. Returns `{reconcilable, changes, ...}`. |
+| `reroute_order` | Move a destination-held order to the same design on a provider that ships there (`hold_details.suggested_reroute.product_uuid`). Only within the storefront the order came from; otherwise cancel and refund on the storefront. |
 | `list_order_holds` | List an order's holds (e.g. design-approval). |
 | `approve_order_hold` | Approve one hold. May return `deferred` when the provider can't flip it (with a dashboard link). |
 | `request_hold_changes` | Request changes on a hold (`change_kind` minor/full_replacement + notes). |

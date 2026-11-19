@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { defineTool, type ToolDef } from './registry.js';
-import { asArray, bool, isRecord, num, str, total, viewUrl } from '../util/shape.js';
+import { asArray, bool, isRecord, num, shipsToField, str, total, viewUrl } from '../util/shape.js';
 
 // Read tools (tool spec §5). Thin, clean projections over the /agents/v1 read endpoints.
 // Mappers are deliberately tolerant of field-name variants (uuid vs *_uuid, channel vs
@@ -17,6 +17,7 @@ function mapProvider(raw: unknown): Record<string, unknown> {
   return {
     provider_uuid: str(raw, 'uuid', 'provider_uuid'),
     name: str(raw, 'name', 'provider_name'),
+    ...shipsToField(raw),
   };
 }
 
@@ -57,6 +58,13 @@ function mapStore(raw: unknown): Record<string, unknown> {
       is_default: bool(raw, 'workspace_is_default'),
     };
   }
+  // A sales channel that sells to more countries than one of the store's fulfillment providers
+  // can deliver to (e.g. a storefront open worldwide with a US-only provider). Passed through
+  // untouched: each entry has code, severity, provider_name, provider_ships_to, channel and a
+  // merchant-readable message. 'channel_destinations_unknown' (severity info) means the platform
+  // could not read the channel's shipping countries, which is NOT the same as fine.
+  const shippingWarnings = isRecord(raw) ? asArray(raw.shipping_warnings) : [];
+  if (shippingWarnings.length) store.shipping_warnings = shippingWarnings;
   if (uuid) store.view_url = viewUrl.store(uuid);
   return store;
 }
@@ -64,7 +72,7 @@ function mapStore(raw: unknown): Record<string, unknown> {
 export const listMyStores = defineTool({
   name: 'list_my_stores',
   description:
-    "List the merchant's ApparelHub stores, each with its fulfillment providers (Printful/Printify) and connected sales channels (Shopify/WooCommerce/Wix). Read-only.",
+    "List the merchant's ApparelHub stores, each with its fulfillment providers (Printful, Printify, Gelato, Toolbox POD, ...) and connected sales channels (Shopify/WooCommerce/Wix/TikTok Shop). A provider carrying `ships_to` (ISO country codes) can only deliver to those countries. A store carrying `shipping_warnings` sells on a channel that ships to more countries than one of its providers can reach: tell the user each warning's `message`, because orders from those other countries will be held rather than printed. Read-only.",
   inputSchema: z.object({
     workspace: z
       .string()
@@ -296,6 +304,8 @@ function mapProductListItem(raw: unknown): Record<string, unknown> {
     updated: str(raw, 'updated', 'updated_at'),
     fulfillment_status: mapFulfillmentStatus(raw),
     channel_statuses: mapChannelStatuses(raw),
+    // From the product's fulfillment provider. Absent = worldwide.
+    ...shipsToField(isRecord(raw) && !Array.isArray(raw.ships_to) && isRecord(raw.provider) ? raw.provider : raw),
   };
   if (uuid) item.view_url = viewUrl.product(uuid);
   return item;
@@ -304,7 +314,7 @@ function mapProductListItem(raw: unknown): Record<string, unknown> {
 export const listMyProducts = defineTool({
   name: 'list_my_products',
   description:
-    "List the merchant's products with their fulfillment and sales-channel sync status. Each channel entry also carries `health` — what the channel last said about the listing. A channel can remove or deactivate a listing at any time, so check `health`, not just `sync_status`: a product can read 'Synced' historically and still be gone. Pass store_uuid to scope to one store; omit for all products. Read-only.",
+    "List the merchant's products with their fulfillment and sales-channel sync status. Each channel entry also carries `health` — what the channel last said about the listing. A channel can remove or deactivate a listing at any time, so check `health`, not just `sync_status`: a product can read 'Synced' historically and still be gone. `ships_to` (ISO country codes) appears on a product whose provider only delivers to some countries; absent means worldwide. Pass store_uuid to scope to one store; omit for all products. Read-only.",
   inputSchema: z.object({
     store_uuid: z.string().optional().describe('Scope to one store (omit for all products).'),
     status: z.enum(['active', 'draft', 'archived']).optional(),
@@ -342,6 +352,9 @@ function mapOrderItem(raw: unknown): Record<string, unknown> {
     product_name: str(raw, 'product_name', 'name'),
     quantity: num(raw, 'quantity', 'qty'),
     sku: str(raw, 'sku'),
+    // Matches hold_details.product_variant_ids, which is how a held line is identified
+    // (order lines have no uuid of their own).
+    product_variant_id: str(raw, 'product_variant_id'),
   };
 }
 
@@ -351,6 +364,22 @@ function mapShipment(raw: unknown): Record<string, unknown> {
     tracking_number: str(raw, 'tracking_number', 'tracking'),
     status: str(raw, 'status'),
   };
+}
+
+/**
+ * Why the platform is holding an order, when it is. `hold_details` is the structured reason
+ * (e.g. code 'destination_unsupported': the order is going to a country its provider cannot
+ * deliver to, so it was never sent for printing). Passed through untouched, including
+ * `suggested_reroute` (null when no move is allowed). `hold_reason` is the plain-text version.
+ */
+export function holdFields(raw: unknown): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (!isRecord(raw)) return out;
+  if (isRecord(raw.hold_details)) out.hold_details = raw.hold_details;
+  const reason = str(raw, 'hold_reason');
+  if (reason) out.hold_reason = reason;
+  if (raw.requires_approval === true) out.requires_approval = true;
+  return out;
 }
 
 function mapOrderListItem(raw: unknown): Record<string, unknown> {
@@ -378,6 +407,7 @@ function mapOrderListItem(raw: unknown): Record<string, unknown> {
   // Their store fulfils it; ApparelHub only records it.
   const fulfilledBy = str(raw, 'fulfilled_by');
   if (fulfilledBy) out.fulfilled_by = fulfilledBy;
+  Object.assign(out, holdFields(raw));
   const customer = str(raw, 'customer_name', 'recipient_name');
   if (customer) out.customer_name = customer;
   const shipments = asArray(isRecord(raw) ? raw.shipments : undefined);
@@ -416,7 +446,7 @@ function mapOrderDetail(raw: unknown): Record<string, unknown> {
 export const listMyOrders = defineTool({
   name: 'list_my_orders',
   description:
-    "List the merchant's recent orders across channels. An order with `fulfilled_by: 'merchant'` is for the merchant's own products (brought in from their sales channel, not made in ApparelHub): their store fulfils it, ApparelHub only records it, and approve / submit / confirm / cancel / hold / record-payment refuse it with `fulfilled_by_merchant`; tell the user to act on it in their store. Pass fulfilled_by to list only those ('merchant') or only ApparelHub-fulfilled orders ('apparelhub'). An order carrying `needs_attention` is one the merchant must act on (the fulfillment provider failed or cancelled it, the buyer cancelled after production started, it was paid but never sent to production, the sales channel's ship-by deadline is close or missed, or the channel refused the tracking): always tell the user about those, with the `message`. `ship_by_at` is the channel's ship-by deadline (UTC) when it has one. Read-only.",
+    "List the merchant's recent orders across channels. An order with `fulfilled_by: 'merchant'` is for the merchant's own products (brought in from their sales channel, not made in ApparelHub): their store fulfils it, ApparelHub only records it, and approve / submit / confirm / cancel / hold / record-payment refuse it with `fulfilled_by_merchant`; tell the user to act on it in their store. An order carrying `hold_details` with code 'destination_unsupported' is going to a country its fulfillment provider cannot deliver to: it was not sent for printing and the merchant was not charged. Open it with get_order_details and follow that tool's guidance. Pass fulfilled_by to list only those ('merchant') or only ApparelHub-fulfilled orders ('apparelhub'). An order carrying `needs_attention` is one the merchant must act on (the fulfillment provider failed or cancelled it, the buyer cancelled after production started, it was paid but never sent to production, the sales channel's ship-by deadline is close or missed, or the channel refused the tracking): always tell the user about those, with the `message`. `ship_by_at` is the channel's ship-by deadline (UTC) when it has one. Read-only.",
   inputSchema: z.object({
     status: z
       .enum(['pending', 'in_production', 'shipped', 'delivered', 'cancelled'])
@@ -451,7 +481,7 @@ export const listMyOrders = defineTool({
 export const getOrderDetails = defineTool({
   name: 'get_order_details',
   description:
-    'Full detail for one order: line items, payment + fulfillment status, shipments/tracking, and `ship_by_at` (the sales channel\'s ship-by deadline, UTC) when the channel has one. If `needs_attention` is present the order will not complete on its own; tell the user its `title` and `message`. `cost` and `profit` are this order\'s own figures once the provider has priced it. If `checkout_split` is present, the buyer\'s checkout was split into `checkout_split.order_count` orders across the merchant\'s stores and this order holds only its share: when asked how the sale did, report `checkout_split.profit` (the whole checkout), and never add it up across the orders in the split. Read-only.',
+    'Full detail for one order: line items, payment + fulfillment status, shipments/tracking, and `ship_by_at` (the sales channel\'s ship-by deadline, UTC) when the channel has one. If `needs_attention` is present the order will not complete on its own; tell the user its `title` and `message`. `cost` and `profit` are this order\'s own figures once the provider has priced it. If `checkout_split` is present, the buyer\'s checkout was split into `checkout_split.order_count` orders across the merchant\'s stores and this order holds only its share: when asked how the sale did, report `checkout_split.profit` (the whole checkout), and never add it up across the orders in the split. If `hold_details.code` is `destination_unsupported`, the order is going to `hold_details.country`, which its provider (`hold_details.provider_name`, delivering only to `hold_details.ships_to`) cannot reach, so it was never sent for printing and the provider has not charged the merchant. Tell the user `hold_details.message`. If `hold_details.suggested_reroute` is set, offer to move the order to that product with reroute_order; if it is null, no move is allowed and the merchant should cancel the order and refund the customer on their storefront. The held lines are the items whose product_variant_id is in `hold_details.product_variant_ids`. Read-only.',
   inputSchema: z.object({
     order_uuid: z.string().min(1).describe('The order uuid (from list_my_orders).'),
     workspace: z.string().optional(),

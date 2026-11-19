@@ -9,6 +9,38 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.24.0]
+
+### Added
+- **Toolbox POD as a fulfillment provider.** Tool descriptions now tell an agent how to work with
+  Toolbox POD, a US print shop: it connects by browser sign-in only (`start_channel_connect`,
+  never a pasted key), the merchant owns the account and pays Toolbox POD directly within a
+  spending limit they set, delivery is to US addresses only, shipping is one flat fee per order,
+  and a paid order is final. Costs are read live from the catalog, never quoted from memory.
+  `browse_catalog` / `get_garment_details` accept the public name "Toolbox POD" (provider names
+  now match ignoring spaces and punctuation).
+- **Shipping regions on every surface.** Providers, garments and products carry `ships_to` (ISO
+  country codes) when they deliver only to some countries; absent means worldwide. Stores carry
+  `shipping_warnings` when a sales channel sells to countries one of the store's providers cannot
+  reach.
+- **Destination holds.** Orders carry `hold_details` (and `hold_reason`) when the platform holds
+  one, including code `destination_unsupported`: an order going to a country its provider cannot
+  deliver to is held, never sent for printing and never charged. `get_order_details` explains what
+  to do; order lines now carry `product_variant_id` so held lines can be matched.
+- `reroute_order`: move a destination-held order to the same design on a provider that ships
+  there (`hold_details.suggested_reroute`). Allowed only within the storefront the order came
+  from; otherwise the merchant cancels and refunds on their storefront.
+- `check_fulfillment_connection`: live check of one store's fulfillment provider connection,
+  passing through any itemised `checks` and the plain-language `fixes` the merchant must act on
+  (for Toolbox POD: permissions, purchasing and spending limit, automatic order updates).
+
+### Changed
+- `connect_fulfillment_provider`, `start_channel_connect`, `list_connectable_providers`,
+  `confirm_order`, `cancel_order`, `submit_order_to_fulfillment`, `estimate_order_costs`,
+  `list_my_stores`, `list_my_products`, `list_my_orders`, `get_order_details`,
+  `browse_catalog`, `get_garment_details` and `list_catalog_providers` have updated descriptions,
+  so clients may ask to approve them again.
+
 ## [0.23.1]
 
 ### Fixed
