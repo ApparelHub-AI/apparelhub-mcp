@@ -157,10 +157,20 @@ describe('where_its_listed', () => {
         sort: 'synced_at',
         dir: 'desc',
         group: 'workspace',
+        fulfillment_provider: 'mp-1',
+        synced_after: '2026-01-01',
+        synced_before: '2026-01-31',
+        listed_after: '2026-02-01',
+        listed_before: '2026-02-28',
       },
       fakeContext(api),
     );
     const url = calls[0].url;
+    expect(url).toContain('fulfillment_provider=mp-1');
+    expect(url).toContain('synced_after=2026-01-01');
+    expect(url).toContain('synced_before=2026-01-31');
+    expect(url).toContain('listed_after=2026-02-01');
+    expect(url).toContain('listed_before=2026-02-28');
     expect(url).toContain('all_workspaces=false');
     expect(url).toContain('workspace=w-1');
     expect(url).toContain('provider=WooCommerce');
@@ -176,5 +186,30 @@ describe('where_its_listed', () => {
   it('mappers survive empty input', () => {
     expect(mapStorefront({}).stores).toEqual([]);
     expect(mapRow({}).cells).toEqual({});
+  });
+
+  it('carries ordered / last_ordered_at on rows, totals.ordered and the provider picker', async () => {
+    const matrix = {
+      ...MATRIX,
+      rows: [
+        { ...MATRIX.rows[0], ordered: true, last_ordered_at: '2026-03-01T12:00:00' },
+        { ...MATRIX.rows[1] },
+      ],
+      totals: { ...MATRIX.totals, ordered: 1 },
+      fulfillment_providers: [{ uuid: 'mp-1', name: 'Printful' }],
+    };
+    const { api } = apiRecording(matrix);
+    const res = (await whereItsListed.handler({ filter: 'ordered', sort: 'last_ordered_at' }, fakeContext(api))) as Record<string, any>;
+    expect(res.rows[0].ordered).toBe(true);
+    expect(res.rows[0].last_ordered_at).toBe('2026-03-01T12:00:00');
+    expect(res.rows[1].ordered).toBe(false);
+    expect(res.rows[1].last_ordered_at).toBeNull();
+    expect(res.totals.ordered).toBe(1);
+    expect(res.fulfillment_providers).toEqual([{ provider_uuid: 'mp-1', name: 'Printful' }]);
+  });
+
+  it('rejects a date that is not YYYY-MM-DD before calling the API', () => {
+    expect(whereItsListed.inputSchema.safeParse({ synced_after: 'March' }).success).toBe(false);
+    expect(whereItsListed.inputSchema.safeParse({ listed_before: '2026-02-28' }).success).toBe(true);
   });
 });
