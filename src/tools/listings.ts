@@ -73,8 +73,9 @@ export function mapRow(raw: unknown): Record<string, unknown> {
     cells,
   };
   if (bool(raw, 'in_no_store')) out.in_no_store = true;
-  for (const k of ['created_at', 'updated_at', 'synced_at', 'listed_at'])
+  for (const k of ['created_at', 'updated_at', 'synced_at', 'listed_at', 'last_ordered_at'])
     out[k] = str(raw, k) ?? null;
+  out.ordered = bool(raw, 'ordered') ?? false;
   const ws = isRecord(raw) && isRecord(raw.workspace) ? raw.workspace : undefined;
   out.workspace = ws ? { workspace_uuid: str(ws, 'uuid'), name: str(ws, 'name') } : null;
   const storeCells = isRecord(raw) && isRecord(raw.store_cells) ? raw.store_cells : {};
@@ -110,14 +111,17 @@ export const whereItsListed = defineTool({
     "shop) with every ApparelHub store connected to each and the shop's `admin_url`; `rows` are " +
     'products ApparelHub made (`kind: product`, one row however many stores hold it) and the ' +
     "merchant's own channel listings (`kind: tracked`, one row per shop), each with created_at / " +
-    'updated_at / synced_at / listed_at and `store_cells` (every store-by-storefront status); each `cells[<storefront ' +
+    'updated_at / synced_at / listed_at, `ordered` + `last_ordered_at` (a yes/no from non-cancelled orders; ' +
+    'counts and revenue are on the analytics tools) and `store_cells` (every store-by-storefront status); each `cells[<storefront ' +
     'key>]` gives the status there (listed / in_progress / failed / not_listed / draft / archived) ' +
     'and `managed_by`: `apparelhub` (ApparelHub made and syncs it) or `channel` (the merchant made ' +
     'it on the channel and manages it there; it is on sale but cannot be changed from ApparelHub). ' +
     'A missing cell means the product is in no store connected to that shop. Use this instead of ' +
     'composing stores x products x tracked listings yourself; it is the same data the merchant sees ' +
     "on their Where it's listed page. Rows are paged; `totals` and `storefronts` describe the whole " +
-    'filtered set. Read-only.',
+    'filtered set, and `fulfillment_providers` lists the providers to narrow by. Narrow by time and provider ' +
+    'to answer "what went live on TikTok Shop this week" (provider + listed_after) or "what did I sync with ' +
+    'Printful before October" (fulfillment_provider + synced_before). Read-only.',
   inputSchema: z.object({
     all_workspaces: z
       .boolean()
@@ -136,20 +140,54 @@ export const whereItsListed = defineTool({
       .describe(
         'Only storefronts on this sales channel, by name (e.g. "WooCommerce", "TikTok Shop").',
       ),
+    fulfillment_provider: z
+      .string()
+      .optional()
+      .describe(
+        'Only products made with this fulfillment provider (a uuid from `fulfillment_providers` in the ' +
+          'response), plus channel listings bound to one. An unknown uuid returns no rows.',
+      ),
     q: z.string().optional().describe('Product name contains this text.'),
     filter: z
-      .enum(['all', 'nowhere', 'failed', 'external'])
+      .enum(['all', 'nowhere', 'failed', 'external', 'ordered'])
       .optional()
       .describe(
         '"nowhere" = listed on no storefront; "failed" = a failed sync somewhere; "external" = only ' +
-          "the merchant's own channel listings. Default all.",
+          "the merchant's own channel listings; \"ordered\" = ordered at least once. Default all.",
       ),
+    synced_after: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .optional()
+      .describe(
+        'YYYY-MM-DD. Only rows synced with their fulfillment provider on or after this UTC day. A row ' +
+          'never synced matches neither bound.',
+      ),
+    synced_before: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .optional()
+      .describe('YYYY-MM-DD. Only rows synced with their fulfillment provider on or before this UTC day (inclusive).'),
+    listed_after: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .optional()
+      .describe(
+        'YYYY-MM-DD. Only rows that last went live on a sales channel on or after this UTC day. A row ' +
+          'never listed matches neither bound.',
+      ),
+    listed_before: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .optional()
+      .describe('YYYY-MM-DD. Only rows that last went live on a sales channel on or before this UTC day (inclusive).'),
     sort: z
-      .enum(['name', 'listed_at', 'created_at', 'updated_at', 'synced_at'])
+      .enum(['name', 'listed_at', 'created_at', 'updated_at', 'synced_at', 'last_ordered_at'])
       .optional()
       .describe(
         'Row order. listed_at = last time it went live on a shop; synced_at = last sync to its ' +
-          'fulfillment provider. Rows without the value come last either way. Default name.',
+          'fulfillment provider; last_ordered_at = latest non-cancelled order. Rows without the value ' +
+          'come last either way. Default name.',
       ),
     dir: z.enum(['asc', 'desc']).optional().describe('Default asc.'),
     group: z
@@ -175,8 +213,13 @@ export const whereItsListed = defineTool({
         all_workspaces: all ? 'true' : 'false',
         store: input.store,
         provider: input.provider,
+        fulfillment_provider: input.fulfillment_provider,
         q: input.q,
         filter: input.filter,
+        synced_after: input.synced_after,
+        synced_before: input.synced_before,
+        listed_after: input.listed_after,
+        listed_before: input.listed_before,
         sort: input.sort,
         dir: input.dir,
         group: input.group,
@@ -210,8 +253,13 @@ export const whereItsListed = defineTool({
         listed_nowhere: num(totalsRaw, 'listed_nowhere') ?? 0,
         failed: num(totalsRaw, 'failed') ?? 0,
         external: num(totalsRaw, 'external') ?? 0,
+        ordered: num(totalsRaw, 'ordered') ?? 0,
         per_storefront: isRecord(totalsRaw.per_storefront) ? totalsRaw.per_storefront : {},
       },
+      fulfillment_providers: asArray(isRecord(raw) ? raw.fulfillment_providers : undefined).map((m) => ({
+        provider_uuid: str(m, 'uuid'),
+        name: str(m, 'name'),
+      })),
       note:
         'A cell managed_by "channel" is a listing the merchant made on the channel: ApparelHub shows ' +
         'it but cannot change it; bind_tracked_listing makes ApparelHub fulfil it. To act on a ' +

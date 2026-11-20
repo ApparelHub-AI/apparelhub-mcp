@@ -9,6 +9,17 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.25.2]
+
+### Added
+- `where_its_listed`: narrow by time and by fulfillment provider, and see whether a row ever sold.
+  `synced_after` / `synced_before` / `listed_after` / `listed_before` (YYYY-MM-DD, inclusive UTC days;
+  a row without the timestamp matches neither bound), `fulfillment_provider` (a uuid from the new
+  `fulfillment_providers` list in the result; channel listings bound to a product count as that
+  product), `filter: "ordered"` and `sort: "last_ordered_at"`. Every row carries `ordered` and
+  `last_ordered_at`, a yes/no from non-cancelled orders (counts and revenue stay on the analytics
+  tools); an unbound channel listing is never `ordered`. `totals.ordered` added. Needs the platform API of the same day.
+
 ## [0.25.1]
 
 ### Added
