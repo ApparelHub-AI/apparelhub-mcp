@@ -11,6 +11,7 @@ import { issueTools } from './issues.js';
 import { analyticsTools } from './analytics.js';
 import { channelTools } from './channel.js';
 import { trackedListingTools } from './tracked.js';
+import { listingTools } from './listings.js';
 import { collectionTools } from './collections.js';
 import { transferTools } from './transfer.js';
 import { workspaceTools } from './workspaces.js';
@@ -40,6 +41,8 @@ export function allTools(): ToolDef[] {
     ...channelTools,
     // Catalog import: the merchant's existing channel listings, tracked read-only (#1326).
     ...trackedListingTools,
+    // Where everything is listed, by storefront, across stores and workspaces.
+    ...listingTools,
     ...collectionTools,
     ...transferTools,
     // Workspace & team management for agency accounts (create/assign/invite).

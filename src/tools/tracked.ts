@@ -105,6 +105,11 @@ function mapChannelState(raw: unknown): Record<string, unknown> {
     channel: str(raw, 'channel') ?? null,
     catalog_read: bool(raw, 'catalog_read') ?? false,
     last_run: mapImportRun(isRecord(raw) ? raw.last_run : undefined),
+    // The SHOP's latest import across every store connected to it. One shop is often connected
+    // under several stores; "never imported" means this is null, not last_run.
+    shop_url: str(raw, 'shop_url') ?? null,
+    is_primary_for_shop: bool(raw, 'is_primary_for_shop') ?? false,
+    shop_last_run: mapImportRun(isRecord(raw) ? raw.shop_last_run : undefined),
   };
 }
 
@@ -238,7 +243,9 @@ export const listTrackedListings = defineTool({
   name: 'list_tracked_listings',
   description:
     "The listings imported from a store's sales channels with import_channel_catalog, plus each " +
-    "channel's import state (catalog_read, last_run). Each listing is the channel's view: title, " +
+    "channel's import state (catalog_read, last_run, and shop_last_run: the shop's latest import " +
+    'across every store connected to it; offer an import only when THAT is null). Each listing is ' +
+    "the channel's view: title, " +
     'description, price, currency, channel_status (live/draft/archived/unknown), SKUs, variants and ' +
     "the channel's own image_url. made_in_apparelhub + product_uuid mark a listing ApparelHub " +
     'created. scope "external" returns only the merchant\'s own listings (what they sold before ' +
@@ -300,13 +307,15 @@ const BIND_REFUSALS: Record<string, string> = {
   product_not_synced_to_provider:
     'Sync the product to its fulfillment provider first (sync_to_fulfillment), then bind again.',
   variants_not_synced_to_provider:
-    'Some of the product\'s variants are not set up with the fulfillment provider. Re-sync the product to fulfillment, then bind again.',
+    "Some of the product's variants are not set up with the fulfillment provider. Re-sync the product to fulfillment, then bind again.",
   product_not_active: 'Activate the product (update_product status ACTIVE), then bind again.',
   product_not_in_store: 'Use a product that is in this same store, or add it to the store first.',
   product_has_no_variants: 'Add variants to the product (add_variants), then bind again.',
   listing_made_in_apparelhub: 'Nothing to do: ApparelHub made this listing and already fulfils it.',
-  listing_already_bound: 'It is already bound. Call unbind_tracked_listing first to bind a different product.',
-  listing_removed: 'The listing is no longer on the channel, so there is nothing to fulfil. Re-import to refresh.',
+  listing_already_bound:
+    'It is already bound. Call unbind_tracked_listing first to bind a different product.',
+  listing_removed:
+    'The listing is no longer on the channel, so there is nothing to fulfil. Re-import to refresh.',
   listing_not_bound: 'Nothing to do: the listing is not bound.',
 };
 
@@ -325,28 +334,31 @@ function bindRefusal(err: unknown): never {
 export const bindTrackedListing = defineTool({
   name: 'bind_tracked_listing',
   description:
-    "Make a tracked listing (a product the merchant already sells on their channel that ApparelHub " +
-    "did not make) FULFILLABLE by binding it to an ApparelHub product, so ApparelHub sends that " +
+    'Make a tracked listing (a product the merchant already sells on their channel that ApparelHub ' +
+    'did not make) FULFILLABLE by binding it to an ApparelHub product, so ApparelHub sends that ' +
     "listing's orders to the product's fulfillment provider as ordinary orders. Build the product " +
-    "first the normal way (their artwork on one of our blanks, variants added, synced to " +
+    'first the normal way (their artwork on one of our blanks, variants added, synced to ' +
     "fulfillment), in the same store. The merchant's channel listing is NOT changed, and while " +
-    "bound the product cannot be synced to that channel (it would duplicate their listing). Tell " +
+    'bound the product cannot be synced to that channel (it would duplicate their listing). Tell ' +
     "the merchant both things. Every variant on the listing must map to one of the product's " +
     "variants: options are auto-matched by name ('Black / Medium' -> Black, M) and variant_map " +
-    "supplies or overrides the rest. This tool PREVIEWS first and only binds when everything maps " +
-    "and the product can be made; otherwise it returns bound: false with `unmapped` (the channel " +
-    "variants left) and `product_variants` (the choices). Ask the merchant or choose by option " +
-    "names, then call again with variant_map. TikTok Shop listings carry no option names, so they " +
+    'supplies or overrides the rest. This tool PREVIEWS first and only binds when everything maps ' +
+    'and the product can be made; otherwise it returns bound: false with `unmapped` (the channel ' +
+    'variants left) and `product_variants` (the choices). Ask the merchant or choose by option ' +
+    'names, then call again with variant_map. TikTok Shop listings carry no option names, so they ' +
     "always need variant_map. Find listing_uuid with list_tracked_listings (scope 'external').",
   inputSchema: z.object({
     store_uuid: z.string().min(1).describe('The store uuid.'),
     listing_uuid: z.string().min(1).describe('The tracked listing uuid (list_tracked_listings).'),
-    product_uuid: z.string().min(1).describe('The ApparelHub product that will fulfil it (same store).'),
+    product_uuid: z
+      .string()
+      .min(1)
+      .describe('The ApparelHub product that will fulfil it (same store).'),
     variant_map: z
       .record(z.string(), z.string())
       .optional()
       .describe(
-        "Channel variant id -> ApparelHub variant uuid, for options that do not auto-match. A " +
+        'Channel variant id -> ApparelHub variant uuid, for options that do not auto-match. A ' +
           'listing with no variants is keyed by its own external_id.',
       ),
     workspace: workspaceField,
@@ -355,7 +367,8 @@ export const bindTrackedListing = defineTool({
   handler: async (input, ctx) => {
     const path = `store/${enc(input.store_uuid)}/catalog/${enc(input.listing_uuid)}/bind`;
     const body: Record<string, unknown> = { product_uuid: input.product_uuid };
-    if (input.variant_map && Object.keys(input.variant_map).length) body.variant_map = input.variant_map;
+    if (input.variant_map && Object.keys(input.variant_map).length)
+      body.variant_map = input.variant_map;
     try {
       const preview = await ctx.api.post(path, {
         body: { ...body, dry_run: true },
@@ -376,13 +389,16 @@ export const bindTrackedListing = defineTool({
             : 'Choose a product variant for each entry in `unmapped` (ask the merchant if the option names do not make it obvious), then call bind_tracked_listing again with variant_map.',
         };
       }
-      const raw = await ctx.api.post(path, { body, workspace: input.workspace, signal: ctx.signal });
+      const raw = await ctx.api.post(path, {
+        body,
+        workspace: input.workspace,
+        signal: ctx.signal,
+      });
       return {
         bound: true,
         binding: isRecord(raw) && isRecord(raw.binding) ? raw.binding : null,
         listing: mapTrackedListing(isRecord(raw) ? raw.listing : undefined),
-        note:
-          "Orders for this listing are now fulfilled by ApparelHub through this product. The merchant's listing on the channel was not changed.",
+        note: "Orders for this listing are now fulfilled by ApparelHub through this product. The merchant's listing on the channel was not changed.",
       };
     } catch (err) {
       return bindRefusal(err);
@@ -393,7 +409,7 @@ export const bindTrackedListing = defineTool({
 export const unbindTrackedListing = defineTool({
   name: 'unbind_tracked_listing',
   description:
-    "Undo bind_tracked_listing. The listing is tracked again and its new orders are recorded as " +
+    'Undo bind_tracked_listing. The listing is tracked again and its new orders are recorded as ' +
     "fulfilled by the merchant's own store (fulfilled_by: 'merchant'), not sent to a provider. " +
     'Orders already submitted are not affected. Nothing changes on the channel.',
   inputSchema: z.object({
@@ -408,7 +424,10 @@ export const unbindTrackedListing = defineTool({
         workspace: input.workspace,
         signal: ctx.signal,
       });
-      return { unbound: true, note: "New orders for this listing are recorded as fulfilled by the merchant's store." };
+      return {
+        unbound: true,
+        note: "New orders for this listing are recorded as fulfilled by the merchant's store.",
+      };
     } catch (err) {
       return bindRefusal(err);
     }

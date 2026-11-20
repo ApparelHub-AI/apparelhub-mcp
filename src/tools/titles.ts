@@ -94,6 +94,7 @@ export const TOOL_TITLES: Readonly<Record<string, string>> = {
   list_tracked_listings: 'List tracked listings',
   bind_tracked_listing: 'Fulfill a tracked listing through ApparelHub',
   unbind_tracked_listing: 'Stop fulfilling a tracked listing',
+  where_its_listed: 'Where every product is listed',
   list_collections: 'List collections',
   get_collection: 'Get collection',
   create_collection: 'Create collection',
