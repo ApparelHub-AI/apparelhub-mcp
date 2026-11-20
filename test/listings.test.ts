@@ -154,6 +154,9 @@ describe('where_its_listed', () => {
         q: 'tee',
         limit: 50,
         offset: 10,
+        sort: 'synced_at',
+        dir: 'desc',
+        group: 'workspace',
       },
       fakeContext(api),
     );
@@ -165,6 +168,9 @@ describe('where_its_listed', () => {
     expect(url).toContain('q=tee');
     expect(url).toContain('limit=50');
     expect(url).toContain('offset=10');
+    expect(url).toContain('sort=synced_at');
+    expect(url).toContain('dir=desc');
+    expect(url).toContain('group=workspace');
   });
 
   it('mappers survive empty input', () => {

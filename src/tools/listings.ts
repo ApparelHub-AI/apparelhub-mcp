@@ -73,6 +73,19 @@ export function mapRow(raw: unknown): Record<string, unknown> {
     cells,
   };
   if (bool(raw, 'in_no_store')) out.in_no_store = true;
+  for (const k of ['created_at', 'updated_at', 'synced_at', 'listed_at'])
+    out[k] = str(raw, k) ?? null;
+  const ws = isRecord(raw) && isRecord(raw.workspace) ? raw.workspace : undefined;
+  out.workspace = ws ? { workspace_uuid: str(ws, 'uuid'), name: str(ws, 'name') } : null;
+  const storeCells = isRecord(raw) && isRecord(raw.store_cells) ? raw.store_cells : {};
+  const perStore: Record<string, Record<string, unknown>> = {};
+  for (const [storeUuid, cellsOfStore] of Object.entries(storeCells)) {
+    if (!isRecord(cellsOfStore)) continue;
+    perStore[storeUuid] = {};
+    for (const [key, cell] of Object.entries(cellsOfStore))
+      perStore[storeUuid][key] = mapCell(cell);
+  }
+  out.store_cells = perStore;
   if (kind === 'tracked') {
     out.external_id = str(raw, 'external_id') ?? null;
     const listing = isRecord(raw) && isRecord(raw.listing) ? raw.listing : undefined;
@@ -96,7 +109,8 @@ export const whereItsListed = defineTool({
     'default) all of their workspaces. One table: `storefronts` are the real shops (provider + ' +
     "shop) with every ApparelHub store connected to each and the shop's `admin_url`; `rows` are " +
     'products ApparelHub made (`kind: product`, one row however many stores hold it) and the ' +
-    "merchant's own channel listings (`kind: tracked`, one row per shop); each `cells[<storefront " +
+    "merchant's own channel listings (`kind: tracked`, one row per shop), each with created_at / " +
+    'updated_at / synced_at / listed_at and `store_cells` (every store-by-storefront status); each `cells[<storefront ' +
     'key>]` gives the status there (listed / in_progress / failed / not_listed / draft / archived) ' +
     'and `managed_by`: `apparelhub` (ApparelHub made and syncs it) or `channel` (the merchant made ' +
     'it on the channel and manages it there; it is on sale but cannot be changed from ApparelHub). ' +
@@ -130,6 +144,20 @@ export const whereItsListed = defineTool({
         '"nowhere" = listed on no storefront; "failed" = a failed sync somewhere; "external" = only ' +
           "the merchant's own channel listings. Default all.",
       ),
+    sort: z
+      .enum(['name', 'listed_at', 'created_at', 'updated_at', 'synced_at'])
+      .optional()
+      .describe(
+        'Row order. listed_at = last time it went live on a shop; synced_at = last sync to its ' +
+          'fulfillment provider. Rows without the value come last either way. Default name.',
+      ),
+    dir: z.enum(['asc', 'desc']).optional().describe('Default asc.'),
+    group: z
+      .enum(['none', 'workspace'])
+      .optional()
+      .describe(
+        '"workspace": rows come back grouped by their first store\'s workspace, each carrying `workspace`.',
+      ),
     limit: z
       .number()
       .int()
@@ -149,6 +177,9 @@ export const whereItsListed = defineTool({
         provider: input.provider,
         q: input.q,
         filter: input.filter,
+        sort: input.sort,
+        dir: input.dir,
+        group: input.group,
         limit: input.limit,
         offset: input.offset,
       },
@@ -168,6 +199,9 @@ export const whereItsListed = defineTool({
       storefronts,
       rows,
       total_rows: num(raw, 'total_rows') ?? rows.length,
+      sort: str(raw, 'sort') ?? input.sort ?? 'name',
+      dir: str(raw, 'dir') ?? input.dir ?? 'asc',
+      group: str(raw, 'group') ?? input.group ?? 'none',
       limit: num(raw, 'limit') ?? input.limit ?? 200,
       offset: num(raw, 'offset') ?? input.offset ?? 0,
       totals: {
