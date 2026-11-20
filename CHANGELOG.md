@@ -9,6 +9,14 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.25.1]
+
+### Added
+- `where_its_listed`: `sort` (name, listed_at, created_at, updated_at, synced_at; rows without the
+  value come last either way), `dir`, and `group: "workspace"`. Rows carry the four timestamps,
+  `workspace`, and `store_cells` (every store-by-storefront status before the best-per-storefront
+  merge), so an agent can answer "which store lists it where" without a second read.
+
 ## [0.25.0]
 
 ### Added
