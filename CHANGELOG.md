@@ -9,6 +9,24 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.25.0]
+
+### Added
+- **`where_its_listed`**: one table of where every product is listed, by STOREFRONT, across all of
+  the merchant's stores and, by default, all of their workspaces. A storefront is one real shop
+  (provider + shop) however many ApparelHub stores are connected to it, each named with its
+  workspace and the shop's `admin_url`. A product ApparelHub made is one row however many stores
+  hold it; a listing the merchant made on the channel is one row per shop. Each cell carries
+  `managed_by`: `apparelhub` (act on it through its `store_uuid`) or `channel` (the merchant's own
+  listing; report it, do not try to sync it). It is the same data the merchant's Where it's listed
+  page shows. Filters: workspace, store, provider, text, and all / nowhere / failed / external.
+
+### Changed
+- `list_tracked_listings` channel state now carries `shop_url`, `is_primary_for_shop` and
+  `shop_last_run`: the shop's latest import across every store connected to it. Offer an import
+  when `shop_last_run` is null, not `last_run`, so a shop imported under a sibling store is not
+  imported again.
+
 ## [0.24.0]
 
 ### Added
