@@ -385,6 +385,25 @@ export function mapHttpError(
         'Back off and retry after the retry_after window. Switching models will NOT help: every model call rides the same key and endpoint. Do not keep hammering.',
     });
   }
+  if (status === 502 && extractField(body, 'error_code') === 'provider_resubmit_refused') {
+    // A provider-failed order was resubmitted (submit_order_to_fulfillment / confirm_order)
+    // and the fulfillment provider refused it AGAIN. The 502 status is the API being honest
+    // about where the refusal came from, not a gateway hiccup: the generic 5xx branch below
+    // would tell the agent to "retry shortly", and retrying without a change on the
+    // provider account fails identically. The order is unchanged and still flagged, nothing
+    // was charged, no second provider order exists.
+    return new AhError({
+      httpStatus: status,
+      code: 'provider_refused',
+      message: message ?? 'The fulfillment provider refused to take the order again.',
+      apiCode: 'provider_resubmit_refused',
+      suggestion:
+        'Not transient: do NOT retry. The message is the provider\'s own reason (usually billing, ' +
+        'e.g. no payment method on the merchant\'s provider account). The order is unchanged, still ' +
+        'flagged with needs_attention, and nothing was charged. Tell the user the reason, let them fix ' +
+        'it on their provider account, then resubmit the SAME order once they say it is done.',
+    });
+  }
   if (status >= 500) {
     return new AhError({
       httpStatus: status,

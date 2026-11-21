@@ -15,6 +15,7 @@ ApparelHub had received no request at all.
 | `request_not_sent` | The HTTP request **never completed** — no response was received from ApparelHub (DNS, connection refused/reset, transport failure), even after the client's own retries. | Do NOT attribute this to ApparelHub — it is a failure at or near the caller. Retry; if several unrelated tools fail at the same moment, suspect the calling agent's own runtime or network. |
 | `cancelled` | The caller aborted the request (explicit AbortSignal). | Nothing — this was intentional. |
 | `upstream_unavailable` | ApparelHub responded with a 5xx. | Transient platform-side issue; retry shortly (generations also fall back to another model automatically). |
+| `provider_refused` | A 502 whose body carries `error_code: provider_resubmit_refused`: a provider-failed order was resubmitted and the fulfillment provider refused it again. | Not transient. The message is the provider's own reason (usually billing). The order is unchanged and nothing was charged; tell the user, let them fix it on the provider account, then resubmit the same order. |
 | `generation_timeout` | An async generation never completed within the poll budget. | Retry, or use a faster model; the fallback ladder treats this as fallbackable. |
 | `generation_failed` | The generation failed for a non-rate-limit reason (e.g. content policy). | Read the message; usually surface to the user rather than retrying blindly. |
 

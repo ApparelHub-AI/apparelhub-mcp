@@ -250,6 +250,25 @@ describe('mapHttpError', () => {
   it('500 -> upstream_unavailable', () => {
     expect(mapHttpError(503, {}).code).toBe('upstream_unavailable');
   });
+
+  // A refused resubmit of a provider-failed order is a 502 by contract. The generic 5xx
+  // suggestion ("retry shortly") is exactly wrong for it: nothing changes until the merchant
+  // fixes the cause on the provider account, so an agent following it would loop.
+  it('502 provider_resubmit_refused -> provider_refused, never retry', () => {
+    const e = mapHttpError(502, {
+      error_code: 'provider_resubmit_refused',
+      message: 'Printful refused the order again: No payment method added',
+    });
+    expect(e.code).toBe('provider_refused');
+    expect(e.apiCode).toBe('provider_resubmit_refused');
+    expect(e.message).toContain('No payment method added');
+    expect(e.suggestion).toMatch(/do NOT retry/);
+    expect(e.toPayload().error.retry_after).toBeUndefined();
+  });
+
+  it('a plain 502 is still upstream_unavailable', () => {
+    expect(mapHttpError(502, { message: 'Bad Gateway' }).code).toBe('upstream_unavailable');
+  });
 });
 
 describe('parseRetryAfter', () => {
