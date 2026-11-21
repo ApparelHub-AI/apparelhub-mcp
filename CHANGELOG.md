@@ -9,6 +9,21 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.25.3]
+
+### Changed
+- `submit_order_to_fulfillment` and `confirm_order` recover a PROVIDER-FAILED order in place
+  (`needs_attention.kind` `provider_failed`, `recovery_action` `resubmit_to_fulfillment`): the
+  platform re-confirms the SAME provider order, never a second one. Both tools now return
+  `resubmitted: true` when that happened. A refused resubmit (API 502 `provider_resubmit_refused`)
+  maps to the new error code `provider_refused` with the provider's reason and a do-not-retry
+  suggestion, instead of the generic `upstream_unavailable` whose advice is "retry shortly".
+- `get_order_details` and `check_order_status` descriptions explain `needs_attention.reason` and
+  `recovery_action`, that a provider-failed order reads `cancelled` + `status: failed` (not on hold)
+  and is no longer polled, and that an order cancelled after the failure cannot be resubmitted.
+  `needs_attention` was already passed through untouched, so `reason` and `recovery_action` arrive
+  as the platform sends them. Needs the platform API of the same day.
+
 ## [0.25.2]
 
 ### Added

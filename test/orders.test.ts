@@ -130,6 +130,19 @@ describe('cancel_order', () => {
 });
 
 describe('confirm_order', () => {
+  it('lifts resubmitted:true out of provider_response for a recovered provider-failed order', async () => {
+    const { api } = apiFrom([
+      {
+        message: 'Order resubmitted to Printful.',
+        order: { uuid: 'o1', status: 'pending', fulfillment_status: 'submitted' },
+        provider_response: { resubmitted: true, external_id: '181' },
+      },
+    ]);
+    const res = (await confirmOrder.handler({ order_uuid: 'o1' }, fakeContext(api))) as any;
+    expect(res.resubmitted).toBe(true);
+    expect(res.fulfillment_status).toBe('submitted');
+  });
+
   it('POSTs to confirm and relays the provider_response', async () => {
     const { api, calls } = apiFrom([
       { message: 'Order confirmed successfully', provider_response: { ok: true } },
@@ -142,6 +155,34 @@ describe('confirm_order', () => {
 });
 
 describe('submit_order_to_fulfillment', () => {
+  // A provider-failed order confirmed again in place reports `resubmitted: true` at the
+  // top level (and inside `fulfillment`). Dropping it would make a recovery indistinguishable
+  // from a first submit, and an agent could not tell the user the provider order was reused.
+  it('surfaces resubmitted:true for a recovered provider-failed order', async () => {
+    const { api } = apiFrom([
+      {
+        success: true,
+        auto_submitted: true,
+        resubmitted: true,
+        external_id: '181',
+        message: 'Order resubmitted to Printful.',
+        fulfillment: { external_id: '181', resubmitted: true, status: 'pending' },
+      },
+    ]);
+    const res = (await submitOrderToFulfillment.handler(
+      { order_uuid: 'o1' },
+      fakeContext(api),
+    )) as any;
+    expect(res.resubmitted).toBe(true);
+    expect(res.provider_external_id).toBe('181');
+  });
+
+  it('does not invent resubmitted on a first submit', async () => {
+    const { api } = apiFrom([{ success: true, auto_submitted: true, fulfillment: { external_id: '1' } }]);
+    const res = (await submitOrderToFulfillment.handler({ order_uuid: 'o1' }, fakeContext(api))) as any;
+    expect(res.resubmitted).toBeUndefined();
+  });
+
   it('POSTs to submit-fulfillment and surfaces the provider external id', async () => {
     const { api, calls } = apiFrom([
       { success: true, auto_submitted: true, fulfillment: { external_id: '164539194' } },

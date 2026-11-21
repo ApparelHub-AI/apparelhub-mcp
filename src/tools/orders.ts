@@ -171,7 +171,7 @@ export const cancelOrder = defineTool({
 export const confirmOrder = defineTool({
   name: 'confirm_order',
   description:
-    'Confirm a DRAFT order to send it into production at the fulfillment provider. Only works for orders in "draft" status that have already been submitted to a provider (have a provider order id). Use after submit_order_to_fulfillment on a "prepare, then I confirm" store. Toolbox POD: confirming is what PAYS for the order, charged to the card on the merchant\'s own Toolbox POD account within the spending limit they set when connecting; with no spending limit on, the order waits for the merchant to pay. Once paid it is final (cancellation is usually not possible). If the result carries `hold_details`, the order was NOT confirmed: read get_order_details guidance.',
+    'Confirm a DRAFT order to send it into production at the fulfillment provider. Only works for orders in "draft" status that have already been submitted to a provider (have a provider order id). Use after submit_order_to_fulfillment on a "prepare, then I confirm" store. Toolbox POD: confirming is what PAYS for the order, charged to the card on the merchant\'s own Toolbox POD account within the spending limit they set when connecting; with no spending limit on, the order waits for the merchant to pay. Once paid it is final (cancellation is usually not possible). If the result carries `hold_details`, the order was NOT confirmed: read get_order_details guidance. Also the recovery for a PROVIDER-FAILED order (get_order_details shows `needs_attention.kind` = `provider_failed` with `recovery_action` = `resubmit_to_fulfillment`): once the merchant has fixed the cause named in `needs_attention.reason` on their provider account, this confirms the SAME provider order again, never a second one, so nothing is charged twice; `resubmitted: true` in the result means it took and polling resumes. If the provider refuses again the tool fails with `provider_refused` carrying the provider\'s reason: do not retry, report it. A `conflict` with `order_already_submitted_to_provider` on a cancelled order means the merchant cancelled it after the failure; it cannot be resubmitted.',
   inputSchema: orderInput,
   annotations: { idempotentHint: true, openWorldHint: true },
   handler: async (input, ctx) => {
@@ -181,6 +181,10 @@ export const confirmOrder = defineTool({
     });
     const out = actionResult(input.order_uuid, raw);
     if (isRecord(raw) && raw.provider_response !== undefined) out.provider_response = raw.provider_response;
+    // A provider-failed order confirmed again in place reports it inside provider_response; lift it
+    // so the agent reads one flag in one place whichever of the two recovery tools it used.
+    const resubmitted = isRecord(raw) && isRecord(raw.provider_response) ? raw.provider_response.resubmitted : undefined;
+    if (resubmitted === true) out.resubmitted = true;
     return out;
   },
 });
@@ -188,7 +192,7 @@ export const confirmOrder = defineTool({
 export const submitOrderToFulfillment = defineTool({
   name: 'submit_order_to_fulfillment',
   description:
-    'Manually submit an order to its fulfillment provider (Printful/Printify) as a DRAFT. For sales-channel orders this auto-fetches the recipient from the channel. Use to un-stick a paid order that never got submitted; confirm it afterward with confirm_order if the store requires confirmation. An order going to a country its provider cannot deliver to (see `ships_to`) is refused and stays held with `hold_details` code `destination_unsupported`; resubmitting will not help.',
+    'Manually submit an order to its fulfillment provider (Printful/Printify) as a DRAFT. For sales-channel orders this auto-fetches the recipient from the channel. Use to un-stick a paid order that never got submitted; confirm it afterward with confirm_order if the store requires confirmation. An order going to a country its provider cannot deliver to (see `ships_to`) is refused and stays held with `hold_details` code `destination_unsupported`; resubmitting will not help. Also the recovery for a PROVIDER-FAILED order (`needs_attention.kind` = `provider_failed`, `recovery_action` = `resubmit_to_fulfillment`; the provider already holds the order and refused it, usually billing): once the merchant has fixed the cause in `needs_attention.reason` on their provider account, call this on the SAME order. It re-confirms the existing provider order, never creates a second one, so there is no double charge; the result carries `resubmitted: true` and `provider_external_id`, the order goes back to pending/submitted and polling resumes. If the provider refuses again the tool fails with `provider_refused` and the provider\'s reason: do not retry, report it to the user. An order the merchant cancelled after the failure is not recoverable (`conflict`, `order_already_submitted_to_provider`); only a new order can replace it.',
   inputSchema: orderInput,
   annotations: { idempotentHint: true, openWorldHint: true },
   handler: async (input, ctx) => {
@@ -204,6 +208,11 @@ export const submitOrderToFulfillment = defineTool({
     const payload = orderPayload(raw);
     const fulfillment = isRecord(raw) ? raw.fulfillment : undefined;
     if (isRecord(raw) && raw.auto_submitted !== undefined) out.auto_submitted = raw.auto_submitted;
+    // A provider-failed order confirmed again in place: top-level on the API body, mirrored in
+    // `fulfillment`. Without it the agent cannot tell a recovery from a first submit.
+    if (isRecord(raw) && (raw.resubmitted === true || (isRecord(fulfillment) && fulfillment.resubmitted === true))) {
+      out.resubmitted = true;
+    }
     const externalId =
       str(fulfillment, 'external_id') ?? str(payload, 'external_id', 'provider_external_id');
     if (externalId !== undefined) out.provider_external_id = externalId;
@@ -283,7 +292,7 @@ export const removeOrderItem = defineTool({
 export const checkOrderStatus = defineTool({
   name: 'check_order_status',
   description:
-    'Poll the fulfillment provider for the latest status of an order and update it locally (including any design-approval holds). Read-mostly refresh — safe to call repeatedly. Use to see whether an order has shipped or is on hold at the provider.',
+    'Poll the fulfillment provider for the latest status of an order and update it locally (including any design-approval holds). Read-mostly refresh, safe to call repeatedly. Use to see whether an order has shipped or is on hold at the provider. A result with `status` `cancelled` and `provider_status` `failed` is a PROVIDER-FAILED order: terminal on its own and no longer polled, but recoverable. Do not keep polling it; call get_order_details and read `needs_attention` (`reason`, `recovery_action`), then follow its guidance (fix the cause on the provider account, resubmit the SAME order with submit_order_to_fulfillment or confirm_order). A refresh never flips such an order back to on hold.',
   inputSchema: orderInput,
   annotations: { idempotentHint: true, openWorldHint: true },
   handler: async (input, ctx) => {
