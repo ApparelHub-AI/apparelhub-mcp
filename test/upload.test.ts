@@ -130,12 +130,12 @@ describe('upload_design', () => {
     expect(JSON.stringify(headers).toLowerCase()).not.toContain('x-api-key');
   });
 
-  it('hands back a presigned URL when given no bytes, and uploads nothing itself', async () => {
+  it('hands back a presigned URL when the caller opts in, and uploads nothing itself', async () => {
     const { api } = apiSequence([INITIATE]);
     const put = rawFetch([]); // any raw call at all would throw
 
     const res = (await uploadDesign.handler(
-      { filename: 'seal.png', content_type: 'image/png' },
+      { filename: 'seal.png', content_type: 'image/png', presigned: true },
       ctxWith(api, put.impl),
     )) as Record<string, unknown>;
 
@@ -143,7 +143,43 @@ describe('upload_design', () => {
     expect(res.upload_url).toBe(INITIATE.upload_url);
     expect(res.image_uuid).toBe('design-1');
     expect(String(res.next_step)).toContain('image_uuid="design-1"');
+    expect(String(res.important)).toContain('failed upload');
     expect(put.calls).toHaveLength(0);
+  });
+
+  // apparelhub-mcp#229: a chat-hosted agent passed only a filename (the file was
+  // attached in the conversation), got an upload_url it could never PUT to, and
+  // the reserved row became a failed tile. No file + no opt-in must reserve NOTHING.
+  it('refuses a call with no file and no opt-in, before reserving a design', async () => {
+    const { api, calls } = apiSequence([INITIATE]);
+    const put = rawFetch([]);
+
+    const err = await uploadDesign
+      .handler({ filename: 'artwork_3000x4000.png', title: 'back print' }, ctxWith(api, put.impl))
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(AhError);
+    expect((err as AhError).code).toBe('file_required');
+    expect((err as AhError).suggestion).toContain('apparelhub.ai/images/gallery');
+    expect(calls).toHaveLength(0); // no initiate: nothing left behind in the gallery
+    expect(put.calls).toHaveLength(0);
+  });
+
+  it('treats presigned: false the same as not opting in', async () => {
+    const { api, calls } = apiSequence([INITIATE]);
+    const err = await uploadDesign
+      .handler({ filename: 'seal.png', presigned: false }, ctxWith(api))
+      .catch((e: unknown) => e);
+    expect((err as AhError).code).toBe('file_required');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('steers the caller away from presigned mode unless it can PUT', () => {
+    const d = uploadDesign.description;
+    expect(d.indexOf('`source_url`')).toBeLessThan(d.indexOf('`presigned: true`'));
+    expect(d.indexOf('`image_base64`')).toBeLessThan(d.indexOf('`presigned: true`'));
+    expect(d).toContain('attached in a chat');
+    expect(d).toContain('file_required');
   });
 
   it('finishes a presigned upload when called back with the image_uuid', async () => {
