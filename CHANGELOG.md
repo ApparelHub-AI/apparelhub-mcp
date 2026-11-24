@@ -9,6 +9,27 @@ this package implements tool surface **v1**.
 
 ## [Unreleased]
 
+## [0.25.4]
+
+### Fixed
+- `upload_design` no longer reserves a design the caller cannot finish (#229). Called with no
+  `source_url`, no `image_base64` and no `image_uuid`, it used to fall straight into presigned mode:
+  it reserved a design on the platform and returned an `upload_url` to PUT to. A chat-hosted agent
+  (file attached in the conversation, no shell, no HTTP client) could do neither step, the call was
+  recorded as `ok`, and the reserved design surfaced in the merchant's gallery as a failed upload
+  30 minutes later. Presigned mode is now an explicit opt-in, `presigned: true`. Without a file or
+  the opt-in, the tool returns the new error code `file_required` and makes no API call at all. Its
+  suggestion names `source_url`, `image_base64`, `presigned: true` and, for a chat attachment with
+  none of those, asking the merchant to upload at apparelhub.ai/images/gallery.
+
+### Changed
+- The `upload_design` description leads with `source_url`, then `image_base64`, with presigned last
+  and only for callers that can PUT. It says that an image attached in a chat is usually not
+  something an agent can PUT or base64-encode. The presigned response carries an `important` note
+  that an unfinished upload is shown to the merchant as a failed one. Finishing or resuming with
+  `image_uuid` is unchanged. **Migration:** callers that relied on the no-argument presigned
+  default must now pass `presigned: true`.
+
 ## [0.25.3]
 
 ### Changed

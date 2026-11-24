@@ -426,15 +426,20 @@ export const uploadDesign = defineTool({
     'files — a logo, a brand mark, a cleared cover, a photograph — instead of generating ' +
     'something new. If a client says their mark must not be redrawn, use this; never ' +
     'regenerate or approximate a mark to work around a missing file.\n\n' +
-    'Three ways to supply the file, pick the cheapest one available:\n' +
-    '1. `source_url` — an https URL the server can fetch. One call, no context cost. Best ' +
-    'when the asset is already hosted or reachable by link (the link must not require sign-in).\n' +
-    '2. no source at all — returns a presigned `upload_url` you PUT the bytes to yourself, then ' +
-    'call this tool again with the returned `image_uuid` to finish. No context cost, full ' +
-    'resolution, and the right choice whenever you can make an HTTP request (curl, fetch, ' +
-    'requests).\n' +
-    '3. `image_base64` — inline bytes. Works anywhere, but costs roughly 350k tokens per ' +
-    'megabyte of file, so reserve it for small files when neither of the above is possible.\n\n' +
+    'Three ways to supply the file:\n' +
+    '1. `source_url` — an https URL the server can fetch. One call, no context cost, full ' +
+    'resolution. Use it whenever the file is hosted or reachable by a link that does not ' +
+    'require sign-in.\n' +
+    '2. `image_base64` — inline bytes you can actually read. Costs roughly 350k tokens per ' +
+    'megabyte of file, so small files only (4MB cap).\n' +
+    '3. `presigned: true` — ONLY if you can make an HTTP PUT yourself (a shell with curl, or ' +
+    'code that can call fetch/requests). Returns an `upload_url` you PUT the bytes to, then you ' +
+    'call this tool again with the returned `image_uuid` to finish. If you cannot do both steps, ' +
+    'do not use it: the reserved design is left behind as a failed tile in the merchant\'s gallery.\n' +
+    'An image the user attached in a chat is usually NOT a file you can PUT or base64-encode. ' +
+    'If there is no link to it, ask the merchant to upload it at apparelhub.ai/images/gallery ' +
+    '(or share a public link) rather than starting an upload you cannot finish. Calling this ' +
+    'tool with no file and no `presigned: true` reserves nothing and returns `file_required`.\n\n' +
     'Accepts PNG, JPEG, WEBP and SVG. SVG is the BEST input for a logo or mark: it is ' +
     'rendered server-side at print resolution, so it stays crisp at any size. Two things ' +
     'must be true of the SVG first — text converted to outlines, and any linked image ' +
@@ -454,6 +459,12 @@ export const uploadDesign = defineTool({
       .optional()
       .describe(
         'Base64-encoded file bytes (a data: URI is accepted). Expensive in context — prefer source_url or the presigned mode. Capped at 4MB decoded.',
+      ),
+    presigned: z
+      .boolean()
+      .optional()
+      .describe(
+        'Ask for a presigned upload_url instead of supplying the file. Only set this if you can PUT the bytes yourself AND call upload_design again with the image_uuid; otherwise the reserved design is left as a failed tile.',
       ),
     image_uuid: z
       .string()
@@ -501,7 +512,25 @@ export const uploadDesign = defineTool({
       });
     }
 
-    // --- no bytes: hand back a presigned URL ---------------------------------
+    // --- no bytes and no opt-in: refuse BEFORE reserving anything -----------
+    // apparelhub-mcp#229. This used to fall straight into presigned mode. A chat-
+    // hosted agent with the file attached in the conversation (no shell, no HTTP
+    // client) got an upload_url it could never PUT to, the call was recorded as
+    // `ok`, and the platform row reserved by initiate sat pending until the
+    // stalled-image reaper failed it — the merchant's first action became a failed
+    // tile with nothing pointing at the cause. Presigned is now an explicit claim
+    // by the caller ("I can PUT"), and the default is to reserve nothing.
+    if (!input.source_url && !input.image_base64 && !input.presigned) {
+      throw new AhError({
+        code: 'file_required',
+        message:
+          'No file was supplied, so nothing was uploaded and nothing was reserved. upload_design needs the artwork itself: a source_url, image_base64, or presigned: true if you can PUT the bytes yourself.',
+        suggestion:
+          'If the file is reachable by a public https link, pass it as source_url. If you can read the file bytes and it is small (4MB or less), pass image_base64. If you have a shell or HTTP client, call again with presigned: true and PUT the bytes to the returned upload_url. If the image was only attached in this chat and you have none of those, ask the merchant to upload it at apparelhub.ai/images/gallery (or share a public link), then use that design. Do not regenerate or redraw their artwork instead.',
+      });
+    }
+
+    // --- caller opted in: hand back a presigned URL --------------------------
     if (!input.source_url && !input.image_base64) {
       const contentType = (input.content_type ?? 'image/png') as ContentType;
       const filename = input.filename ?? `upload.${EXT_FOR[contentType]}`;
@@ -533,6 +562,10 @@ export const uploadDesign = defineTool({
           `PUT the file bytes to upload_url with header "Content-Type: ${contentType}" (for example: ` +
           `curl -X PUT -H "Content-Type: ${contentType}" --upload-file <path> "<upload_url>"), then call ` +
           `upload_design again with image_uuid="${imageUuid}" to finish and get the design_uuid.`,
+        important:
+          'A design has been reserved in the merchant\'s gallery. If the PUT or the finishing call does not ' +
+          'happen within the expiry, it is shown to the merchant as a failed upload. If you cannot complete ' +
+          'both steps, tell the merchant rather than leaving it.',
       };
     }
 
